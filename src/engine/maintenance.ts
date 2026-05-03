@@ -32,6 +32,7 @@ export function runBootstrapMaintenance(state: GlobalPluginState): void {
     // Group 2: moderate cost — after cheap queries complete
     await store.archiveOldTurns().catch(e => swallow.warn("maintenance:archiveOldTurns", e));
     await store.garbageCollectMemories().catch(e => swallow.warn("maintenance:gcMemories", e));
+    await store.garbageCollectConcepts().catch(e => swallow.warn("maintenance:gcConcepts", e));
     await backfillSessionTurnCounts(state);
   }).catch(e => swallow.warn("bootstrap:maintenance:group2", e));
 

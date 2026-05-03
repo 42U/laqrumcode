@@ -231,6 +231,7 @@ export declare class SurrealStore {
     private recordMaintenanceRun;
     runMemoryMaintenance(): Promise<void>;
     garbageCollectMemories(): Promise<number>;
+    garbageCollectConcepts(): Promise<number>;
     /**
      * Drop pending_work rows older than 7 days, regardless of status.
      *

@@ -38,17 +38,42 @@ const STOPWORDS = new Set([
   "after", "before", "between", "through",
 ]);
 
-// Common log/status acronyms that pass the ACRONYM regex but carry no concept value.
-// Without this stoplist, error logs and status outputs ("system went DOWN, status RED,
-// PID 1234") generate noise concepts that pollute recall.
+// Common log/status acronyms and English words that pass the ACRONYM regex
+// but carry no concept value. Without this stoplist, error logs, headers,
+// and conversational text generate noise concepts that pollute recall.
 const STOPLIST_ACRONYMS = new Set([
+  // Status/log noise
   "RED", "GREEN", "OK", "ERROR", "FAIL", "FAILED", "PASS", "PASSED",
   "UP", "DOWN", "ON", "OFF", "TRUE", "FALSE", "NULL", "NONE",
   "PID", "TID", "UID", "GID", "TODO", "FIXME", "DEBUG", "INFO", "WARN", "WARNING",
+  // HTTP methods
   "GET", "POST", "PUT", "DELETE", "PATCH", "HEAD",
+  // Format/protocol
   "HTTP", "HTTPS", "URL", "URI", "JSON", "YAML", "CSV", "XML", "HTML", "CSS",
+  // Hardware
   "CPU", "RAM", "GPU", "IO", "OS",
+  // Currency
   "USD", "EUR", "GBP", "JPY",
+  // Common English words that appear in ALL-CAPS in logs, headers, chat
+  "THE", "AND", "FOR", "ARE", "BUT", "NOT", "YOU", "ALL", "CAN", "HER",
+  "WAS", "ONE", "OUR", "OUT", "HAS", "HIS", "HOW", "ITS", "LET", "MAY",
+  "NEW", "NOW", "OLD", "SEE", "WAY", "WHO", "DID", "GOT", "HAS", "HIM",
+  "SAY", "SHE", "TOO", "USE", "SET", "RUN", "TRY", "ASK", "OWN", "WHY",
+  "YOUR", "THAT", "WITH", "THIS", "WILL", "EACH", "MAKE", "LIKE", "LONG",
+  "LOOK", "MANY", "THEM", "THEN", "SOME", "THAN", "WHAT", "WHEN", "WERE",
+  "BEEN", "HAVE", "SAID", "FROM", "THEY", "ALSO", "BACK", "BEEN", "CALL",
+  "COME", "JUST", "KNOW", "TAKE", "WANT", "GIVE", "MOST", "ONLY", "OVER",
+  "SUCH", "TELL", "VERY", "EVEN", "FIND", "HERE", "KEEP", "LAST", "MUCH",
+  "NAME", "NEXT", "NEED", "PART", "SAME", "SHOW", "SIDE", "WELL", "WENT",
+  "WORK", "DOES", "DONE", "ELSE", "GOOD", "HELP", "INTO", "MADE",
+  "TIME", "USED", "SURE", "MOVE", "NICE", "PLEASE", "THINK", "COULD",
+  "WOULD", "SHOULD", "AFTER", "FIRST", "STILL", "ABOUT", "THESE", "THOSE",
+  "OTHER", "BEING", "WHERE", "THERE", "THEIR", "WHICH", "RIGHT", "EVERY",
+  "NEVER", "START", "MIGHT", "WHILE", "ABOVE", "BELOW", "MAYBE",
+  "NOTE", "STEP", "FILE", "LINE", "CODE", "DATA", "TYPE", "TEXT",
+  "STOP", "SKIP", "OPEN", "SAVE", "LOAD", "SEND", "READ", "EDIT",
+  "TEST", "PUSH", "PULL", "SORT", "WAIT", "EXIT", "ZERO",
+  "POP", "ADD", "END", "TOP", "ROW", "KEY", "TAG", "LOG", "MAP", "FIX",
 ]);
 
 /** Default upper bound on concepts returned per text. Override per call. */

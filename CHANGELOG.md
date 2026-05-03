@@ -8,6 +8,15 @@ All notable changes to KongCode are documented here. The 0.7.x series introduced
 - README rewrite covering daemon arch, multi-session, auto-drain costs, env-var matrix, and troubleshooting (`README.md`)
 - This CHANGELOG file
 
+## [0.7.55] — 2026-05-03
+
+### Fixed — recurring daemon SurrealQL errors
+
+Two SurrealQL errors were firing on every maintenance cycle and subagent stop, filling logs with noise:
+
+- **purgeEmbedCache LIMIT parse error**: SurrealDB's DELETE doesn't support LIMIT directly. Wrapped in subquery: `DELETE FROM ... WHERE id IN (SELECT id FROM ... LIMIT 500)`.
+- **subagent stop time::unix(NONE)**: Orphan subagent rows lack `spawned_at`, causing `time::unix(NONE)` crash. Added IF guard for NONE values.
+
 ## [0.7.54] — 2026-05-03
 
 ### Added — vague query expansion

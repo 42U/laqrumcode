@@ -1434,6 +1434,39 @@ export class SurrealStore {
     }
   }
 
+  async garbageCollectConcepts(): Promise<number> {
+    const started = Date.now();
+    try {
+      const countRows = await this.queryFirst<{ count: number }>(
+        `SELECT count() AS count FROM concept GROUP ALL`,
+      );
+      const count = countRows[0]?.count ?? 0;
+      if (!(await this.shouldRunMaintenance("garbageCollectConcepts", 200, 3, count))) return 0;
+
+      const pruned = await this.db.query(
+        `LET $stale = (
+          SELECT id FROM concept
+          WHERE created_at < time::now() - 1d
+            AND string::len(content) <= 12
+            AND content = string::uppercase(content)
+            AND array::len(<-about_concept<-memory) = 0
+            AND array::len(<-mentions<-turn) <= 2
+            AND array::len(->narrower->?) = 0
+            AND array::len(->broader->?) = 0
+          LIMIT 100
+        );
+        FOR $c IN $stale { DELETE $c.id; };
+        RETURN array::len($stale);`,
+      );
+      const n = Number(pruned ?? 0);
+      await this.recordMaintenanceRun("garbageCollectConcepts", n, Date.now() - started);
+      return n;
+    } catch (e) {
+      swallow.warn("surreal:garbageCollectConcepts", e);
+      return 0;
+    }
+  }
+
   /**
    * Drop pending_work rows older than 7 days, regardless of status.
    *

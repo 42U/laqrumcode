@@ -60,6 +60,7 @@ export interface ContextStats {
 export declare function formatRelativeTime(ts: string): string;
 /** Dot-product cosine similarity between two equal-length vectors. Returns 0 if either has zero magnitude. */
 export declare function cosineSimilarity(a: number[], b: number[]): number;
+export declare function expandVagueQuery(query: string, session?: SessionState): string;
 export interface GraphTransformParams {
     messages: AgentMessage[];
     session: SessionState;
