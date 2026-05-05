@@ -14,7 +14,7 @@
 import type { GlobalPluginState, SessionState } from "../engine/state.js";
 import type { PriorExtractions } from "../engine/daemon-types.js";
 import { buildSystemPrompt, buildTranscript, writeExtractionResults } from "../engine/memory-daemon.js";
-import { createSoul, seedSoulAsCoreMemory, reviseSoul, getSoul, checkGraduation, getQualitySignals } from "../engine/soul.js";
+import { createSoul, seedSoulAsCoreMemory, reviseSoul, getSoul, checkGraduation, getQualitySignals, recordGraduationEvent } from "../engine/soul.js";
 import { swallow } from "../engine/errors.js";
 import { log } from "../engine/log.js";
 import { commitKnowledge } from "../engine/commit.js";
@@ -420,6 +420,8 @@ async function commitResults(
       if (!success) throw new Error("Failed to create soul record");
       const soul = await getSoul(store);
       if (soul) await seedSoulAsCoreMemory(soul, store);
+      const report = await checkGraduation(store);
+      await recordGraduationEvent(store, report);
       log.info("[GRADUATION] Soul created by subagent!");
       return { graduated: true };
     }

@@ -14,6 +14,7 @@ export declare function configureReranker(modelPath: string, profile?: ResourceP
 export declare function initReranker(modelPath: string): Promise<void>;
 export declare function disposeReranker(): Promise<void>;
 export declare function isRerankerActive(): boolean;
+export declare function crossEncoderScorePairs(anchor: string, docs: string[]): Promise<number[] | null>;
 /** 0.7.28: classify a cross-encoder sigmoid score [0,1] into a salience band.
  *  Per GroGU (arxiv 2601.23129), raw scores are weakly predictive of LLM
  *  grounding utility, but cross-encoder calibrated probabilities at >0.7

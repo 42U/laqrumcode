@@ -8,6 +8,24 @@ All notable changes to KongCode are documented here. The 0.7.x series introduced
 - README rewrite covering daemon arch, multi-session, auto-drain costs, env-var matrix, and troubleshooting (`README.md`)
 - This CHANGELOG file
 
+## [0.7.58] — 2026-05-05
+
+### Changed — retrieval utilization scoring
+
+- **Cross-encoder semantic utilization**: `evaluateRetrieval` now scores each (response, retrieved_item) pair via the `bge-reranker-v2-m3` cross-encoder. When available, utilization = 70% CE score + 30% lexical; falls back to lexical-only when reranker is offline. Replaces the purely lexical overlap metric that systematically undercounted real usage (paraphrasing, synthesis, reasoning-from-context). Raw CE score stored as `ce_utilization` on `retrieval_outcome` rows for auditing.
+- **Exposed `crossEncoderScorePairs`** from `graph-context.ts` — reusable function for scoring arbitrary (anchor, doc[]) pairs against the loaded reranker.
+
+### Removed — dead code cleanup
+
+- **Removed 4 dead stubs**: `generateInitialSoul`, `attemptGraduation` (soul.ts), `evolveSoul` (soul.ts), `graduateCausalToSkills` (skills.ts). All replaced by the `pending_work` subagent pipeline (`soul_generate`, `soul_evolve`, `causal_graduate` work types in pending-work.ts).
+- Removed corresponding test blocks from `soul.test.ts` and `skills.test.ts`.
+
+### Fixed
+
+- **Graduation event gap**: Extracted `recordGraduationEvent` as standalone export from `soul.ts`, wired into `pending-work.ts` `soul_generate` commit handler. Previously the pending_work pipeline would create a soul but never record the `graduation_event` row that `session-start.ts` reads to surface the celebration.
+- **`createSoul` error masking**: Now checks `hasSoul()` first (returns false for "already exists") and lets real DB errors propagate instead of swallowing all errors via `swallow.warn`.
+- Updated `observability.ts` graduation suggestion to reference the pending_work pipeline instead of the removed `attemptGraduation`.
+
 ## [0.7.57] — 2026-05-05
 
 ### Fixed — memory decay and recall quality (issues #9, #10)

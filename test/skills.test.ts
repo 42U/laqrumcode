@@ -10,7 +10,6 @@ import {
   formatSkillContext,
   recordSkillOutcome,
   supersedeOldSkills,
-  graduateCausalToSkills,
   type Skill,
 } from "../src/engine/skills.js";
 
@@ -207,19 +206,3 @@ describe("supersedeOldSkills", () => {
   });
 });
 
-// ── graduateCausalToSkills ──
-
-describe("graduateCausalToSkills", () => {
-  it("returns 0 (LLM body removed — handled by pending_work pipeline)", async () => {
-    const store = mockStore();
-    const result = await graduateCausalToSkills(store, mockEmbeddings());
-    expect(result).toBe(0);
-  });
-
-  it("returns 0 when store is unavailable", async () => {
-    const store = mockStore();
-    store.isAvailable = () => false;
-    const result = await graduateCausalToSkills(store, mockEmbeddings());
-    expect(result).toBe(0);
-  });
-});

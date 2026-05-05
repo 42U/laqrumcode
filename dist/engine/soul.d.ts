@@ -121,21 +121,11 @@ export declare function getSoul(store: SurrealStore): Promise<SoulDocument | nul
 export declare function createSoul(doc: Omit<SoulDocument, "id" | "agent_id" | "created_at" | "updated_at" | "revisions">, store: SurrealStore): Promise<boolean>;
 export declare function reviseSoul(section: keyof Pick<SoulDocument, "working_style" | "emotional_dimensions" | "self_observations" | "earned_values">, newValue: unknown, rationale: string, store: SurrealStore): Promise<boolean>;
 /**
- * Generate the initial Soul content by introspecting the agent's own graph.
- * Only called when graduation is fully ready (7/7 + quality gate).
+ * Record a graduation_event so session-start surfaces a celebration.
+ * Extracted from the former attemptGraduation() — now called by the
+ * pending_work soul_generate commit handler.
  */
-export declare function generateInitialSoul(store: SurrealStore, userSoulNudge?: string, quality?: QualitySignals): Promise<Omit<SoulDocument, "id" | "agent_id" | "created_at" | "updated_at" | "revisions"> | null>;
-/**
- * The full graduation ceremony: check readiness, generate soul, save it.
- *
- * Key change: requires 7/7 thresholds AND quality ≥ 0.85. No more premature
- * graduation at 5/7 with no quality check.
- */
-export declare function attemptGraduation(store: SurrealStore, userSoulNudge?: string): Promise<{
-    graduated: boolean;
-    soul?: SoulDocument | null;
-    report: GraduationReport;
-}>;
+export declare function recordGraduationEvent(store: SurrealStore, report: GraduationReport): Promise<void>;
 /**
  * Format a graduation report for human/LLM consumption.
  * Used by the introspect tool's "status" action.
@@ -152,11 +142,6 @@ export declare function formatGraduationReport(report: GraduationReport): string
  *   - Persona (priority 70) — "you belong in this world"
  */
 export declare function seedSoulAsCoreMemory(soul: SoulDocument, store: SurrealStore): Promise<number>;
-/**
- * Check if the soul should evolve based on new experience since last revision.
- * Called at session end (after graduation). Returns true if revision happened.
- */
-export declare function evolveSoul(store: SurrealStore): Promise<boolean>;
 /**
  * Check and record stage transitions. Returns the new stage if a transition
  * occurred, null otherwise. Persists last-known stage in DB.

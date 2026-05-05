@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import {
   checkGraduation, computeQualityScore, seedSoulAsCoreMemory,
-  generateInitialSoul, attemptGraduation, evolveSoul, formatGraduationReport,
+  formatGraduationReport,
 } from "../src/engine/soul.js";
 import type { QualitySignals, SoulDocument, GraduationReport } from "../src/engine/soul.js";
 
@@ -368,83 +368,6 @@ describe("seedSoulAsCoreMemory", () => {
     const store = { ...mockSoulStore(), isAvailable: () => false };
     const count = await seedSoulAsCoreMemory(fakeSoul, store as any);
     expect(count).toBe(0);
-  });
-});
-
-// ── generateInitialSoul ──
-
-describe("generateInitialSoul", () => {
-  function mockSoulGenStore() {
-    return {
-      isAvailable: () => true,
-      queryFirst: vi.fn(async (sql: string) => {
-        if (sql.includes("FROM reflection")) return [{ text: "I tend to over-engineer", category: "self-correction" }];
-        if (sql.includes("FROM causal_chain")) return [{ cause: "missing null check", effect: "crash", lesson: "always validate" }];
-        if (sql.includes("FROM monologue")) return [{ text: "I should be more careful with edge cases" }];
-        return [];
-      }),
-    } as any;
-  }
-
-  it("returns null (LLM body removed — handled by pending_work pipeline)", async () => {
-    const result = await generateInitialSoul(mockSoulGenStore());
-    expect(result).toBeNull();
-  });
-
-  it("returns null when store is unavailable", async () => {
-    const store = mockSoulGenStore();
-    store.isAvailable = () => false;
-    const result = await generateInitialSoul(store);
-    expect(result).toBeNull();
-  });
-});
-
-// ── attemptGraduation ──
-
-describe("attemptGraduation", () => {
-  it("returns graduated=false when not ready", async () => {
-    const store = mockStore({ sessions: 2, reflections: 0 }); // way below thresholds
-    const result = await attemptGraduation(store as any);
-    expect(result.graduated).toBe(false);
-  });
-
-  it("returns graduated=true when soul already exists", async () => {
-    const store = {
-      ...mockStore({ sessions: 20, reflections: 15, causalChains: 10, concepts: 50, monologues: 10, spanDays: 10 }),
-      queryFirst: vi.fn(async (sql: string) => {
-        if (sql.includes("FROM soul")) return [{ id: "soul:1", working_style: [], emotional_dimensions: [], self_observations: [], earned_values: [], revisions: 0 }];
-        // graduation checks
-        if (sql.includes("FROM session GROUP ALL")) return [{ count: 20 }];
-        if (sql.includes("FROM reflection GROUP ALL") && !sql.includes("severity")) return [{ count: 15 }];
-        if (sql.includes("FROM causal_chain GROUP ALL")) return [{ count: 10 }];
-        if (sql.includes("FROM concept GROUP ALL")) return [{ count: 50 }];
-        if (sql.includes("FROM monologue GROUP ALL")) return [{ count: 10 }];
-        if (sql.includes("FROM session ORDER BY")) return [{ earliest: new Date(Date.now() - 5 * 86400000).toISOString() }];
-        return [];
-      }),
-    };
-
-    const result = await attemptGraduation(store as any);
-    expect(result.graduated).toBe(true);
-  });
-});
-
-// ── evolveSoul ──
-
-describe("evolveSoul", () => {
-  it("returns false when store is unavailable", async () => {
-    const store = { isAvailable: () => false } as any;
-    const result = await evolveSoul(store);
-    expect(result).toBe(false);
-  });
-
-  it("returns false when no soul exists", async () => {
-    const store = {
-      isAvailable: () => true,
-      queryFirst: vi.fn(async () => []),
-    } as any;
-    const result = await evolveSoul(store);
-    expect(result).toBe(false);
   });
 });
 

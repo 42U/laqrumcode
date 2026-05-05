@@ -79,6 +79,26 @@ export async function disposeReranker() {
     }
 }
 export function isRerankerActive() { return _rankingCtx !== null; }
+export async function crossEncoderScorePairs(anchor, docs) {
+    if (!_rankingCtx || docs.length === 0)
+        return null;
+    try {
+        const trimmed = docs.map(d => d.length > RERANK_MAX_DOC_CHARS ? d.slice(0, RERANK_MAX_DOC_CHARS) : d);
+        const scores = new Array(trimmed.length);
+        for (let start = 0; start < trimmed.length; start += RERANK_CHUNK_SIZE) {
+            const end = Math.min(start + RERANK_CHUNK_SIZE, trimmed.length);
+            const chunk = await _rankingCtx.rankAll(anchor, trimmed.slice(start, end));
+            for (let i = 0; i < chunk.length; i++)
+                scores[start + i] = chunk[i];
+            if (end < trimmed.length)
+                await new Promise(r => setImmediate(r));
+        }
+        return scores;
+    }
+    catch {
+        return null;
+    }
+}
 export const BAND_LOAD_BEARING_MIN = 0.7;
 export const BAND_SUPPORTING_MIN = 0.3;
 export const BAND_DROP_BELOW = 0.15;

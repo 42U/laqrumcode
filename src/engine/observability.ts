@@ -367,7 +367,7 @@ async function detectGraduationReady(store: SurrealStore): Promise<AnomalyFlag |
     severity: "info",
     message: `Soul graduation criteria met (volume 7/7, quality ${report.qualityScore.toFixed(2)} ≥ 0.85)`,
     evidence: `stage=${report.stage}`,
-    suggestion: "Author the Soul document — call attemptGraduation via the soul tool",
+    suggestion: "Soul graduation fires automatically via the pending_work pipeline at session end",
   };
 }
 

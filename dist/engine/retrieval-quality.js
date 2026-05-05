@@ -13,6 +13,7 @@
  * Ported from kongbrain — uses SurrealStore instead of module-level DB.
  */
 import { swallow } from "./errors.js";
+import { crossEncoderScorePairs } from "./graph-context.js";
 // Per-turn state — module-level since only one turn is active at a time.
 // 0.7.27: indexMap holds the [#N] → memory_id map built at injection time
 // so Stop can parse the assistant response for [#1], [#2], etc. and write
@@ -66,10 +67,18 @@ export async function evaluateRetrieval(responseTurnId, responseText, store) {
                 citedIds.add(id);
         }
     }
-    for (const item of items) {
+    // Cross-encoder semantic utilization: score each (response, item) pair.
+    // The reranker measures meaning overlap — catches paraphrasing, reasoning-
+    // from-context, and synthesis that lexical overlap misses entirely.
+    // Batch all items in one call; null when reranker is offline.
+    const itemTexts = items.map(it => it.text ?? "");
+    const ceScores = await crossEncoderScorePairs(responseText, itemTexts);
+    for (let idx = 0; idx < items.length; idx++) {
+        const item = items[idx];
         const idStr = String(item.id);
         const wasCited = citedIds.has(idStr);
-        const signals = computeSignals(item, responseLower, toolSuccess, wasCited);
+        const ceScore = ceScores?.[idx] ?? null;
+        const signals = computeSignals(item, responseLower, toolSuccess, wasCited, ceScore);
         try {
             const record = {
                 session_id: sessionId,
@@ -87,18 +96,12 @@ export async function evaluateRetrieval(responseTurnId, responseText, store) {
             if (signals.toolSuccess != null) {
                 record.tool_success = signals.toolSuccess;
             }
+            if (ceScore != null) {
+                record.ce_utilization = ceScore;
+            }
             if (queryEmbedding) {
                 record.query_embedding = queryEmbedding;
             }
-            // 0.7.27: structural-citation signal. cited=true means the model
-            // explicitly emitted [#N] referencing this item; cited=false means it
-            // was offered but ignored. Distinct from the lexical utilization
-            // overlap. citation_method='index' for [#N], 'lexical' for paraphrase
-            // (utilization >= 0.5 — strong lexical match without explicit [#N]),
-            // 'none' otherwise.
-            // 0.7.33: lexical fallback added so paraphrased usage gets audit
-            // credit. The threshold 0.5 picks up genuine paraphrase (key terms +
-            // trigrams overlap heavily) without rewarding incidental word reuse.
             if (indexMap) {
                 if (wasCited) {
                     record.cited = true;
@@ -145,28 +148,31 @@ export async function getLastTurnGroundingTrace(sessionId, store) {
     }
 }
 // --- Signal computation ---
-export function computeSignals(item, responseLower, toolSuccess, cited) {
+export function computeSignals(item, responseLower, toolSuccess, cited, ceScore) {
     const rawText = item.text ?? "";
     const memText = rawText.toLowerCase();
     const contextTokens = Math.ceil(rawText.length / 4);
-    // Lexical signals: specific-term reuse (high signal) + topical word overlap
-    // (low signal). Previously `Math.max(..., unigram * 0.5)` was the whole
-    // story, which gave a hard ceiling at the strongest single signal and
-    // halved unigram before it could compete — pinning utilization at ~10%
-    // graph-wide. Now: a weighted blend so partial-but-broad overlap counts,
-    // and a small bonus when retrieval was followed by successful tool use
-    // (tool_success was already computed but never folded into utilization).
+    // Lexical signals (fallback when reranker is offline)
     const keyTermScore = keyTermOverlap(rawText, responseLower);
     const trigramScore = trigramOverlap(memText, responseLower);
     const unigramScore = unigramOverlap(memText, responseLower);
     const specific = Math.max(keyTermScore, trigramScore);
     const lexical = 0.6 * specific + 0.4 * unigramScore;
     const toolBoost = toolSuccess === true ? 0.2 : 0;
-    let utilization = Math.min(1, lexical + toolBoost);
-    // Citation boost: structural [#N] citations prove the model used this item
-    // even when lexical overlap is low (paraphrasing). Without this, utilization
-    // was purely lexical and systematically undercounted real usage — dragging
-    // avgRetrievalUtilization to 19% and blocking graduation at 0.76/0.85.
+    const lexicalUtil = Math.min(1, lexical + toolBoost);
+    // Primary signal: cross-encoder semantic score. The reranker measures
+    // meaning overlap between the response and each retrieved item — catches
+    // paraphrasing, reasoning-from-context, and synthesis that lexical overlap
+    // misses. When available, blend CE (70%) with lexical (30%) so both
+    // structural reuse and semantic influence contribute. When offline, fall
+    // back to lexical-only.
+    let utilization;
+    if (ceScore != null) {
+        utilization = 0.7 * ceScore + 0.3 * lexicalUtil;
+    }
+    else {
+        utilization = lexicalUtil;
+    }
     if (cited)
         utilization = Math.max(utilization, 0.7);
     let recency = 0.5;

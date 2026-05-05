@@ -128,13 +128,3 @@ export async function recordSkillOutcome(skillId, success, durationMs, store) {
         swallow("skills:non-critical", e);
     }
 }
-// --- Causal Chain -> Skill Graduation ---
-/**
- * Promote recurring successful causal chains into reusable skills.
- * When 3+ successful chains of the same type exist, synthesize a skill.
- */
-export async function graduateCausalToSkills(store, embeddings) {
-    // LLM call logic removed — causal-to-skill graduation is now handled by
-    // the subagent-driven pending_work pipeline (commit_work_results tool).
-    return 0;
-}

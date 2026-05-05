@@ -38,7 +38,7 @@ export declare function getLastTurnGroundingTrace(sessionId: string, store: Surr
     cited: number;
     ignored_high_salience: string[];
 } | null>;
-export declare function computeSignals(item: RetrievedItem, responseLower: string, toolSuccess: boolean | null, cited?: boolean): QualitySignals;
+export declare function computeSignals(item: RetrievedItem, responseLower: string, toolSuccess: boolean | null, cited?: boolean, ceScore?: number | null): QualitySignals;
 export declare function getHistoricalUtilityBatch(ids: string[], store?: SurrealStore): Promise<Map<string, number>>;
 export declare function getRecentUtilizationAvg(sessionId: string, windowSize?: number, store?: SurrealStore): Promise<number | null>;
 export {};

@@ -58,8 +58,3 @@ export declare function formatSkillContext(skills: Skill[]): string;
  * Record skill outcome when a retrieved skill is used in a turn.
  */
 export declare function recordSkillOutcome(skillId: string, success: boolean, durationMs: number, store: SurrealStore): Promise<void>;
-/**
- * Promote recurring successful causal chains into reusable skills.
- * When 3+ successful chains of the same type exist, synthesize a skill.
- */
-export declare function graduateCausalToSkills(store: SurrealStore, embeddings: EmbeddingService): Promise<number>;

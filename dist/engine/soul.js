@@ -314,33 +314,27 @@ export async function getSoul(store) {
 export async function createSoul(doc, store) {
     if (!store.isAvailable())
         return false;
-    try {
-        // Do NOT pass created_at / updated_at as ISO strings — schema is
-        // SCHEMAFULL with both fields typed `datetime DEFAULT time::now()`
-        // and SurrealDB refuses to coerce string bindings. The `revisions`
-        // inner-object timestamp stays as a string because revisions is
-        // `array<object>` (unconstrained inner types), not a datetime field.
-        // This coercion bug was the real reason soul: 0 persisted even after
-        // the graduation gate cleared historically (Apr 12 log evidence).
-        const now = new Date().toISOString();
-        await store.queryExec(`CREATE soul:kongbrain CONTENT $data`, {
-            data: {
-                agent_id: "kongbrain",
-                ...doc,
-                revisions: [{
-                        timestamp: now,
-                        section: "all",
-                        change: "Initial soul document created at graduation",
-                        rationale: "Agent accumulated sufficient experiential data and demonstrated quality performance to meaningfully self-observe",
-                    }],
-            },
-        });
-        return true;
-    }
-    catch (e) {
-        swallow.warn("soul:createSoul", e);
+    if (await hasSoul(store))
         return false;
-    }
+    // Do NOT pass created_at / updated_at as ISO strings — schema is
+    // SCHEMAFULL with both fields typed `datetime DEFAULT time::now()`
+    // and SurrealDB refuses to coerce string bindings. The `revisions`
+    // inner-object timestamp stays as a string because revisions is
+    // `array<object>` (unconstrained inner types), not a datetime field.
+    const now = new Date().toISOString();
+    await store.queryExec(`CREATE soul:kongbrain CONTENT $data`, {
+        data: {
+            agent_id: "kongbrain",
+            ...doc,
+            revisions: [{
+                    timestamp: now,
+                    section: "all",
+                    change: "Initial soul document created at graduation",
+                    rationale: "Agent accumulated sufficient experiential data and demonstrated quality performance to meaningfully self-observe",
+                }],
+        },
+    });
+    return true;
 }
 export async function reviseSoul(section, newValue, rationale, store) {
     if (!store.isAvailable())
@@ -375,51 +369,15 @@ export async function reviseSoul(section, newValue, rationale, store) {
     }
 }
 /**
- * Generate the initial Soul content by introspecting the agent's own graph.
- * Only called when graduation is fully ready (7/7 + quality gate).
+ * Record a graduation_event so session-start surfaces a celebration.
+ * Extracted from the former attemptGraduation() — now called by the
+ * pending_work soul_generate commit handler.
  */
-export async function generateInitialSoul(store, userSoulNudge, quality) {
-    // LLM call logic removed — soul generation is now handled by
-    // the subagent-driven pending_work pipeline (commit_work_results tool).
-    return null;
-}
-/**
- * The full graduation ceremony: check readiness, generate soul, save it.
- *
- * Key change: requires 7/7 thresholds AND quality ≥ 0.85. No more premature
- * graduation at 5/7 with no quality check.
- */
-export async function attemptGraduation(store, userSoulNudge) {
-    if (await hasSoul(store)) {
-        const soul = await getSoul(store);
-        const report = await checkGraduation(store);
-        return { graduated: true, soul, report };
-    }
-    const report = await checkGraduation(store);
-    if (!report.ready) {
-        return { graduated: false, report };
-    }
-    const content = await generateInitialSoul(store, userSoulNudge, report.quality);
-    if (!content) {
-        return { graduated: false, report };
-    }
-    const success = await createSoul(content, store);
-    if (!success) {
-        return { graduated: false, report };
-    }
-    const soul = await getSoul(store);
-    // Seed soul into Tier 0 core memory so it's loaded every turn
-    if (soul) {
-        await seedSoulAsCoreMemory(soul, store);
-    }
-    // Record graduation event so next session-start's unacknowledged-events
-    // lookup surfaces the celebration. Table schema defined in schema.surql
-    // but had no writer in KongCode — port regression from KongBrain, fixed
-    // here. session-start.ts:69 already reads this.
+export async function recordGraduationEvent(store, report) {
     try {
         await store.queryExec(`CREATE graduation_event CONTENT $data`, {
             data: {
-                session_id: "graduation", // graduation is global, not per-session
+                session_id: "graduation",
                 acknowledged: false,
                 quality_score: report.qualityScore,
                 volume_score: report.volumeScore,
@@ -430,7 +388,6 @@ export async function attemptGraduation(store, userSoulNudge) {
     catch (e) {
         swallow.warn("soul:recordGraduationEvent", e);
     }
-    return { graduated: true, soul, report };
 }
 /**
  * Format a graduation report for human/LLM consumption.
@@ -546,34 +503,6 @@ export async function seedSoulAsCoreMemory(soul, store) {
         swallow.warn("soul:seedPersona", e);
     }
     return seeded;
-}
-// ── Soul Evolution ──
-/** How many sessions between soul revision checks. */
-const EVOLUTION_SESSION_INTERVAL = 10;
-/**
- * Check if the soul should evolve based on new experience since last revision.
- * Called at session end (after graduation). Returns true if revision happened.
- */
-export async function evolveSoul(store) {
-    if (!store.isAvailable())
-        return false;
-    const soul = await getSoul(store);
-    if (!soul)
-        return false;
-    // Count sessions since last soul update
-    try {
-        const rows = await store.queryFirst(`SELECT count() AS count FROM session WHERE started_at > $since GROUP ALL`, { since: soul.updated_at });
-        const sessionsSinceUpdate = rows[0]?.count ?? 0;
-        if (sessionsSinceUpdate < EVOLUTION_SESSION_INTERVAL)
-            return false;
-    }
-    catch (e) {
-        swallow.warn("soul:evoCheckSessions", e);
-        return false;
-    }
-    // LLM call logic removed — soul evolution is now handled by
-    // the subagent-driven pending_work pipeline (commit_work_results tool).
-    return false;
 }
 // ── Stage Transition Tracking ──
 /**

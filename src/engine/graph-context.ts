@@ -85,6 +85,26 @@ export async function disposeReranker(): Promise<void> {
 
 export function isRerankerActive(): boolean { return _rankingCtx !== null; }
 
+export async function crossEncoderScorePairs(
+  anchor: string,
+  docs: string[],
+): Promise<number[] | null> {
+  if (!_rankingCtx || docs.length === 0) return null;
+  try {
+    const trimmed = docs.map(d => d.length > RERANK_MAX_DOC_CHARS ? d.slice(0, RERANK_MAX_DOC_CHARS) : d);
+    const scores: number[] = new Array(trimmed.length);
+    for (let start = 0; start < trimmed.length; start += RERANK_CHUNK_SIZE) {
+      const end = Math.min(start + RERANK_CHUNK_SIZE, trimmed.length);
+      const chunk = await _rankingCtx.rankAll(anchor, trimmed.slice(start, end));
+      for (let i = 0; i < chunk.length; i++) scores[start + i] = chunk[i];
+      if (end < trimmed.length) await new Promise<void>(r => setImmediate(r));
+    }
+    return scores;
+  } catch {
+    return null;
+  }
+}
+
 /** 0.7.28: classify a cross-encoder sigmoid score [0,1] into a salience band.
  *  Per GroGU (arxiv 2601.23129), raw scores are weakly predictive of LLM
  *  grounding utility, but cross-encoder calibrated probabilities at >0.7
