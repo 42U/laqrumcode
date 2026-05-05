@@ -67,12 +67,15 @@ export async function evaluateRetrieval(responseTurnId, responseText, store) {
                 citedIds.add(id);
         }
     }
-    // Cross-encoder semantic utilization: score each (response, item) pair.
-    // The reranker measures meaning overlap — catches paraphrasing, reasoning-
-    // from-context, and synthesis that lexical overlap misses entirely.
-    // Batch all items in one call; null when reranker is offline.
+    // Cross-encoder semantic utilization: score each (item, response) pair.
+    // Item text is the "query" (short), response is the "document" (long) —
+    // matches the (query, passage) training distribution of bge-reranker-v2-m3.
+    // Reversed from the naive (response, item) ordering which produced near-zero
+    // scores due to the long anchor diluting relevance signal.
     const itemTexts = items.map(it => it.text ?? "");
-    const ceScores = await crossEncoderScorePairs(responseText, itemTexts);
+    const ceScores = itemTexts.length > 0
+        ? await Promise.all(itemTexts.map(t => crossEncoderScorePairs(t, [responseText]).then(s => s?.[0] ?? null)))
+        : null;
     for (let idx = 0; idx < items.length; idx++) {
         const item = items[idx];
         const idStr = String(item.id);
