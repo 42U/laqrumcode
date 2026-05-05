@@ -8,6 +8,19 @@ All notable changes to KongCode are documented here. The 0.7.x series introduced
 - README rewrite covering daemon arch, multi-session, auto-drain costs, env-var matrix, and troubleshooting (`README.md`)
 - This CHANGELOG file
 
+## [0.7.57] — 2026-05-05
+
+### Fixed — memory decay and recall quality (issues #9, #10)
+
+- **Category-aware decay floor**: Added `"fact"` to the protected category list in `runMemoryMaintenance`. Structured findings (correction/decision/preference/fact) now decay to floor 5.0 instead of 2.0, preserving recall priority.
+- **Embedding text separation**: `record_finding` now embeds the raw user text (without `[CATEGORY]` prefix or rationale) via new `embeddingText` field on `CommitMemoryData`. Short keyword queries match findings at higher cosine similarity.
+
+## [0.7.56] — 2026-05-03
+
+### Added — garbage concept cleanup
+
+Expanded STOPLIST_ACRONYMS from ~30 to ~180 entries covering common English words that appear in ALL-CAPS. Added `garbageCollectConcepts()` targeting short ALL-CAPS concepts with no memory edges or hierarchy links. Includes v0.7.55 CHANGELOG entry.
+
 ## [0.7.55] — 2026-05-03
 
 ### Fixed — recurring daemon SurrealQL errors

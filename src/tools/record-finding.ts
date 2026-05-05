@@ -68,6 +68,7 @@ export async function handleRecordFinding(
     {
       kind: "memory",
       text: storedText,
+      embeddingText: text,
       importance: importance ?? DEFAULT_IMPORTANCE[findingType],
       category: findingType,
       sessionId: session.sessionId,

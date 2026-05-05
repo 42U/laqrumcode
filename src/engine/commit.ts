@@ -63,8 +63,11 @@ export interface CommitConceptData {
 
 export interface CommitMemoryData {
   kind: "memory";
-  /** The memory text (also used as the embedding target). */
+  /** The memory text (also used as the embedding target unless embeddingText is set). */
   text: string;
+  /** Optional shorter text to embed instead of `text`. Use when the stored text
+   *  has prefixes/rationale that dilute embedding quality for short query matching. */
+  embeddingText?: string;
   /** Graph importance (1-10). */
   importance: number;
   /** Category label (e.g. "correction", "preference", "decision", "causal_trigger_debug"). */
@@ -202,10 +205,13 @@ async function commitMemory(
   const { store, embeddings } = deps;
   const logTag = `commit:memory:${data.category}`;
 
-  // 1. Embed the text (or reuse caller's vec).
+  // 1. Embed the text (or reuse caller's vec). When embeddingText is set,
+  //    embed that shorter form for better query matching while storing the
+  //    full text in the row. Fixes issue #10: category prefixes and rationale
+  //    dilute embedding quality for short keyword queries.
   let embedding: number[] | null = data.precomputedVec ?? null;
   if (!embedding && embeddings.isAvailable()) {
-    try { embedding = await embeddings.embed(data.text); }
+    try { embedding = await embeddings.embed(data.embeddingText ?? data.text); }
     catch (e) { swallow(`${logTag}:embed`, e); }
   }
 

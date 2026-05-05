@@ -91,11 +91,14 @@ async function commitConcept(deps, data) {
 async function commitMemory(deps, data) {
     const { store, embeddings } = deps;
     const logTag = `commit:memory:${data.category}`;
-    // 1. Embed the text (or reuse caller's vec).
+    // 1. Embed the text (or reuse caller's vec). When embeddingText is set,
+    //    embed that shorter form for better query matching while storing the
+    //    full text in the row. Fixes issue #10: category prefixes and rationale
+    //    dilute embedding quality for short keyword queries.
     let embedding = data.precomputedVec ?? null;
     if (!embedding && embeddings.isAvailable()) {
         try {
-            embedding = await embeddings.embed(data.text);
+            embedding = await embeddings.embed(data.embeddingText ?? data.text);
         }
         catch (e) {
             swallow(`${logTag}:embed`, e);

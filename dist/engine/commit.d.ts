@@ -52,8 +52,11 @@ export interface CommitConceptData {
 }
 export interface CommitMemoryData {
     kind: "memory";
-    /** The memory text (also used as the embedding target). */
+    /** The memory text (also used as the embedding target unless embeddingText is set). */
     text: string;
+    /** Optional shorter text to embed instead of `text`. Use when the stored text
+     *  has prefixes/rationale that dilute embedding quality for short query matching. */
+    embeddingText?: string;
     /** Graph importance (1-10). */
     importance: number;
     /** Category label (e.g. "correction", "preference", "decision", "causal_trigger_debug"). */

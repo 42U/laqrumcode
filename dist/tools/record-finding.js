@@ -53,6 +53,7 @@ export async function handleRecordFinding(state, session, args) {
     const { id, edges } = await commitKnowledge({ store: state.store, embeddings: state.embeddings }, {
         kind: "memory",
         text: storedText,
+        embeddingText: text,
         importance: importance ?? DEFAULT_IMPORTANCE[findingType],
         category: findingType,
         sessionId: session.sessionId,

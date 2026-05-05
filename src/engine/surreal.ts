@@ -1383,9 +1383,14 @@ export class SurrealStore {
     // run, but still record the execution so observability is consistent.
     const started = Date.now();
     try {
-      // Single round-trip to reduce transaction conflict window
+      // Single round-trip to reduce transaction conflict window.
+      // Structured findings (correction/decision/preference) have a higher
+      // decay floor matching their type defaults so they don't erode to noise.
       await this.queryExec(`
-        UPDATE memory SET importance = math::max([importance * 0.95, 2.0]) WHERE importance > 2.0;
+        UPDATE memory SET importance = math::max([importance * 0.95, 5.0])
+          WHERE importance > 5.0 AND category IN ["correction", "decision", "preference", "fact"];
+        UPDATE memory SET importance = math::max([importance * 0.95, 2.0])
+          WHERE importance > 2.0 AND category NOT IN ["correction", "decision", "preference", "fact"];
         UPDATE memory SET importance = math::max([importance, 3 + ((
           SELECT VALUE avg_utilization FROM memory_utility_cache WHERE memory_id = string::concat(meta::tb(id), ":", meta::id(id)) LIMIT 1
         )[0] ?? 0) * 4]) WHERE importance < 7;
