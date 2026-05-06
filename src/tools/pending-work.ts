@@ -458,7 +458,21 @@ async function commitResults(
       };
       if (item.project_id) record.project_id = item.project_id;
       if (noteEmb?.length) record.embedding = noteEmb;
-      await store.queryFirst<{ id: string }>(`CREATE memory CONTENT $record RETURN id`, { record });
+      const memRows = await store.queryFirst<{ id: string }>(`CREATE memory CONTENT $record RETURN id`, { record });
+      const memId = memRows[0]?.id;
+      if (memId && noteText.length >= 30) {
+        try {
+          await commitKnowledge({ store, embeddings }, {
+            kind: "concept",
+            name: noteText.slice(0, 200),
+            sourceId: memId,
+            edgeName: "derived_from",
+            source: "handoff:promote",
+            precomputedVec: noteEmb,
+            projectId: item.project_id,
+          });
+        } catch (e) { swallow("handoff:promote", e); }
+      }
       return { stored: true };
     }
 

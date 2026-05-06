@@ -11,6 +11,7 @@
  */
 import { swallow } from "../engine/errors.js";
 import { log } from "../engine/log.js";
+import { commitKnowledge } from "../engine/commit.js";
 const RECORD_ID_RE = /^pending_work:[a-zA-Z0-9_]+$/;
 export async function drainHeuristic(state) {
     const { store, embeddings } = state;
@@ -82,7 +83,24 @@ async function processHandoffNote(item, state) {
         record.project_id = item.project_id;
     if (emb?.length)
         record.embedding = emb;
-    await store.queryFirst(`CREATE memory CONTENT $record RETURN id`, { record });
+    const memRows = await store.queryFirst(`CREATE memory CONTENT $record RETURN id`, { record });
+    const memId = memRows[0]?.id;
+    if (memId && note.length >= 30) {
+        try {
+            await commitKnowledge({ store, embeddings }, {
+                kind: "concept",
+                name: note.slice(0, 200),
+                sourceId: memId,
+                edgeName: "derived_from",
+                source: "handoff:promote",
+                precomputedVec: emb,
+                projectId: item.project_id,
+            });
+        }
+        catch (e) {
+            swallow("heuristic:handoff:promote", e);
+        }
+    }
     return true;
 }
 async function processShortReflection(item, state) {

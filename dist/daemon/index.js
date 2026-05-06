@@ -22,7 +22,7 @@
  * everything else returns a "not yet implemented" error. Subsequent
  * commits migrate tool/hook handlers from the legacy mcp-server.ts.
  */
-import { writeFileSync, unlinkSync, existsSync, readFileSync, mkdirSync } from "node:fs";
+import { writeFileSync, unlinkSync, existsSync, readFileSync, mkdirSync, readdirSync, rmSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { homedir } from "node:os";
 import { PROTOCOL_VERSION, DEFAULT_DAEMON_SOCKET_PATH, DEFAULT_DAEMON_TCP_PORT, DAEMON_PID_FILE, } from "../shared/ipc-types.js";
@@ -85,6 +85,31 @@ function setBootstrapPhase(p, err) {
     bootstrapPhase = p;
     if (p === "failed" && err) {
         bootstrapError = { message: err.message, stack: err.stack };
+    }
+}
+function pruneStalePluginCache() {
+    const cacheBase = join(homedir(), ".claude", "plugins", "cache", "kongcode-marketplace", "kongcode");
+    if (!existsSync(cacheBase))
+        return;
+    try {
+        const entries = readdirSync(cacheBase, { withFileTypes: true });
+        const stale = entries.filter(e => e.isDirectory() && e.name !== DAEMON_VERSION);
+        if (stale.length === 0)
+            return;
+        for (const dir of stale) {
+            const full = join(cacheBase, dir.name);
+            try {
+                rmSync(full, { recursive: true, force: true });
+                log.info(`[daemon] pruned stale plugin cache: ${dir.name}`);
+            }
+            catch (e) {
+                log.warn(`[daemon] failed to prune ${dir.name}: ${e.message}`);
+            }
+        }
+        log.info(`[daemon] pruned ${stale.length} stale version(s) from plugin cache, kept ${DAEMON_VERSION}`);
+    }
+    catch (e) {
+        log.warn(`[daemon] plugin cache prune failed: ${e.message}`);
     }
 }
 /** Initialize the daemon's state stack — bootstrap, SurrealStore, EmbeddingService,
@@ -241,6 +266,7 @@ async function initializeStack() {
     catch (err) {
         log.error("[daemon] failed to start hook HTTP API:", err);
     }
+    pruneStalePluginCache();
     setBootstrapPhase("ready");
     log.info("[daemon] kongcode stack ready");
 }

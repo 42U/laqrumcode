@@ -13,6 +13,7 @@
 import type { GlobalPluginState } from "../engine/state.js";
 import { swallow } from "../engine/errors.js";
 import { log } from "../engine/log.js";
+import { commitKnowledge } from "../engine/commit.js";
 
 interface PendingItem {
   id: string;
@@ -99,7 +100,21 @@ async function processHandoffNote(item: PendingItem, state: GlobalPluginState): 
   if (item.project_id) record.project_id = item.project_id;
   if (emb?.length) record.embedding = emb;
 
-  await store.queryFirst<{ id: string }>(`CREATE memory CONTENT $record RETURN id`, { record });
+  const memRows = await store.queryFirst<{ id: string }>(`CREATE memory CONTENT $record RETURN id`, { record });
+  const memId = memRows[0]?.id;
+  if (memId && note.length >= 30) {
+    try {
+      await commitKnowledge({ store, embeddings }, {
+        kind: "concept",
+        name: note.slice(0, 200),
+        sourceId: memId,
+        edgeName: "derived_from",
+        source: "handoff:promote",
+        precomputedVec: emb,
+        projectId: item.project_id,
+      });
+    } catch (e) { swallow("heuristic:handoff:promote", e); }
+  }
   return true;
 }
 
