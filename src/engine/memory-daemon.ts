@@ -54,6 +54,10 @@ ${hasRetrievedMemories ? `  "resolved": [
   "concepts": [
     // Technical facts, knowledge, decisions, or findings worth remembering.
     // NOT conversation flow — only things that would be useful to recall later.
+    // Include BOTH implementation details AND project-level descriptions.
+    // Ask: "if someone searched for this work in 3 weeks, what would they type?"
+    // Name concepts in the language someone would naturally search for, not just
+    // internal jargon. E.g. "migrating trading crons to Docker" not just "apps.yaml schema".
     // Categories: technical, architectural, behavioral, environmental, procedural
     // Max 8 per batch.
     {"name": "short identifier (3-6 words)", "content": "the actual knowledge (1-3 sentences)", "category": "technical|architectural|behavioral|environmental|procedural", "importance": 1-10}
@@ -91,7 +95,8 @@ RULES:
 - Quality over quantity — skip weak/uncertain extractions.
 - Concepts should be self-contained — readable without the conversation.
 - Corrections are the MOST important signal. Never miss one.
-- For artifacts, extract file paths from bash/tool commands in the transcript.`;
+- For artifacts, extract file paths from bash/tool commands in the transcript.
+- Always include at least one project-level concept describing WHAT was worked on and WHY — the kind of thing someone would search for weeks later.`;
 }
 
 export function buildTranscript(turns: TurnData[]): string {
