@@ -8,6 +8,21 @@ All notable changes to KongCode are documented here. The 0.7.x series introduced
 - README rewrite covering daemon arch, multi-session, auto-drain costs, env-var matrix, and troubleshooting (`README.md`)
 - This CHANGELOG file
 
+## [0.7.59] — 2026-05-06
+
+### Added
+
+- **Bump script** (`scripts/bump-version.sh`): Atomically bumps all 6 version surfaces (package.json, plugin.json, DAEMON_VERSION, CLIENT_VERSION, README version badge, README tests badge) and rebuilds dist/. Prevents the recurring bug where versions drift between surfaces.
+- **Handoff concept promotion**: Both LLM-generated and heuristic handoff notes now create a searchable concept via `commitKnowledge` with auto-sealed hierarchy edges. Bridges the gap between implementation-specific concepts and the natural language users search for later.
+- **Extraction prompt improvement**: Concept extraction now explicitly asks for project-level descriptions alongside implementation details, and names concepts in natural search language ("migrating trading crons to Docker" not just "apps.yaml schema").
+- **Plugin cache auto-cleanup**: `pruneStalePluginCache()` runs on daemon startup, removes old version directories from `~/.claude/plugins/cache/kongcode-marketplace/kongcode/` keeping only the current DAEMON_VERSION. Prevents ~1GB/version disk accumulation.
+- **Implicit citation detection**: If the response mentions a file path or backtick-quoted identifier from an injected item without explicit `[#N]` citation, utilization is boosted to 0.4.
+
+### Fixed — retrieval utilization accuracy
+
+- **Skip tool-heavy turns**: Turns with response < 100 chars AND tool calls are excluded from utilization scoring — CE scoring against tool-execution transition phrases produces noise.
+- **Skip empty retrieval**: When all staged items have `finalScore < 0.1`, no retrieval_outcome rows are written. Prevents junk rows from turns where retrieval found nothing meaningful.
+
 ## [0.7.58] — 2026-05-05
 
 ### Changed — retrieval utilization scoring
