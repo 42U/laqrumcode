@@ -8,6 +8,21 @@ All notable changes to KongCode are documented here. The 0.7.x series introduced
 - README rewrite covering daemon arch, multi-session, auto-drain costs, env-var matrix, and troubleshooting (`README.md`)
 - This CHANGELOG file
 
+## [0.7.60] — 2026-05-06
+
+### Added
+
+- **TypeBox extraction schema validation** (`src/engine/daemon-types.ts`): Extraction output from subagents is now validated against TypeBox schemas with type coercion (string→number, string→boolean). Validate-and-warn approach — schema violations are logged but don't reject otherwise valid extractions. 10 new tests cover validation, coercion, backward compat, and edge cases.
+- **searchTerms on concepts**: Extraction prompt now asks for 2-3 natural language search phrases per concept. These enrich the embedding vector so natural queries ("migrating to Docker") match concepts stored with implementation names ("apps.yaml schema").
+- **Coalesced extraction queue (Issue #8)**: Session end now queues 3 work items instead of 6. `extraction` + `handoff_note` + `reflection` + `skill_extract` merged into a single `coalesced_extraction` work type. `causal_graduate` and `soul_evolve` remain separate (cross-session). Legacy work types preserved for backward compat with in-flight items.
+- **`buildCoalescedPrompt()`** (`src/engine/memory-daemon.ts`): Extends the extraction prompt with optional `handoff_note` and `reflection` fields, controlled by payload flags from session-end.
+- **Helper functions** (`src/tools/pending-work.ts`): Extracted `commitHandoffNote()` and `commitReflection()` from inline case blocks — shared by both legacy and coalesced paths.
+
+### Changed
+
+- `src/hook-handlers/session-end.ts`: Queues 1 `coalesced_extraction` instead of 4 separate items
+- `src/engine/deferred-cleanup.ts`: Mirrors session-end coalescing for orphaned sessions
+
 ## [0.7.59] — 2026-05-06
 
 ### Added

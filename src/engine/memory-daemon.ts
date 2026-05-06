@@ -58,9 +58,11 @@ ${hasRetrievedMemories ? `  "resolved": [
     // Ask: "if someone searched for this work in 3 weeks, what would they type?"
     // Name concepts in the language someone would naturally search for, not just
     // internal jargon. E.g. "migrating trading crons to Docker" not just "apps.yaml schema".
+    // searchTerms: phrases a developer would type 3 weeks from now to find this.
+    // E.g. for "apps.yaml schema" → ["migrating trading crons to Docker", "Docker compose migration"].
     // Categories: technical, architectural, behavioral, environmental, procedural
     // Max 8 per batch.
-    {"name": "short identifier (3-6 words)", "content": "the actual knowledge (1-3 sentences)", "category": "technical|architectural|behavioral|environmental|procedural", "importance": 1-10}
+    {"name": "short identifier (3-6 words)", "content": "the actual knowledge (1-3 sentences)", "category": "technical|architectural|behavioral|environmental|procedural", "importance": 1-10, "searchTerms": ["2-3 natural language phrases someone would type to find this later"]}
   ],
   "corrections": [
     // Moments where the user corrects the assistant's understanding, approach, or output.
@@ -97,6 +99,27 @@ RULES:
 - Corrections are the MOST important signal. Never miss one.
 - For artifacts, extract file paths from bash/tool commands in the transcript.
 - Always include at least one project-level concept describing WHAT was worked on and WHY — the kind of thing someone would search for weeks later.`;
+}
+
+export function buildCoalescedPrompt(
+  hasThinking: boolean,
+  hasRetrievedMemories: boolean,
+  prior: PriorExtractions,
+  includeHandoff: boolean,
+  includeReflection: boolean,
+): string {
+  let base = buildSystemPrompt(hasThinking, hasRetrievedMemories, prior);
+  const extras: string[] = [];
+  if (includeHandoff) {
+    extras.push(`  "handoff_note": "2-3 sentence first-person summary for your future self. What was worked on, what's unfinished, what to remember."`);
+  }
+  if (includeReflection) {
+    extras.push(`  "reflection": "2-4 sentences: what went well, what could improve, patterns worth noting. Be specific and actionable. Return the string 'skip' if the session is too trivial."`);
+  }
+  if (extras.length > 0) {
+    base = base.replace("RULES:", extras.join(",\n") + "\n\nRULES:");
+  }
+  return base;
 }
 
 export function buildTranscript(turns: TurnData[]): string {
@@ -155,7 +178,10 @@ export async function writeExtractionResults(
       try {
         let emb: number[] | null = null;
         if (embeddings.isAvailable()) {
-          try { emb = await embeddings.embed(c.content); } catch (e) { swallow("daemon:embedConcept", e); }
+          const embeddingText = Array.isArray(c.searchTerms) && c.searchTerms.length > 0
+            ? `${c.content} ${c.searchTerms.join(". ")}`
+            : c.content;
+          try { emb = await embeddings.embed(embeddingText); } catch (e) { swallow("daemon:embedConcept", e); }
         }
         const conceptId = await store.upsertConcept(c.content, emb, `daemon:${sessionId}`, undefined, projectId);
         if (conceptId) {

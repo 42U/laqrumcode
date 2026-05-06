@@ -32,62 +32,24 @@ export async function handleSessionEnd(
   // Queue cognitive work for subagent processing on next session
   const queueOps: Promise<unknown>[] = [];
 
-  // Extraction — always queue if session had meaningful conversation
+  // Coalesced extraction — combines extraction + handoff + reflection + skills
   if (session.userTurnCount >= 2) {
     queueOps.push(
       store.queryExec(`CREATE pending_work CONTENT $data`, {
         data: {
-          work_type: "extraction",
+          work_type: "coalesced_extraction",
           session_id: session.sessionId,
           surreal_session_id: session.surrealSessionId,
           task_id: session.taskId,
           project_id: session.projectId,
-          payload: { turn_count: session.userTurnCount },
+          payload: {
+            turn_count: session.userTurnCount,
+            include_handoff: true,
+            include_reflection: session.userTurnCount >= 3,
+          },
           priority: 1,
         },
-      }).catch(e => swallow("sessionEnd:queueExtraction", e)),
-    );
-  }
-
-  // Handoff note — high priority, needed for next wakeup
-  if (session.userTurnCount >= 2) {
-    queueOps.push(
-      store.queryExec(`CREATE pending_work CONTENT $data`, {
-        data: {
-          work_type: "handoff_note",
-          session_id: session.sessionId,
-          surreal_session_id: session.surrealSessionId,
-          priority: 2,
-        },
-      }).catch(e => swallow("sessionEnd:queueHandoff", e)),
-    );
-  }
-
-  // Reflection — needs 3+ turns for meaningful analysis
-  if (session.userTurnCount >= 3) {
-    queueOps.push(
-      store.queryExec(`CREATE pending_work CONTENT $data`, {
-        data: {
-          work_type: "reflection",
-          session_id: session.sessionId,
-          surreal_session_id: session.surrealSessionId,
-          priority: 3,
-        },
-      }).catch(e => swallow("sessionEnd:queueReflection", e)),
-    );
-  }
-
-  // Skill extraction — needs 4+ turns for meaningful patterns
-  if (session.userTurnCount >= 4) {
-    queueOps.push(
-      store.queryExec(`CREATE pending_work CONTENT $data`, {
-        data: {
-          work_type: "skill_extract",
-          session_id: session.sessionId,
-          task_id: session.taskId,
-          priority: 5,
-        },
-      }).catch(e => swallow("sessionEnd:queueSkill", e)),
+      }).catch(e => swallow("sessionEnd:queueCoalesced", e)),
     );
   }
 
@@ -155,7 +117,7 @@ export async function handleSessionEnd(
   // Cleanup session from state
   state.removeSession(sessionId);
 
-  // Trigger auto-drain — this session just queued 5-6 items; let the
+  // Trigger auto-drain — this session just queued 2-3 items; let the
   // scheduler decide whether to spawn a headless extractor right now
   // (gated by threshold + PID-file lock). Fire-and-forget. No-op when
   // KONGCODE_AUTO_DRAIN=0 or queue is below threshold.

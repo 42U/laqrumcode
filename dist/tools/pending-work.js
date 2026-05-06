@@ -10,7 +10,8 @@
  * reasoning now happens in the subagent (Opus) itself, not in
  * a separate API call from the MCP server.
  */
-import { buildSystemPrompt, buildTranscript, writeExtractionResults } from "../engine/memory-daemon.js";
+import { validateExtraction } from "../engine/daemon-types.js";
+import { buildSystemPrompt, buildCoalescedPrompt, buildTranscript, writeExtractionResults } from "../engine/memory-daemon.js";
 import { createSoul, seedSoulAsCoreMemory, reviseSoul, getSoul, checkGraduation, getQualitySignals, recordGraduationEvent } from "../engine/soul.js";
 import { swallow } from "../engine/errors.js";
 import { log } from "../engine/log.js";
@@ -88,6 +89,7 @@ export async function handleFetchPendingWork(state, _session, _args) {
 async function buildWorkPayload(item, state) {
     const { store } = state;
     switch (item.work_type) {
+        // TODO(post-0.8): remove once pre-coalesce items have drained
         case "extraction": {
             const turns = await store.getSessionTurnsRich(item.session_id, 50);
             const transcript = buildTranscript(turns);
@@ -99,6 +101,20 @@ async function buildWorkPayload(item, state) {
                 instructions,
                 data: { transcript: transcript.slice(0, 30000), turn_count: turns.length },
                 output_format: "Return ONLY valid JSON matching the schema in the instructions. All fields are arrays — use [] if empty.",
+            };
+        }
+        case "coalesced_extraction": {
+            const payload = (item.payload ?? {});
+            const turns = await store.getSessionTurnsRich(item.session_id, 50);
+            const transcript = buildTranscript(turns);
+            const prior = { conceptNames: [], artifactPaths: [], skillNames: [] };
+            const instructions = buildCoalescedPrompt(false, false, prior, payload.include_handoff ?? true, payload.include_reflection ?? false);
+            return {
+                work_id: item.id,
+                work_type: "coalesced_extraction",
+                instructions,
+                data: { transcript: transcript.slice(0, 30000), turn_count: turns.length },
+                output_format: "Return ONLY valid JSON matching the schema in the instructions. All fields are arrays — use [] if empty. handoff_note and reflection are strings, not arrays.",
             };
         }
         case "reflection": {
@@ -263,13 +279,84 @@ export async function handleCommitWorkResults(state, _session, args) {
         return text(JSON.stringify({ success: false, error: String(e) }));
     }
 }
+async function commitHandoffNote(noteText, item, state) {
+    const { store, embeddings } = state;
+    let noteEmb = null;
+    if (embeddings.isAvailable()) {
+        try {
+            noteEmb = await embeddings.embed(noteText);
+        }
+        catch { /* ok */ }
+    }
+    const record = {
+        text: noteText,
+        category: "handoff",
+        importance: 8,
+        source: `session:${item.session_id}`,
+        session_id: item.session_id,
+    };
+    if (item.project_id)
+        record.project_id = item.project_id;
+    if (noteEmb?.length)
+        record.embedding = noteEmb;
+    const memRows = await store.queryFirst(`CREATE memory CONTENT $record RETURN id`, { record });
+    const memId = memRows[0]?.id;
+    if (memId && noteText.length >= 30) {
+        try {
+            await commitKnowledge({ store, embeddings }, {
+                kind: "concept",
+                name: noteText.slice(0, 200),
+                sourceId: memId,
+                edgeName: "derived_from",
+                source: "handoff:promote",
+                precomputedVec: noteEmb,
+                projectId: item.project_id,
+            });
+        }
+        catch (e) {
+            swallow("handoff:promote", e);
+        }
+    }
+}
+async function commitReflection(reflText, item, state) {
+    const { store, embeddings } = state;
+    let reflEmb = null;
+    if (embeddings.isAvailable()) {
+        try {
+            reflEmb = await embeddings.embed(reflText);
+        }
+        catch { /* ok */ }
+    }
+    if (reflEmb?.length) {
+        const existing = await store.queryFirst(`SELECT vector::similarity::cosine(embedding, $vec) AS score FROM reflection WHERE embedding != NONE ORDER BY score DESC LIMIT 1`, { vec: reflEmb });
+        if (existing[0]?.score > 0.85)
+            return;
+    }
+    const record = {
+        session_id: item.session_id,
+        text: reflText,
+        category: "session_review",
+        severity: "minor",
+        importance: 7.0,
+    };
+    if (reflEmb?.length)
+        record.embedding = reflEmb;
+    if (item.project_id)
+        record.project_id = item.project_id;
+    const rows = await store.queryFirst(`CREATE reflection CONTENT $record RETURN id`, { record });
+    if (rows[0]?.id && item.surreal_session_id) {
+        await store.relate(String(rows[0].id), "reflects_on", item.surreal_session_id)
+            .catch(e => swallow.warn("pending-work:reflects_on", e));
+    }
+    store.clearReflectionCache();
+}
 async function commitResults(item, results, state) {
     const { store, embeddings } = state;
     switch (item.work_type) {
         case "extraction":
-        case "deferred_cleanup": {
+        case "deferred_cleanup":
+        case "coalesced_extraction": {
             if (typeof results === "string") {
-                // Try to parse JSON from the subagent's text response
                 try {
                     results = JSON.parse(results);
                 }
@@ -281,47 +368,32 @@ async function commitResults(item, results, state) {
                         throw new Error("Could not parse extraction JSON");
                 }
             }
+            const { data: validated, errors: schemaErrors } = validateExtraction(results);
+            if (schemaErrors.length > 0) {
+                log.warn(`[pending_work] extraction schema violations (${schemaErrors.length}): ${schemaErrors.slice(0, 5).join("; ")}`);
+            }
+            const extractionData = schemaErrors.length === 0 ? validated : results;
             const prior = { conceptNames: [], artifactPaths: [], skillNames: [] };
-            const counts = await writeExtractionResults(results, item.session_id, store, embeddings, prior, item.task_id, item.project_id);
+            const counts = await writeExtractionResults(extractionData, item.session_id, store, embeddings, prior, item.task_id, item.project_id);
+            if (item.work_type === "coalesced_extraction") {
+                const parsed = extractionData;
+                if (typeof parsed.handoff_note === "string" && parsed.handoff_note.length >= 20) {
+                    await commitHandoffNote(parsed.handoff_note, item, state);
+                }
+                if (typeof parsed.reflection === "string" && parsed.reflection.length >= 20 && parsed.reflection.toLowerCase().trim() !== "skip") {
+                    await commitReflection(parsed.reflection, item, state);
+                }
+            }
             return { counts };
         }
+        // TODO(post-0.8): remove once pre-coalesce items have drained
         case "reflection": {
             const reflText = typeof results === "string" ? results : String(results?.text ?? results);
             if (reflText.length < 20 || reflText.toLowerCase().trim() === "skip") {
                 return { skipped: true };
             }
-            let reflEmb = null;
-            if (embeddings.isAvailable()) {
-                try {
-                    reflEmb = await embeddings.embed(reflText);
-                }
-                catch { /* ok */ }
-            }
-            // Dedup
-            if (reflEmb?.length) {
-                const existing = await store.queryFirst(`SELECT vector::similarity::cosine(embedding, $vec) AS score FROM reflection WHERE embedding != NONE ORDER BY score DESC LIMIT 1`, { vec: reflEmb });
-                if (existing[0]?.score > 0.85)
-                    return { deduplicated: true };
-            }
-            const record = {
-                session_id: item.session_id,
-                text: reflText,
-                category: "session_review",
-                severity: "minor",
-                importance: 7.0,
-            };
-            if (reflEmb?.length)
-                record.embedding = reflEmb;
-            // 0.7.29: persist project_id on the row for fast project-scoped retrieval.
-            if (item.project_id)
-                record.project_id = item.project_id;
-            const rows = await store.queryFirst(`CREATE reflection CONTENT $record RETURN id`, { record });
-            if (rows[0]?.id && item.surreal_session_id) {
-                await store.relate(String(rows[0].id), "reflects_on", item.surreal_session_id)
-                    .catch(e => swallow.warn("pending-work:reflects_on", e));
-            }
-            store.clearReflectionCache();
-            return { reflection_id: rows[0]?.id };
+            await commitReflection(reflText, item, state);
+            return { stored: true };
         }
         case "skill_extract": {
             const parsed = parseSkillResult(results);
@@ -373,49 +445,12 @@ async function commitResults(item, results, state) {
             }
             return { sections_revised: revised };
         }
+        // TODO(post-0.8): remove once pre-coalesce items have drained
         case "handoff_note": {
             const noteText = typeof results === "string" ? results : String(results?.text ?? results);
             if (noteText.length < 20)
                 return { skipped: true };
-            let noteEmb = null;
-            if (embeddings.isAvailable()) {
-                try {
-                    noteEmb = await embeddings.embed(noteText);
-                }
-                catch { /* ok */ }
-            }
-            const record = {
-                text: noteText,
-                category: "handoff",
-                importance: 8,
-                source: `session:${item.session_id}`,
-                // 0.7.29: persist session_id and project_id (was: source string only,
-                // unsearchable). The handoff_note path was the last memory writer
-                // outside commitKnowledge that had the in-memory→DB-row gap.
-                session_id: item.session_id,
-            };
-            if (item.project_id)
-                record.project_id = item.project_id;
-            if (noteEmb?.length)
-                record.embedding = noteEmb;
-            const memRows = await store.queryFirst(`CREATE memory CONTENT $record RETURN id`, { record });
-            const memId = memRows[0]?.id;
-            if (memId && noteText.length >= 30) {
-                try {
-                    await commitKnowledge({ store, embeddings }, {
-                        kind: "concept",
-                        name: noteText.slice(0, 200),
-                        sourceId: memId,
-                        edgeName: "derived_from",
-                        source: "handoff:promote",
-                        precomputedVec: noteEmb,
-                        projectId: item.project_id,
-                    });
-                }
-                catch (e) {
-                    swallow("handoff:promote", e);
-                }
-            }
+            await commitHandoffNote(noteText, item, state);
             return { stored: true };
         }
         default:

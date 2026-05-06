@@ -56,18 +56,21 @@ export async function runDeferredCleanup(store) {
                 ops.push(store.queryExec(`CREATE pending_work CONTENT $data`, { data })
                     .catch(e => swallow("deferred:queue", e)));
             };
-            // Mirror SessionEnd's gates exactly. If we don't have a kc_session_id
-            // (older session row from before that field existed), we can't extract
-            // turns — skip everything except the unconditional pair.
+            // Coalesced extraction — mirrors SessionEnd's coalesced approach.
+            // If we don't have a kc_session_id (older row), skip to unconditional pair.
             if (kcSid && turnCount >= 2) {
-                queue({ work_type: "extraction", session_id: kcSid, surreal_session_id: session.id, payload: { turn_count: turnCount, source: "deferred_cleanup" }, priority: 1 });
-                queue({ work_type: "handoff_note", session_id: kcSid, surreal_session_id: session.id, priority: 2 });
-            }
-            if (kcSid && turnCount >= 3) {
-                queue({ work_type: "reflection", session_id: kcSid, surreal_session_id: session.id, priority: 3 });
-            }
-            if (kcSid && turnCount >= 4) {
-                queue({ work_type: "skill_extract", session_id: kcSid, priority: 5 });
+                queue({
+                    work_type: "coalesced_extraction",
+                    session_id: kcSid,
+                    surreal_session_id: session.id,
+                    payload: {
+                        turn_count: turnCount,
+                        include_handoff: true,
+                        include_reflection: turnCount >= 3,
+                        source: "deferred_cleanup",
+                    },
+                    priority: 1,
+                });
             }
             // Unconditional pair — no transcript needed; both auto-skip-complete
             // when nothing is eligible. Queueing them here gives orphan sessions

@@ -12,6 +12,7 @@ import type { TurnData, PriorExtractions } from "./daemon-types.js";
 import type { SurrealStore } from "./surreal.js";
 import type { EmbeddingService } from "./embeddings.js";
 export declare function buildSystemPrompt(hasThinking: boolean, hasRetrievedMemories: boolean, prior: PriorExtractions): string;
+export declare function buildCoalescedPrompt(hasThinking: boolean, hasRetrievedMemories: boolean, prior: PriorExtractions, includeHandoff: boolean, includeReflection: boolean): string;
 export declare function buildTranscript(turns: TurnData[]): string;
 export interface ExtractionCounts {
     causal: number;
