@@ -39,10 +39,15 @@ fi
 # 7. Rebuild dist/
 (cd "$ROOT" && npm run build)
 
+# 8. Commit, tag, and push
+git -C "$ROOT" add -A
+git -C "$ROOT" commit -m "chore: bump to v${VERSION}"
+git -C "$ROOT" tag "v${VERSION}"
+echo ""
 echo "  package.json:          ${VERSION}"
 echo "  plugin.json:           ${VERSION}"
 echo "  DAEMON_VERSION:        ${VERSION}"
 echo "  CLIENT_VERSION:        ${VERSION}"
 echo "  README badge:          v${VERSION}"
 echo ""
-echo "Done. Review changes with 'git diff', then commit and push."
+echo "Done. Run 'git push origin master --tags' to publish."
