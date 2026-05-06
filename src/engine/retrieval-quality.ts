@@ -89,6 +89,12 @@ export async function evaluateRetrieval(
   // these turns pollutes the quality gate's 14-day average with noise.
   if (responseText.length < 100 && toolResults.length > 0) return;
 
+  // Skip scoring when retrieval found nothing meaningful. Items with
+  // near-zero relevance scores are background noise, not real retrieval
+  // hits — scoring utilization on them drags the average down with junk.
+  const maxRetrievalScore = Math.max(...items.map(it => it.finalScore ?? 0));
+  if (maxRetrievalScore < 0.1) return;
+
   // Use majority-based success: mark as successful if >= 50% of tool calls
   // succeeded. The previous `every()` logic caused 99%+ failure rates because
   // a single exploratory failure (e.g. file-not-found) would tank the whole turn.
