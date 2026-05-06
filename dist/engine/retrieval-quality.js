@@ -46,6 +46,12 @@ export async function evaluateRetrieval(responseTurnId, responseText, store) {
     }
     const { sessionId, items, toolResults, queryEmbedding, indexMap } = _pendingRetrieval;
     _pendingRetrieval = null;
+    // Skip scoring for tool-heavy turns with minimal assistant text.
+    // CE scoring can't meaningfully compare a 20-char transition phrase
+    // against retrieved items. Writing near-zero utilization rows for
+    // these turns pollutes the quality gate's 14-day average with noise.
+    if (responseText.length < 100 && toolResults.length > 0)
+        return;
     // Use majority-based success: mark as successful if >= 50% of tool calls
     // succeeded. The previous `every()` logic caused 99%+ failure rates because
     // a single exploratory failure (e.g. file-not-found) would tank the whole turn.
@@ -178,6 +184,16 @@ export function computeSignals(item, responseLower, toolSuccess, cited, ceScore)
     }
     if (cited)
         utilization = Math.max(utilization, 0.7);
+    // Implicit citation: if the response mentions a file path or backtick-
+    // quoted identifier from the item, the item influenced the response even
+    // if CE/lexical scoring is low. This catches "I'll fix src/engine/soul.ts"
+    // referencing an injected artifact without [#N] citation.
+    if (!cited && utilization < 0.4) {
+        const pathHit = extractPaths(rawText).some(p => responseLower.includes(p.toLowerCase()));
+        const identHit = extractBacktickIdents(rawText).some(id => responseLower.includes(id.toLowerCase()));
+        if (pathHit || identHit)
+            utilization = Math.max(utilization, 0.4);
+    }
     let recency = 0.5;
     if (item.timestamp) {
         const ageHours = (Date.now() - new Date(item.timestamp).getTime()) / 3_600_000;
@@ -291,6 +307,21 @@ export async function getHistoricalUtilityBatch(ids, store) {
         swallow("retrieval-quality:batch", e);
     }
     return result;
+}
+const PATH_RE = /(?:^|\s|["'`(])(\/?(?:src|dist|test|lib|bin|scripts|config|\.claude)\/[\w./-]{3,80})/g;
+function extractPaths(text) {
+    const paths = [];
+    for (const m of text.matchAll(PATH_RE))
+        paths.push(m[1]);
+    return paths;
+}
+function extractBacktickIdents(text) {
+    const idents = [];
+    for (const m of text.matchAll(/`([A-Za-z][\w.]{2,40})`/g)) {
+        if (!STOP_WORDS.has(m[1].toLowerCase()))
+            idents.push(m[1]);
+    }
+    return idents;
 }
 export async function getRecentUtilizationAvg(sessionId, windowSize = 10, store) {
     if (!store)
