@@ -26,13 +26,13 @@ sed -i "s/const DAEMON_VERSION = \"[^\"]*\"/const DAEMON_VERSION = \"${VERSION}\
 # 4. CLIENT_VERSION in src/mcp-client/index.ts
 sed -i "s/const CLIENT_VERSION = \"[^\"]*\"/const CLIENT_VERSION = \"${VERSION}\"/" "$ROOT/src/mcp-client/index.ts"
 
-# 5. README.md version badge
-sed -i -E "s/badge\/v[0-9]+\.[0-9]+\.[0-9]+-stable/badge\/v${VERSION}-stable/" "$ROOT/README.md"
+# 5. README.md version badge (use | delimiter to avoid clashing with URL slashes)
+sed -i -E "s|badge/v[0-9]+\.[0-9]+\.[0-9]+-stable|badge/v${VERSION}-stable|" "$ROOT/README.md"
 
 # 6. README.md tests badge — read current passing count from last test run
-TEST_COUNT=$(cd "$ROOT" && npm test 2>&1 | grep -oP '\d+ passed' | grep -oP '\d+' || echo "")
+TEST_COUNT=$(cd "$ROOT" && npm test 2>&1 | grep -oP '\d+ passed' | tail -1 | grep -oP '\d+' || echo "")
 if [ -n "$TEST_COUNT" ]; then
-  sed -i -E "s/Tests-[0-9]+_passing/Tests-${TEST_COUNT}_passing/" "$ROOT/README.md"
+  sed -i -E "s|Tests-[0-9]+_passing|Tests-${TEST_COUNT}_passing|" "$ROOT/README.md"
   echo "  Tests badge: ${TEST_COUNT} passing"
 fi
 
