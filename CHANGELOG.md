@@ -5,6 +5,8 @@ All notable changes to KongCode are documented here. The 0.7.x series introduced
 ## [Unreleased]
 
 ### Added
+- **VS Code / Cursor / JetBrains install steps** in README with screenshots (`docs/vscode-marketplace-add.png`, `docs/vscode-plugin-enable.png`)
+- **CHANGELOG gate in bump script** (`scripts/bump-version.sh`): Refuses to bump if CHANGELOG has no section for the target version and `[Unreleased]` is empty. Auto-promotes `[Unreleased]` content when a version section is missing. Post-bump staleness check verifies all 7 surfaces (was 6) match the target version.
 - README rewrite covering daemon arch, multi-session, auto-drain costs, env-var matrix, and troubleshooting (`README.md`)
 - This CHANGELOG file
 

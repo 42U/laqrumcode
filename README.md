@@ -52,20 +52,69 @@ Quick installs (only if you need Node + git for the fallback path):
 
 ### 1. Install the plugin
 
-In Claude Code:
+<details>
+<summary><strong>CLI</strong></summary>
 
 ```
 /plugin marketplace add 42U/kongcode
 /plugin install kongcode@kongcode-marketplace
 ```
 
-### 2. Open a session
+</details>
+
+<details>
+<summary><strong>VS Code / Cursor / JetBrains</strong></summary>
+
+The plugin system is shared across CLI and IDE extensions. Open a Claude Code session in your IDE, then:
+
+1. Type `/plugins` and press Enter (shows **Manage Plugins**)
+2. Go to the **Marketplaces** tab
+3. Type `42u/kongcode` in the input field and click **Add**
+
+   ![Add the kongcode marketplace](docs/vscode-marketplace-add.png)
+
+4. Switch to the **Plugins** tab
+5. Toggle **kongcode@kongcode-marketplace** on
+
+   ![Enable the kongcode plugin](docs/vscode-plugin-enable.png)
+
+</details>
+
+### 2. Use the shipped system prompt (recommended)
+
+KongCode ships a system prompt at [`templates/kongcode.txt`](templates/kongcode.txt) that teaches Claude how to use the memory graph effectively — when to recall, when to save, how to ground answers in prior context, and how to self-heal retrieval issues. **For the best results, use it.**
+
+Copy it once:
+
+```bash
+cp /path/to/kongcode/templates/kongcode.txt ~/.kongcode-prompt.txt
+```
+
+Then set a shell alias so every session uses it automatically:
+
+```bash
+# bash / zsh — run once
+echo 'alias claude="claude --append-system-prompt-file ~/.kongcode-prompt.txt"' >> ~/.zshrc
+source ~/.zshrc
+```
+
+Or pass the flag directly:
+
+```bash
+claude --append-system-prompt-file ~/.kongcode-prompt.txt
+```
+
+Without this prompt, Claude still has access to the memory tools but doesn't know when or how to use them well — it will default to its built-in file-based memory instead of the graph, fragmenting your knowledge across two stores.
+
+> **VS Code / IDE users**: The `--append-system-prompt-file` flag applies to the CLI. For IDE sessions, copy the prompt contents into your global `~/.claude/CLAUDE.md` instead — it works the same way, just at a slightly lower priority level.
+
+### 3. Start a session
 
 ```bash
 claude
 ```
 
-On first run, the kongcode daemon provisions everything it needs (one-time, ~2-3 minutes depending on your connection):
+On first run, the daemon provisions everything it needs (one-time, ~2-3 minutes depending on your connection):
 
 - Installs npm deps (pulls node-llama-cpp's platform-correct native binding)
 - Downloads the SurrealDB binary for your platform from the official GitHub release into `~/.kongcode/cache/`
@@ -74,48 +123,25 @@ On first run, the kongcode daemon provisions everything it needs (one-time, ~2-3
 
 Subsequent sessions skip bootstrap and start in seconds — they warm-attach to the long-lived daemon.
 
-### 3. Launch Claude with the kongcode prompt (recommended)
+<details>
+<summary><strong>Optional: per-project CLAUDE.md</strong></summary>
 
-Claude Code ships with its own file-based "auto memory" system that writes to `~/.claude/projects/<project>/memory/*.md`. Without redirection, you end up with two parallel memory stores (kongcode's graph and Claude Code's files) that fragment your knowledge.
-
-We ship a kongcode-branded system prompt at [`templates/kongcode.txt`](templates/kongcode.txt) that turns Claude into an autonomous, memory-aware agent:
-
-- Explains kongcode's per-turn context injection (`<active_directives>`, `<recalled_memory>`, retrieval rationale, etc.) so Claude knows how to read and ground in it
-- Standards for every action: be factually correct, slow down on non-trivial work, verify before claiming done, apply user-set rules every turn
-- A four-phase turn loop (READ / REASON / RECALL / SAVE) with explicit save and recall triggers
-- Self-healing rules so Claude diagnoses retrieval problems with `introspect` rather than asking you to run commands
-
-Install it once:
-
-```bash
-cp /path/to/kongcode/templates/kongcode.txt ~/.kongcode-prompt.txt
-```
-
-Then launch Claude with it via `--append-system-prompt-file`. The simplest UX is a shell alias so you do not have to remember the flag:
-
-```bash
-# bash / zsh
-echo 'alias claude="claude --append-system-prompt-file ~/.kongcode-prompt.txt"' >> ~/.zshrc
-source ~/.zshrc
-```
-
-Or use it directly:
-
-```bash
-claude --append-system-prompt-file ~/.kongcode-prompt.txt
-```
-
-**Why `--append-system-prompt-file` and not `~/.claude/CLAUDE.md`?** Both work, but `--append-system-prompt-file` injects the prompt at system-prompt level, which is more authoritative than the auto-discovered `CLAUDE.md` block. CLAUDE.md is fine as a lighter alternative if you do not want a shell alias.
-
-**Per-project CLAUDE.md** (optional). Drop a short file at your repo root for project-specific notes:
+Drop a short file at your repo root for project-specific notes:
 
 ```markdown
 # <project name>
 
-The kongcode daemon may be running locally and injecting context every turn. See the kongcode prompt for the full agent guide. Query the kongcode MCP tools (`recall`, `record_finding`, `core_memory`, `introspect`) for historical decisions, architecture, and user preferences before guessing.
+The kongcode daemon may be running locally and injecting context every turn. Query the kongcode MCP tools (`recall`, `record_finding`, `core_memory`, `introspect`) for historical decisions, architecture, and user preferences before guessing.
 ```
 
-**Migrating an existing memory directory.** If `~/.claude/projects/<project>/memory/` already has `.md` files, ask Claude in a session for that project to ingest them into kongcode (`create_knowledge_gems` with the file contents, or `record_finding` per file), then delete the originals and replace `MEMORY.md` with a pointer that says "deprecated, see kongcode."
+</details>
+
+<details>
+<summary><strong>Optional: migrating an existing memory directory</strong></summary>
+
+If `~/.claude/projects/<project>/memory/` already has `.md` files, ask Claude in a session for that project to ingest them into kongcode (`create_knowledge_gems` with the file contents, or `record_finding` per file), then delete the originals and replace `MEMORY.md` with a pointer that says "deprecated, see kongcode."
+
+</details>
 
 ### Updating
 
