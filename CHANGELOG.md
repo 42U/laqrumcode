@@ -4,11 +4,17 @@ All notable changes to KongCode are documented here. The 0.7.x series introduced
 
 ## [Unreleased]
 
+### Fixed
+- **Handoff concept promotion edge mismatch** (`src/tools/pending-work.ts`, `src/daemon/heuristic-drain.ts`): Used `derived_from` (expects `IN concept|subagent`) with a `memory` record, causing silent edge creation failures on every handoff. Changed to `about_concept` (expects `IN memory OUT concept`).
+- **`archiveOldTurns` NONE insert errors** (`src/engine/surreal.ts`): SurrealQL FOR loop tried to INSERT rows already deleted by concurrent calls. Replaced with per-row JS loop that checks for NONE before inserting.
+- **`archiveOldTurns` transaction conflicts** (`src/engine/surreal.ts`): Concurrent calls from bootstrap and maintenance caused write conflicts and `graphTransformContext timed out` errors. Per-row operations with individual error handling eliminate contention.
+
 ### Added
 - **VS Code / Cursor / JetBrains install steps** in README with screenshots (`docs/vscode-marketplace-add.png`, `docs/vscode-plugin-enable.png`)
 - **CHANGELOG gate in bump script** (`scripts/bump-version.sh`): Refuses to bump if CHANGELOG has no section for the target version and `[Unreleased]` is empty. Auto-promotes `[Unreleased]` content when a version section is missing. Post-bump staleness check verifies all 7 surfaces (was 6) match the target version.
-- README rewrite covering daemon arch, multi-session, auto-drain costs, env-var matrix, and troubleshooting (`README.md`)
-- This CHANGELOG file
+
+### Changed
+- README accuracy pass: fixed Node.js badge (18+ not 20+), removed stale counts, de-jargoned "How it works" and troubleshooting, split bash/zsh alias blocks, CLI install visible by default
 
 ## [0.7.61] — 2026-05-07
 
