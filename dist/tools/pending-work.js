@@ -329,7 +329,7 @@ async function commitHandoffNote(noteText, item, state) {
                 kind: "concept",
                 name: noteText.slice(0, 200),
                 sourceId: memId,
-                edgeName: "derived_from",
+                edgeName: "about_concept",
                 source: "handoff:promote",
                 precomputedVec: noteEmb,
                 projectId: item.project_id,

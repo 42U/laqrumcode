@@ -1138,12 +1138,20 @@ export class SurrealStore {
             // after week 1 regardless of volume.
             if (!(await this.shouldRunMaintenance("archiveOldTurns", 500, 7, count)))
                 return 0;
-            const archived = await this.queryMulti(`LET $stale = (SELECT id FROM turn WHERE timestamp < time::now() - 7d AND id NOT IN (SELECT VALUE memory_id FROM retrieval_outcome WHERE memory_table = 'turn'));
-         FOR $t IN $stale {
-           INSERT INTO turn_archive (SELECT * FROM ONLY $t.id);
-           DELETE $t.id;
-         };
-         RETURN array::len($stale);`);
+            const staleRows = await this.queryFirst(`SELECT id FROM turn WHERE timestamp < time::now() - 7d AND id NOT IN (SELECT VALUE memory_id FROM retrieval_outcome WHERE memory_table = 'turn') LIMIT 500`);
+            if (!staleRows.length)
+                return 0;
+            for (const row of staleRows) {
+                try {
+                    assertRecordId(String(row.id));
+                    const rid = String(row.id);
+                    // Direct interpolation safe: assertRecordId validated above
+                    await this.queryExec(`LET $data = (SELECT * FROM ONLY ${rid});
+             IF $data != NONE { INSERT INTO turn_archive $data; DELETE ${rid}; };`);
+                }
+                catch { /* row already archived or deleted by concurrent call */ }
+            }
+            const archived = staleRows.length;
             const n = Number(archived ?? 0);
             await this.recordMaintenanceRun("archiveOldTurns", n, Date.now() - started);
             return n;
