@@ -8,6 +8,24 @@ All notable changes to KongCode are documented here. The 0.7.x series introduced
 - README rewrite covering daemon arch, multi-session, auto-drain costs, env-var matrix, and troubleshooting (`README.md`)
 - This CHANGELOG file
 
+## [0.7.61] — 2026-05-07
+
+### Added
+
+- **Three-bucket composite utilization scoring**: Per-turn quality metric replacing per-item CE+lexical scoring. Composite = 60% rules compliance (LLM-judged at session end) + 30% context utilization (CE on knowledge items only) + 10% memory curation (tool usage + citations). Behavioral items (rules, preferences, corrections) are no longer penalized for not appearing in response text.
+- **`turn_score` table** (`src/engine/schema.surql`): New per-turn aggregate with `context_util`, `rules_compliance`, `curation`, and `composite` fields. Quality gate prefers `turn_score.composite`, falls back to `retrieval_outcome.utilization` for pre-rollout sessions.
+- **`classifyItem()`** (`src/engine/retrieval-quality.ts`): Three-bucket item classifier — knowledge (concepts, artifacts, facts), behavioral (preferences, corrections, identity), context (monologue, turns, skills).
+- **`computeCurationScore()`** (`src/tools/pending-work.ts`): Mechanical curation scoring from transcript regex + tool_name signals + MCP tool patterns + citation detection.
+- **`rules_compliance` in extraction schema** (`src/engine/daemon-types.ts`): LLM rates 0.0–1.0 how well the assistant followed injected directives during the session.
+- **Introspect templates**: `turn_scores` (recent breakdown) and `turn_score_summary` (total/scored/pending counts) for `turn_score` observability.
+- **14 new tests**: `classifyItem` coverage (12 table/category combos), composite formula verification (2 tests).
+
+### Changed
+
+- Quality gate (`src/engine/soul.ts`): Reads `turn_score.composite` via `math::mean` with raw-value JS fallback for SurrealDB float coercion failures. Falls back to `retrieval_outcome.utilization` when no turn_score data exists.
+- Daily rollup (`src/engine/observability.ts`): Writes `mean_composite` from `turn_score` alongside existing `mean_retrieval_util` from `retrieval_outcome`. Same raw-value fallback.
+- Composite backfill (`src/tools/pending-work.ts`): Computed in JS per-row instead of SurrealQL IF/THEN/ELSE. `rules_compliance` defaults to 0.7 when LLM omits the field.
+
 ## [0.7.60] — 2026-05-06
 
 ### Added
