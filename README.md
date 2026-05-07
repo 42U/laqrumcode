@@ -93,9 +93,12 @@ cp /path/to/kongcode/templates/kongcode.txt ~/.kongcode-prompt.txt
 Then set a shell alias so every session uses it automatically:
 
 ```bash
-# bash / zsh — run once
-echo 'alias claude="claude --append-system-prompt-file ~/.kongcode-prompt.txt"' >> ~/.zshrc
-source ~/.zshrc
+# Add to your shell rc — pick the one you use:
+echo 'alias claude="claude --append-system-prompt-file ~/.kongcode-prompt.txt"' >> ~/.bashrc   # bash
+echo 'alias claude="claude --append-system-prompt-file ~/.kongcode-prompt.txt"' >> ~/.zshrc    # zsh
+
+# Then reload:
+source ~/.bashrc   # or ~/.zshrc
 ```
 
 Or pass the flag directly:
