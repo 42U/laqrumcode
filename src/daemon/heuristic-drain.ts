@@ -108,7 +108,7 @@ async function processHandoffNote(item: PendingItem, state: GlobalPluginState): 
         kind: "concept",
         name: note.slice(0, 200),
         sourceId: memId,
-        edgeName: "derived_from",
+        edgeName: "about_concept",
         source: "handoff:promote",
         precomputedVec: emb,
         projectId: item.project_id,
