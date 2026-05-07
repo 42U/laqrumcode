@@ -4,6 +4,8 @@ All notable changes to KongCode are documented here. The 0.7.x series introduced
 
 ## [Unreleased]
 
+## [0.7.62] — 2026-05-07
+
 ### Fixed
 - **Handoff concept promotion edge mismatch** (`src/tools/pending-work.ts`, `src/daemon/heuristic-drain.ts`): Used `derived_from` (expects `IN concept|subagent`) with a `memory` record, causing silent edge creation failures on every handoff. Changed to `about_concept` (expects `IN memory OUT concept`).
 - **`archiveOldTurns` NONE insert errors** (`src/engine/surreal.ts`): SurrealQL FOR loop tried to INSERT rows already deleted by concurrent calls. Replaced with per-row JS loop that checks for NONE before inserting.

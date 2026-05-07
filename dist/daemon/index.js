@@ -58,7 +58,7 @@ import { configureReranker, disposeReranker, isRerankerActive } from "../engine/
 import { disposeSharedLlama } from "../engine/llama-loader.js";
 import { detectResourceProfile } from "../engine/resource-tier.js";
 /** Daemon version reported via meta.handshake — kept in sync with package.json. */
-const DAEMON_VERSION = "0.7.61";
+const DAEMON_VERSION = "0.7.62";
 /** Lex-compare dotted versions ("0.7.5" vs "0.7.22"). Returns negative/0/positive
  *  the way Array.sort expects. Skips a full semver dep — kongcode's versions
  *  are always plain MAJOR.MINOR.PATCH, no prereleases on the daemon channel. */
