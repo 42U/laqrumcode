@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { stageRetrieval, getStagedItems, recordToolOutcome, evaluateRetrieval, computeSignals } from "../src/engine/retrieval-quality.js";
+import { stageRetrieval, getStagedItems, recordToolOutcome, evaluateRetrieval, computeSignals, classifyItem } from "../src/engine/retrieval-quality.js";
 import type { RetrievedItem } from "../src/engine/retrieval-quality.js";
 
 function makeItem(overrides: Partial<RetrievedItem> = {}): RetrievedItem {
@@ -76,11 +76,15 @@ describe("evaluateRetrieval", () => {
       mockStore as any,
     );
 
-    expect(created).toHaveLength(1);
-    expect(created[0].session_id).toBe("session1");
-    expect(created[0].turn_id).toBe("turn:123");
-    expect(created[0].memory_id).toBe("memory:test1");
-    expect(created[0].utilization).toBeGreaterThan(0);
+    const outcomes = created.filter((r: any) => r.memory_id);
+    const turnScores = created.filter((r: any) => r.context_util !== undefined);
+    expect(outcomes).toHaveLength(1);
+    expect(outcomes[0].session_id).toBe("session1");
+    expect(outcomes[0].turn_id).toBe("turn:123");
+    expect(outcomes[0].memory_id).toBe("memory:test1");
+    expect(outcomes[0].utilization).toBeGreaterThan(0);
+    expect(turnScores).toHaveLength(1);
+    expect(turnScores[0].session_id).toBe("session1");
   });
 
   it("high utilization when response references retrieved text", async () => {
@@ -141,6 +145,60 @@ describe("evaluateRetrieval", () => {
     };
     // Should not throw
     await evaluateRetrieval("turn:1", "response", mockStore as any);
+  });
+});
+
+describe("classifyItem — three-bucket purpose classification", () => {
+  function mkItem(table: string, category?: string): RetrievedItem {
+    return { id: `${table}:test`, table, text: "test", score: 1, category } as RetrievedItem;
+  }
+
+  it("concepts are knowledge", () => {
+    expect(classifyItem(mkItem("concept"))).toBe("knowledge");
+  });
+
+  it("artifacts are knowledge", () => {
+    expect(classifyItem(mkItem("artifact"))).toBe("knowledge");
+  });
+
+  it("identity_chunks are behavioral", () => {
+    expect(classifyItem(mkItem("identity_chunk"))).toBe("behavioral");
+  });
+
+  it("monologues are context", () => {
+    expect(classifyItem(mkItem("monologue"))).toBe("context");
+  });
+
+  it("turns are context", () => {
+    expect(classifyItem(mkItem("turn"))).toBe("context");
+  });
+
+  it("skills are context", () => {
+    expect(classifyItem(mkItem("skill"))).toBe("context");
+  });
+
+  it("memory with preference category is behavioral", () => {
+    expect(classifyItem(mkItem("memory", "preference"))).toBe("behavioral");
+  });
+
+  it("memory with correction category is behavioral", () => {
+    expect(classifyItem(mkItem("memory", "correction"))).toBe("behavioral");
+  });
+
+  it("memory with fact category is knowledge", () => {
+    expect(classifyItem(mkItem("memory", "fact"))).toBe("knowledge");
+  });
+
+  it("memory with decision category is knowledge", () => {
+    expect(classifyItem(mkItem("memory", "decision"))).toBe("knowledge");
+  });
+
+  it("memory with causal category is knowledge", () => {
+    expect(classifyItem(mkItem("memory", "causal_trigger_fix"))).toBe("knowledge");
+  });
+
+  it("memory with no category defaults to knowledge", () => {
+    expect(classifyItem(mkItem("memory"))).toBe("knowledge");
   });
 });
 
@@ -205,5 +263,19 @@ describe("computeSignals — utilization formula", () => {
     const base = computeSignals(item, response, true).utilization;
     const withCite = computeSignals(item, response, true, true).utilization;
     expect(withCite).toBeGreaterThanOrEqual(base);
+  });
+});
+
+describe("composite scoring formula", () => {
+  it("composite = 0.6*rules + 0.3*context + 0.1*curation", () => {
+    const rules = 0.8, context = 0.5, curation = 1.0;
+    const composite = (0.6 * rules) + (0.3 * context) + (0.1 * curation);
+    expect(composite).toBeCloseTo(0.73, 2);
+  });
+
+  it("composite without context_util omits the 30% bucket", () => {
+    const rules = 0.8, curation = 1.0;
+    const composite = (0.6 * rules) + (0.1 * curation);
+    expect(composite).toBeCloseTo(0.58, 2);
   });
 });

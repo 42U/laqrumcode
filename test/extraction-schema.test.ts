@@ -88,4 +88,19 @@ describe("ExtractionResultSchema", () => {
     const { errors } = validateExtraction(input);
     expect(errors).toEqual([]);
   });
+
+  it("accepts rules_compliance as a 0-1 number", () => {
+    const input = {
+      concepts: [],
+      rules_compliance: 0.85,
+    };
+    const { errors } = validateExtraction(input);
+    expect(errors).toEqual([]);
+  });
+
+  it("coerces string rules_compliance to number", () => {
+    const raw = { concepts: [], rules_compliance: "0.9" };
+    const converted = Value.Convert(ExtractionResultSchema, raw);
+    expect((converted as any).rules_compliance).toBe(0.9);
+  });
 });

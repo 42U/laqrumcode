@@ -152,13 +152,17 @@ export async function getQualitySignals(store: SurrealStore): Promise<QualitySig
   if (!store.isAvailable()) return defaults;
 
   try {
-    const [retrieval, skills, reflCritical, reflTotal, toolFails] = await Promise.all([
-      // Average retrieval utilization over the last 14 days. All-time was
-      // tempting (more data → less variance) but a single week of bad
-      // outcomes can permanently drag the gate, and old outcomes don't
-      // reflect current model/embedding behavior. 14 days balances signal
-      // stability with relevance — long enough to average out a noisy day,
-      // short enough that fresh-substrate quality dominates.
+    const [retrieval, retrievalFallback, skills, reflCritical, reflTotal, toolFails] = await Promise.all([
+      // Three-bucket composite (turn_score): 60% rules + 30% context + 10% curation.
+      // Preferred source — only populated for sessions after the three-bucket rollout.
+      store.queryFirst<{ avgUtil: number; cnt: number }>(
+        `SELECT math::mean(composite) AS avgUtil, count() AS cnt
+         FROM turn_score
+         WHERE created_at > time::now() - 14d AND composite IS NOT NONE
+         GROUP ALL`,
+      ).catch(() => []),
+      // Fallback: legacy per-item utilization from retrieval_outcome.
+      // Used when turn_score has no data (pre-rollout sessions still in window).
       store.queryFirst<{ avgUtil: number; cnt: number }>(
         `SELECT math::mean(utilization) AS avgUtil, count() AS cnt
          FROM retrieval_outcome
@@ -189,7 +193,19 @@ export async function getQualitySignals(store: SurrealStore): Promise<QualitySig
       ).catch(() => []),
     ]);
 
-    const retRow = (retrieval as { avgUtil: number; cnt: number }[])[0];
+    let tsRow = (retrieval as { avgUtil: number; cnt: number }[])[0];
+    // Fallback: if math::mean returned non-finite (SurrealDB float coercion), compute in JS
+    if (tsRow && !Number.isFinite(tsRow.avgUtil) && (tsRow.cnt ?? 0) > 0) {
+      const rawRows = await store.queryFirst<{ composite: number }>(
+        `SELECT composite FROM turn_score WHERE created_at > time::now() - 14d AND composite IS NOT NONE`,
+      ).catch(() => []);
+      const vals = (rawRows as { composite: number }[]).filter(r => Number.isFinite(r.composite));
+      if (vals.length > 0) {
+        tsRow = { avgUtil: vals.reduce((s, r) => s + r.composite, 0) / vals.length, cnt: vals.length };
+      }
+    }
+    const roRow = (retrievalFallback as { avgUtil: number; cnt: number }[])[0];
+    const retRow = (tsRow?.cnt ?? 0) > 0 ? tsRow : roRow;
     const skillRow = (skills as { totalSuccess: number; totalFailure: number }[])[0];
     const critRow = (reflCritical as { count: number }[])[0];
     const totalRow = (reflTotal as { count: number }[])[0];

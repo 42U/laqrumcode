@@ -63,6 +63,7 @@ export declare const ExtractionResultSchema: import("@sinclair/typebox").TObject
     }>>>;
     handoff_note: import("@sinclair/typebox").TOptional<import("@sinclair/typebox").TString>;
     reflection: import("@sinclair/typebox").TOptional<import("@sinclair/typebox").TString>;
+    rules_compliance: import("@sinclair/typebox").TOptional<import("@sinclair/typebox").TNumber>;
 }>;
 export type ExtractionResult = Static<typeof ExtractionResultSchema>;
 export interface ValidationResult {

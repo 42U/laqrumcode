@@ -17,6 +17,8 @@ export type RetrievedItem = VectorSearchResult & {
     finalScore?: number;
     fromNeighbor?: boolean;
 };
+export type ItemPurpose = "knowledge" | "behavioral" | "context";
+export declare function classifyItem(item: RetrievedItem): ItemPurpose;
 interface QualitySignals {
     utilization: number;
     toolSuccess: boolean | null;

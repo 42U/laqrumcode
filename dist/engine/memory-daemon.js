@@ -88,6 +88,7 @@ export function buildCoalescedPrompt(hasThinking, hasRetrievedMemories, prior, i
     if (includeReflection) {
         extras.push(`  "reflection": "2-4 sentences: what went well, what could improve, patterns worth noting. Be specific and actionable. Return the string 'skip' if the session is too trivial."`);
     }
+    extras.push(`  "rules_compliance": 0.0-1.0 — rate how well the assistant followed the injected directives and rules throughout the session. 1.0 = perfect compliance with all rules. 0.5 = mixed, some rules followed some ignored. 0.0 = consistently violated rules. Judge against the ACTIVE RULES block at the top of the transcript if present. Consider: did it cite sources when context was available, follow memory-save directives, avoid prohibited actions, apply user corrections immediately?`);
     if (extras.length > 0) {
         base = base.replace("RULES:", extras.join(",\n") + "\n\nRULES:");
     }

@@ -86,13 +86,15 @@ export async function getQualitySignals(store) {
     if (!store.isAvailable())
         return defaults;
     try {
-        const [retrieval, skills, reflCritical, reflTotal, toolFails] = await Promise.all([
-            // Average retrieval utilization over the last 14 days. All-time was
-            // tempting (more data → less variance) but a single week of bad
-            // outcomes can permanently drag the gate, and old outcomes don't
-            // reflect current model/embedding behavior. 14 days balances signal
-            // stability with relevance — long enough to average out a noisy day,
-            // short enough that fresh-substrate quality dominates.
+        const [retrieval, retrievalFallback, skills, reflCritical, reflTotal, toolFails] = await Promise.all([
+            // Three-bucket composite (turn_score): 60% rules + 30% context + 10% curation.
+            // Preferred source — only populated for sessions after the three-bucket rollout.
+            store.queryFirst(`SELECT math::mean(composite) AS avgUtil, count() AS cnt
+         FROM turn_score
+         WHERE created_at > time::now() - 14d AND composite IS NOT NONE
+         GROUP ALL`).catch(() => []),
+            // Fallback: legacy per-item utilization from retrieval_outcome.
+            // Used when turn_score has no data (pre-rollout sessions still in window).
             store.queryFirst(`SELECT math::mean(utilization) AS avgUtil, count() AS cnt
          FROM retrieval_outcome
          WHERE created_at > time::now() - 14d
@@ -108,7 +110,17 @@ export async function getQualitySignals(store) {
             store.queryFirst(`SELECT math::mean(IF tool_success = false THEN 1.0 ELSE 0.0 END) AS failRate
          FROM retrieval_outcome WHERE tool_success != NONE GROUP ALL`).catch(() => []),
         ]);
-        const retRow = retrieval[0];
+        let tsRow = retrieval[0];
+        // Fallback: if math::mean returned non-finite (SurrealDB float coercion), compute in JS
+        if (tsRow && !Number.isFinite(tsRow.avgUtil) && (tsRow.cnt ?? 0) > 0) {
+            const rawRows = await store.queryFirst(`SELECT composite FROM turn_score WHERE created_at > time::now() - 14d AND composite IS NOT NONE`).catch(() => []);
+            const vals = rawRows.filter(r => Number.isFinite(r.composite));
+            if (vals.length > 0) {
+                tsRow = { avgUtil: vals.reduce((s, r) => s + r.composite, 0) / vals.length, cnt: vals.length };
+            }
+        }
+        const roRow = retrievalFallback[0];
+        const retRow = (tsRow?.cnt ?? 0) > 0 ? tsRow : roRow;
         const skillRow = skills[0];
         const critRow = reflCritical[0];
         const totalRow = reflTotal[0];

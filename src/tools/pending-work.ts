@@ -156,12 +156,18 @@ async function buildWorkPayload(
         payload.include_handoff ?? true,
         payload.include_reflection ?? false,
       );
+      // Include Tier 0 directives so the LLM can judge rules compliance
+      const tier0 = await store.getAllCoreMemory(0).catch(() => []);
+      const directivePreamble = tier0.length > 0
+        ? `ACTIVE RULES (judge compliance against these):\n${tier0.map(d => `[${d.category}] ${d.text}`).join("\n")}\n\n---\n\n`
+        : "";
+      const fullTranscript = directivePreamble + transcript.slice(0, 30000 - directivePreamble.length);
       return {
         work_id: item.id,
         work_type: "coalesced_extraction",
         instructions,
-        data: { transcript: transcript.slice(0, 30000), turn_count: turns.length },
-        output_format: "Return ONLY valid JSON matching the schema in the instructions. All fields are arrays — use [] if empty. handoff_note and reflection are strings, not arrays.",
+        data: { transcript: fullTranscript, turn_count: turns.length },
+        output_format: "Return ONLY valid JSON matching the schema in the instructions. All fields are arrays — use [] if empty. handoff_note, reflection are strings. rules_compliance is a number 0.0-1.0.",
       };
     }
 
@@ -344,6 +350,22 @@ export async function handleCommitWorkResults(
   }
 }
 
+function computeCurationScore(transcript: string, turnToolNames: string[] = []): number {
+  const recallInText = /\b(recall|mcp__\w+__recall)\b/gi.test(transcript);
+  const saveInText = /\b(record_finding|create_knowledge_gems|supersede|core_memory|mcp__\w+__(record_finding|create_knowledge_gems|supersede|core_memory))\b/gi.test(transcript);
+  const citations = /\[#\d+\]/g.test(transcript);
+
+  const toolNameStr = turnToolNames.join(" ").toLowerCase();
+  const recallInTools = toolNameStr.includes("recall");
+  const saveInTools = /record_finding|create_knowledge_gems|supersede|core_memory/.test(toolNameStr);
+
+  let score = 0;
+  if (citations) score += 0.4;
+  if (recallInText || recallInTools) score += 0.3;
+  if (saveInText || saveInTools) score += 0.3;
+  return Math.min(1, score);
+}
+
 async function commitHandoffNote(
   noteText: string,
   item: PendingWorkItem,
@@ -454,6 +476,37 @@ async function commitResults(
         }
         if (typeof parsed.reflection === "string" && parsed.reflection.length >= 20 && parsed.reflection.toLowerCase().trim() !== "skip") {
           await commitReflection(parsed.reflection, item, state);
+        }
+
+        // Three-bucket scoring: backfill rules_compliance + curation on turn_score rows
+        const rulesCompliance = typeof parsed.rules_compliance === "number"
+          ? Math.max(0, Math.min(1, parsed.rules_compliance))
+          : 0.7;
+
+        // Re-fetch transcript for curation analysis (not stored on work item)
+        const curationTurns = await store.getSessionTurnsRich(item.session_id, 50).catch(() => []);
+        const curationTranscript = buildTranscript(curationTurns as any);
+        const toolNames = (curationTurns as any[]).map((t: any) => t.tool_name ?? "").filter(Boolean);
+        const curation = computeCurationScore(curationTranscript, toolNames);
+
+        // Compute composite in JS (avoids SurrealQL IF/THEN/ELSE risk) and write scalar values
+        const sid = item.session_id;
+        const turnScoreRows = await store.queryFirst<{ id: string; context_util: number | null }>(
+          `SELECT id, context_util FROM turn_score WHERE session_id = $sid`,
+          { sid },
+        ).catch(() => []);
+
+        for (const row of turnScoreRows as { id: string; context_util: number | null }[]) {
+          const cu = row.context_util != null ? row.context_util : 0;
+          const cuWeight = row.context_util != null ? 0.3 : 0;
+          const composite = (0.6 * rulesCompliance) + (cuWeight * cu) + (0.1 * curation);
+          try {
+            assertWorkRecordId(String(row.id));
+            await store.queryExec(
+              `UPDATE ${row.id} SET rules_compliance = $rc, curation = $cur, composite = $comp`,
+              { rc: rulesCompliance, cur: curation, comp: composite },
+            );
+          } catch (e) { swallow("pending-work:turnScoreUpdate", e); }
         }
       }
       return { counts };

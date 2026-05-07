@@ -22,6 +22,21 @@ export type RetrievedItem = VectorSearchResult & {
   fromNeighbor?: boolean;
 };
 
+export type ItemPurpose = "knowledge" | "behavioral" | "context";
+
+export function classifyItem(item: RetrievedItem): ItemPurpose {
+  const table = item.table;
+  if (table === "concept" || table === "artifact") return "knowledge";
+  if (table === "identity_chunk") return "behavioral";
+  if (table === "monologue" || table === "turn" || table === "skill") return "context";
+  if (table === "memory") {
+    const cat = item.category ?? "";
+    if (cat === "preference" || cat === "correction") return "behavioral";
+    return "knowledge";
+  }
+  return "knowledge";
+}
+
 interface QualitySignals {
   utilization: number;
   toolSuccess: boolean | null;
@@ -177,6 +192,23 @@ export async function evaluateRetrieval(
       // non-critical telemetry
     }
   }
+
+  // Per-turn context utilization: MAX of knowledge items' CE scores.
+  // Only knowledge items contribute — behavioral (rules/preferences) and
+  // context (monologue/turns) shape behavior without appearing in text.
+  const knowledgeCeScores = items
+    .map((item, idx) => ({ purpose: classifyItem(item), ce: ceScores?.[idx] ?? null }))
+    .filter(x => x.purpose === "knowledge" && x.ce !== null)
+    .map(x => x.ce!);
+
+  const contextUtil = knowledgeCeScores.length > 0
+    ? Math.max(...knowledgeCeScores)
+    : null;
+
+  store.queryExec(
+    `CREATE turn_score CONTENT $data`,
+    { data: { session_id: sessionId, turn_id: responseTurnId, context_util: contextUtil } },
+  ).catch(e => swallow("retrieval-quality:turnScore", e));
 }
 
 /** 0.7.27: count how many high-salience items the assistant ignored last

@@ -59,8 +59,22 @@ export async function rollupDailyMetrics(store, day) {
        FROM retrieval_outcome
        WHERE created_at >= ${start} AND created_at <= ${end}
        GROUP ALL`).catch(() => []);
+        // Three-bucket composite from turn_score (when available)
+        const tsRows = await store.queryFirst(`SELECT math::mean(composite) AS mean_composite, count() AS ts_count
+       FROM turn_score
+       WHERE created_at >= ${start} AND created_at <= ${end} AND composite IS NOT NONE
+       GROUP ALL`).catch(() => []);
         const m = mRows[0];
         const r = rRows[0];
+        let ts = tsRows[0];
+        // Fallback: if math::mean returned non-finite (SurrealDB float coercion), compute in JS
+        if (ts && !Number.isFinite(ts.mean_composite) && (ts.ts_count ?? 0) > 0) {
+            const rawTs = await store.queryFirst(`SELECT composite FROM turn_score WHERE created_at >= ${start} AND created_at <= ${end} AND composite IS NOT NONE`).catch(() => []);
+            const vals = rawTs.filter(r => Number.isFinite(r.composite));
+            if (vals.length > 0) {
+                ts = { mean_composite: vals.reduce((s, r) => s + r.composite, 0) / vals.length, ts_count: vals.length };
+            }
+        }
         if (!m || m.n === 0) {
             log.debug(`[observability] rollupDailyMetrics: no orchestrator_metrics rows for ${day}, skipping`);
             return;
@@ -71,6 +85,7 @@ export async function rollupDailyMetrics(store, day) {
         // math::percentile() in surrealdb returns the input array (often all-NONE)
         // when it can't compute a scalar — coerce to a real float before write.
         const asFloat = (v) => (typeof v === "number" && Number.isFinite(v) ? v : 0);
+        const meanComposite = ts?.ts_count ? asFloat(ts.mean_composite) : null;
         // UPSERT keyed on day
         await store.queryExec(`UPDATE orchestrator_metrics_daily SET
          turn_count = $turn_count,
@@ -82,6 +97,7 @@ export async function rollupDailyMetrics(store, day) {
          p95_tokens_in = $p95_in,
          fast_path_rate = $fast_path_rate,
          mean_retrieval_util = $mean_util,
+         mean_composite = $mean_composite,
          tool_failure_rate = $tool_failure_rate,
          retrieval_outcome_count = $rcount,
          created_at = time::now()
@@ -99,6 +115,7 @@ export async function rollupDailyMetrics(store, day) {
            p95_tokens_in: $p95_in,
            fast_path_rate: $fast_path_rate,
            mean_retrieval_util: $mean_util,
+           mean_composite: $mean_composite,
            tool_failure_rate: $tool_failure_rate,
            retrieval_outcome_count: $rcount
          }
@@ -113,10 +130,11 @@ export async function rollupDailyMetrics(store, day) {
             p95_in: asFloat(m.p95_in),
             fast_path_rate,
             mean_util: asFloat(r?.mean_util),
+            mean_composite: meanComposite,
             tool_failure_rate,
             rcount: r?.n ?? 0,
         });
-        log.info(`[observability] rolled up ${day}: ${turn_count} turns, ${r?.n ?? 0} outcomes`);
+        log.info(`[observability] rolled up ${day}: ${turn_count} turns, ${r?.n ?? 0} outcomes${meanComposite != null ? `, composite=${(meanComposite * 100).toFixed(1)}%` : ""}`);
     }
     catch (e) {
         swallow.warn("observability:rollupDailyMetrics", e);

@@ -13,6 +13,7 @@ export interface VectorSearchResult {
     sessionId?: string;
     table: string;
     embedding?: number[];
+    category?: string;
 }
 export interface TurnRecord {
     session_id: string;

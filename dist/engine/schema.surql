@@ -202,6 +202,22 @@ DEFINE INDEX IF NOT EXISTS ro_memory_idx ON retrieval_outcome FIELDS memory_id;
 DEFINE INDEX IF NOT EXISTS ro_turn_idx ON retrieval_outcome FIELDS turn_id;
 
 -- ============================================================
+-- THREE-BUCKET TURN SCORING
+-- ============================================================
+-- Per-turn composite: 60% rules compliance + 30% context utilization + 10% memory curation.
+-- context_util written real-time; rules_compliance and curation backfilled at session end.
+DEFINE TABLE IF NOT EXISTS turn_score SCHEMALESS;
+DEFINE FIELD IF NOT EXISTS session_id ON turn_score TYPE string;
+DEFINE FIELD IF NOT EXISTS turn_id ON turn_score TYPE string;
+DEFINE FIELD IF NOT EXISTS context_util ON turn_score TYPE option<float>;
+DEFINE FIELD IF NOT EXISTS rules_compliance ON turn_score TYPE option<float>;
+DEFINE FIELD IF NOT EXISTS curation ON turn_score TYPE option<float>;
+DEFINE FIELD IF NOT EXISTS composite ON turn_score TYPE option<float>;
+DEFINE FIELD IF NOT EXISTS created_at ON turn_score TYPE datetime DEFAULT time::now();
+DEFINE INDEX IF NOT EXISTS ts_session_idx ON turn_score FIELDS session_id;
+DEFINE INDEX IF NOT EXISTS ts_turn_idx ON turn_score FIELDS turn_id;
+
+-- ============================================================
 -- ISMAR-GENT: Orchestrator Metrics
 -- ============================================================
 DEFINE TABLE IF NOT EXISTS orchestrator_metrics SCHEMALESS;

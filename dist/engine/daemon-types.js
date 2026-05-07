@@ -59,6 +59,7 @@ export const ExtractionResultSchema = Type.Object({
     skills: Type.Optional(Type.Array(SkillSchema)),
     handoff_note: Type.Optional(Type.String()),
     reflection: Type.Optional(Type.String()),
+    rules_compliance: Type.Optional(Type.Number({ minimum: 0, maximum: 1 })),
 });
 export function validateExtraction(raw) {
     if (typeof raw !== "object" || raw === null) {

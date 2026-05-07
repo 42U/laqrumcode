@@ -310,7 +310,7 @@ export class SurrealStore {
        FROM concept WHERE embedding != NONE AND array::len(embedding) > 0${projectFilter}
        ORDER BY score DESC LIMIT ${lim.concept}`,
             `SELECT id, text, importance, access_count AS accessCount,
-              created_at AS timestamp, session_id AS sessionId, 'memory' AS table,
+              created_at AS timestamp, session_id AS sessionId, category, 'memory' AS table,
               vector::similarity::cosine(embedding, $vec) AS score${emb}
        FROM memory WHERE embedding != NONE AND array::len(embedding) > 0
          AND (status = 'active' OR status IS NONE)${projectFilter} ORDER BY score DESC LIMIT ${lim.memory}`,

@@ -18,6 +18,7 @@ const ALLOWED_TABLES = new Set([
   "retrieval_outcome", "orchestrator_metrics",
   "causal_chain", "compaction_checkpoint", "subagent",
   "memory_utility_cache", "soul", "graduation_event", "maturity_stage", "pending_work",
+  "turn_score",
 ]);
 
 const VECTOR_TABLES = new Set([
@@ -73,6 +74,18 @@ const QUERY_TEMPLATES: Record<string, { sql: string; description: string; needsT
   embedding_coverage: {
     sql: "",
     description: "Per-table embedding vs total counts",
+  },
+  turn_scores: {
+    sql: `SELECT session_id, context_util, rules_compliance, curation, composite, created_at
+          FROM turn_score ORDER BY created_at DESC LIMIT 10`,
+    description: "Recent turn scores with three-bucket breakdown",
+  },
+  turn_score_summary: {
+    sql: `SELECT count() AS total,
+           count(composite IS NOT NONE) AS scored,
+           count(composite IS NONE) AS pending
+          FROM turn_score GROUP ALL`,
+    description: "Turn score counts: total, scored (composite filled), pending (awaiting backfill)",
   },
   orphan_concepts: {
     // Concepts older than 1h with no derived_from edge — flags provenance

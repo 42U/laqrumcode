@@ -14,6 +14,22 @@
  */
 import { swallow } from "./errors.js";
 import { crossEncoderScorePairs } from "./graph-context.js";
+export function classifyItem(item) {
+    const table = item.table;
+    if (table === "concept" || table === "artifact")
+        return "knowledge";
+    if (table === "identity_chunk")
+        return "behavioral";
+    if (table === "monologue" || table === "turn" || table === "skill")
+        return "context";
+    if (table === "memory") {
+        const cat = item.category ?? "";
+        if (cat === "preference" || cat === "correction")
+            return "behavioral";
+        return "knowledge";
+    }
+    return "knowledge";
+}
 // Per-turn state — module-level since only one turn is active at a time.
 // 0.7.27: indexMap holds the [#N] → memory_id map built at injection time
 // so Stop can parse the assistant response for [#1], [#2], etc. and write
@@ -139,6 +155,17 @@ export async function evaluateRetrieval(responseTurnId, responseText, store) {
             // non-critical telemetry
         }
     }
+    // Per-turn context utilization: MAX of knowledge items' CE scores.
+    // Only knowledge items contribute — behavioral (rules/preferences) and
+    // context (monologue/turns) shape behavior without appearing in text.
+    const knowledgeCeScores = items
+        .map((item, idx) => ({ purpose: classifyItem(item), ce: ceScores?.[idx] ?? null }))
+        .filter(x => x.purpose === "knowledge" && x.ce !== null)
+        .map(x => x.ce);
+    const contextUtil = knowledgeCeScores.length > 0
+        ? Math.max(...knowledgeCeScores)
+        : null;
+    store.queryExec(`CREATE turn_score CONTENT $data`, { data: { session_id: sessionId, turn_id: responseTurnId, context_util: contextUtil } }).catch(e => swallow("retrieval-quality:turnScore", e));
 }
 /** 0.7.27: count how many high-salience items the assistant ignored last
  *  turn. Used by cognitive-check to inject a Reflexion-style nudge. */
