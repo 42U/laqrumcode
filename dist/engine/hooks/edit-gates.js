@@ -36,9 +36,12 @@ function readIdleTimeout() {
 /** Destructive Bash patterns gated under `strict`. Order matters — most
  *  specific first so error messages are informative. */
 const DESTRUCTIVE_BASH_PATTERNS = [
-    { name: "rm -rf", re: /\brm\s+-[a-z]*r[a-z]*f|\brm\s+-[a-z]*f[a-z]*r/ },
-    { name: "git reset --hard", re: /\bgit\s+reset\s+--hard\b/ },
-    { name: "git push --force", re: /\bgit\s+push\s+(--force\b|-f\b|--force-with-lease\b)/ },
+    { name: "rm -rf", re: /(?:^|[\s;&|])(?:\/usr\/bin\/|\/bin\/)?rm\s+(?:-\w+\s+)*(?:--recursive|--force|-\w*r\w*f|-\w*f\w*r)\b/ },
+    { name: "rm -rf (separated)", re: /(?:^|[\s;&|])(?:\/usr\/bin\/|\/bin\/)?rm\s+(?:-\w+\s+)*-\w*r\b.*-\w*f\b/ },
+    { name: "git reset --hard", re: /\bgit\b.*\breset\b.*--hard\b/ },
+    { name: "git push --force", re: /\bgit\s+(?:-\w+\s+)*push\b.*(?:--force\b|--force-with-lease\b|-f\b)/ },
+    { name: "git checkout -- (discard)", re: /\bgit\s+checkout\s+--\s+\./ },
+    { name: "git clean -f", re: /\bgit\s+clean\b.*-\w*f/ },
     { name: "DROP TABLE", re: /\bDROP\s+TABLE\b/i },
     { name: "DELETE FROM (no WHERE)", re: /\bDELETE\s+FROM\b(?!.*\bWHERE\b)/i },
     { name: "TRUNCATE TABLE", re: /\bTRUNCATE\s+(TABLE\s+)?\w+/i },
@@ -70,10 +73,10 @@ async function hasInvestigatedFile(state, session, filePath) {
         session._editGateChecked.add(filePath);
         return true;
     }
-    // Cold path: graph query for any prior turn mentioning this exact path
-    // in this session. Catches paths that appeared in previous user turns
-    // or assistant turns ingested at Stop. Costs one CONTAINS scan; cached
-    // on hit.
+    // Cold path: graph query for user turns mentioning this exact path.
+    // Restricted to role='user' so the LLM cannot self-authorize by
+    // mentioning a path in its own output. Costs one CONTAINS scan;
+    // cached on hit.
     if (!state.store.isAvailable() || !session.surrealSessionId) {
         // No store / no session row — fail open. We can't enforce without
         // state, and blocking blindly would be hostile.
@@ -82,6 +85,7 @@ async function hasInvestigatedFile(state, session, filePath) {
     try {
         const rows = await state.store.queryFirst(`SELECT id FROM turn
          WHERE session_id = $sid
+           AND role = 'user'
            AND text CONTAINS $path
        LIMIT 1`, { sid: session.surrealSessionId, path: filePath });
         if (rows.length > 0) {
@@ -115,6 +119,7 @@ async function hasInvestigatedBashCommand(state, session, command, matchedPatter
     try {
         const rows = await state.store.queryFirst(`SELECT id FROM turn
          WHERE session_id = $sid
+           AND role = 'user'
            AND text CONTAINS $needle
        LIMIT 1`, { sid: session.surrealSessionId, needle: matchedPattern });
         if (rows.length > 0) {

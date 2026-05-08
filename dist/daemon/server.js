@@ -268,17 +268,17 @@ export class DaemonServer {
         let buffer = "";
         sock.on("data", (chunk) => {
             buffer += chunk.toString("utf8");
-            // Process complete lines as they arrive. Partial trailing line stays
-            // in buffer for the next data event.
+            if (buffer.length > 8 * 1024 * 1024) {
+                this.opts.log.warn("[daemon] client buffer exceeded 8 MB, dropping connection");
+                sock.destroy();
+                return;
+            }
             let nl;
             while ((nl = buffer.indexOf("\n")) !== -1) {
                 const line = buffer.slice(0, nl).trim();
                 buffer = buffer.slice(nl + 1);
                 if (!line)
                     continue;
-                // Don't await — handlers run concurrently per request. The socket
-                // remains writable while requests process; responses come back as
-                // they're ready, which is fine since each carries its `id`.
                 this.dispatchLine(sock, line).catch((e) => {
                     this.opts.log.error("[daemon] dispatch error:", e);
                 });

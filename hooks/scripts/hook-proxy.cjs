@@ -40,6 +40,11 @@ const HOME = process.env.HOME || process.env.USERPROFILE || os.homedir();
 const TIMEOUT_MS = 10_000; // matches hook-proxy.sh's curl --max-time default
 const CACHE_DIR = path.join(HOME, ".kongcode", "cache");
 const DAEMON_SOCKET = path.join(HOME, ".kongcode-daemon.sock");
+const AUTH_TOKEN_PATH = path.join(CACHE_DIR, "auth-token");
+
+function readAuthToken() {
+  try { return fs.readFileSync(AUTH_TOKEN_PATH, "utf8").trim(); } catch { return null; }
+}
 
 function readStdin() {
   return new Promise((resolve, reject) => {
@@ -110,9 +115,12 @@ function readPort() {
 
 function postJson({ socketPath, port, eventName, body }) {
   return new Promise((resolve) => {
+    const token = readAuthToken();
+    const hdrs = { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) };
+    if (token) hdrs["Authorization"] = `Bearer ${token}`;
     const opts = socketPath
-      ? { socketPath, path: `/hook/${eventName}`, method: "POST", headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) } }
-      : { host: "127.0.0.1", port, path: `/hook/${eventName}`, method: "POST", headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) } };
+      ? { socketPath, path: `/hook/${eventName}`, method: "POST", headers: hdrs }
+      : { host: "127.0.0.1", port, path: `/hook/${eventName}`, method: "POST", headers: hdrs };
     const req = http.request(opts, (res) => {
       const chunks = [];
       res.on("data", (c) => chunks.push(c));

@@ -325,6 +325,42 @@ describe("checkBashGate", () => {
     expect((await checkBashGate(state, session, "git push -f origin main"))?.hookSpecificOutput?.permissionDecision).toBe("deny");
   });
 
+  it("blocks rm with separated -r -f flags", async () => {
+    const { state } = makeMockState([]);
+    const session = makeSession();
+    expect((await checkBashGate(state, session, "rm -r -f /tmp/foo"))?.hookSpecificOutput?.permissionDecision).toBe("deny");
+  });
+
+  it("blocks rm --recursive --force (long flags)", async () => {
+    const { state } = makeMockState([]);
+    const session = makeSession();
+    expect((await checkBashGate(state, session, "rm --recursive --force /tmp/foo"))?.hookSpecificOutput?.permissionDecision).toBe("deny");
+  });
+
+  it("blocks /bin/rm -rf (absolute path)", async () => {
+    const { state } = makeMockState([]);
+    const session = makeSession();
+    expect((await checkBashGate(state, session, "/bin/rm -rf /tmp/foo"))?.hookSpecificOutput?.permissionDecision).toBe("deny");
+  });
+
+  it("blocks git push origin main --force (late flag)", async () => {
+    const { state } = makeMockState([]);
+    const session = makeSession();
+    expect((await checkBashGate(state, session, "git push origin main --force"))?.hookSpecificOutput?.permissionDecision).toBe("deny");
+  });
+
+  it("blocks git -c flag.x=y reset --hard (intervening flags)", async () => {
+    const { state } = makeMockState([]);
+    const session = makeSession();
+    expect((await checkBashGate(state, session, "git -c advice.detachedHead=false reset --hard"))?.hookSpecificOutput?.permissionDecision).toBe("deny");
+  });
+
+  it("blocks git clean -fd", async () => {
+    const { state } = makeMockState([]);
+    const session = makeSession();
+    expect((await checkBashGate(state, session, "git clean -fd"))?.hookSpecificOutput?.permissionDecision).toBe("deny");
+  });
+
   it("allows when the user's message authorizes the command verbatim", async () => {
     const { state, queryFirst } = makeMockState([]);
     const session = makeSession();

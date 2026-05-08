@@ -8,11 +8,14 @@
  */
 import { createServer } from "node:http";
 import { existsSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
+import { randomBytes } from "node:crypto";
+import { dirname, join } from "node:path";
 import { log } from "./engine/log.js";
 let server = null;
 let socketPath = null;
 let portFilePath = null;
+let authToken = null;
+let authTokenPath = null;
 /** Helper: wrap additionalContext in the hookSpecificOutput envelope Claude Code expects. */
 export function makeHookOutput(eventName, additionalContext, extra) {
     if (!additionalContext && !extra)
@@ -40,10 +43,27 @@ async function handleRequest(state, req, res) {
     }
     // Hook endpoints: POST /hook/<event-name>
     if (req.method === "POST" && req.url?.startsWith("/hook/")) {
+        if (authToken) {
+            const bearer = req.headers.authorization?.replace(/^Bearer\s+/i, "");
+            if (bearer !== authToken) {
+                res.writeHead(401, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ error: "unauthorized" }));
+                return;
+            }
+        }
         const event = req.url.slice("/hook/".length);
-        // Read body
+        // Read body (capped at 8 MB to prevent OOM from malicious payloads)
         const chunks = [];
+        let bodyLen = 0;
+        const MAX_BODY = 8 * 1024 * 1024;
         for await (const chunk of req) {
+            bodyLen += chunk.length;
+            if (bodyLen > MAX_BODY) {
+                res.writeHead(413, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ error: "payload too large" }));
+                req.destroy();
+                return;
+            }
             chunks.push(chunk);
         }
         let payload = {};
@@ -152,6 +172,17 @@ export function sweepStaleSockets(dir, ownPid) {
  * Listens on a Unix socket (preferred) or localhost:0 (fallback).
  */
 export async function startHttpApi(state, sock, projectDir) {
+    const cacheDir = join(process.env.HOME || process.env.USERPROFILE || "/tmp", ".kongcode", "cache");
+    try {
+        authToken = randomBytes(24).toString("hex");
+        authTokenPath = join(cacheDir, "auth-token");
+        writeFileSync(authTokenPath, authToken, { mode: 0o600 });
+        log.info("[http-api] auth token written to", authTokenPath);
+    }
+    catch (err) {
+        log.warn("[http-api] failed to write auth token, running unauthenticated:", err);
+        authToken = null;
+    }
     server = createServer((req, res) => {
         handleRequest(state, req, res).catch(err => {
             log.error("HTTP API error:", err);
@@ -230,5 +261,13 @@ export async function stopHttpApi() {
         }
         catch { /* ignore */ }
         portFilePath = null;
+    }
+    if (authTokenPath && existsSync(authTokenPath)) {
+        try {
+            unlinkSync(authTokenPath);
+        }
+        catch { /* ignore */ }
+        authTokenPath = null;
+        authToken = null;
     }
 }

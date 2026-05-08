@@ -13,6 +13,7 @@ import type { GlobalPluginState } from "../engine/state.js";
 import { makeHookOutput, type HookResponse } from "../http-api.js";
 import { assembleContextString, ingestTurn } from "../context-assembler.js";
 import { swallow } from "../engine/errors.js";
+import { stripStructuralTags } from "../engine/sanitize.js";
 import { log } from "../engine/log.js";
 import { detectAnomalies, formatAnomalyBlock } from "../engine/observability.js";
 
@@ -39,9 +40,7 @@ function wrapKongcodeContext(raw: string | undefined | null): string {
   // input before re-wrapping. Without this, kongcode's wrapper ends up nested
   // inside Claude Code's harness wrapper (or a prior hook's wrapper), which
   // shows visibly to the model and suggests sloppy concatenation.
-  const stripped = raw
-    .replace(/<\/?system-reminder>\s*/g, "")
-    .trim();
+  const stripped = stripStructuralTags(raw).trim();
   if (!stripped) return "";
   return [
     "<system-reminder>",

@@ -1,6 +1,22 @@
 import { swallow } from "./errors.js";
 import { assertRecordId } from "./surreal.js";
 import { linkConceptHierarchy, linkToRelevantConcepts } from "./concept-links.js";
+import { stripStructuralTags } from "./sanitize.js";
+function sanitizeExtraction(obj) {
+    if (obj == null || typeof obj !== "object")
+        return;
+    if (Array.isArray(obj)) {
+        for (const item of obj)
+            sanitizeExtraction(item);
+        return;
+    }
+    for (const [k, v] of Object.entries(obj)) {
+        if (typeof v === "string")
+            obj[k] = stripStructuralTags(v);
+        else if (typeof v === "object" && v !== null)
+            sanitizeExtraction(v);
+    }
+}
 // --- Build the extraction prompt ---
 export function buildSystemPrompt(hasThinking, hasRetrievedMemories, prior) {
     const dedup = prior.conceptNames.length > 0 || prior.artifactPaths.length > 0 || prior.skillNames.length > 0
@@ -98,9 +114,9 @@ export function buildTranscript(turns) {
     return turns
         .map(t => {
         const prefix = t.tool_name ? `[tool:${t.tool_name}]` : `[${t.role}]`;
-        let line = `${prefix} ${(t.text ?? "").slice(0, 1500)}`;
+        let line = `${prefix} ${stripStructuralTags((t.text ?? "").slice(0, 1500))}`;
         if (t.tool_result)
-            line += `\n  -> ${t.tool_result.slice(0, 500)}`;
+            line += `\n  -> ${stripStructuralTags(t.tool_result.slice(0, 500))}`;
         if (t.file_paths && t.file_paths.length > 0)
             line += `\n  files: ${t.file_paths.join(", ")}`;
         return line;
@@ -108,6 +124,7 @@ export function buildTranscript(turns) {
         .join("\n");
 }
 export async function writeExtractionResults(result, sessionId, store, embeddings, priorState, taskId, projectId, turns) {
+    sanitizeExtraction(result);
     const counts = {
         causal: 0, monologue: 0, resolved: 0, concept: 0,
         correction: 0, preference: 0, artifact: 0, decision: 0, skill: 0,

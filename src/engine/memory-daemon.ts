@@ -15,6 +15,16 @@ import { swallow } from "./errors.js";
 import { assertRecordId } from "./surreal.js";
 import { linkConceptHierarchy, linkToRelevantConcepts } from "./concept-links.js";
 import { linkSupersedesEdges } from "./supersedes.js";
+import { stripStructuralTags } from "./sanitize.js";
+
+function sanitizeExtraction(obj: unknown): void {
+  if (obj == null || typeof obj !== "object") return;
+  if (Array.isArray(obj)) { for (const item of obj) sanitizeExtraction(item); return; }
+  for (const [k, v] of Object.entries(obj as Record<string, unknown>)) {
+    if (typeof v === "string") (obj as Record<string, unknown>)[k] = stripStructuralTags(v);
+    else if (typeof v === "object" && v !== null) sanitizeExtraction(v);
+  }
+}
 
 // --- Build the extraction prompt ---
 
@@ -127,8 +137,8 @@ export function buildTranscript(turns: TurnData[]): string {
   return turns
     .map(t => {
       const prefix = t.tool_name ? `[tool:${t.tool_name}]` : `[${t.role}]`;
-      let line = `${prefix} ${(t.text ?? "").slice(0, 1500)}`;
-      if (t.tool_result) line += `\n  -> ${t.tool_result.slice(0, 500)}`;
+      let line = `${prefix} ${stripStructuralTags((t.text ?? "").slice(0, 1500))}`;
+      if (t.tool_result) line += `\n  -> ${stripStructuralTags(t.tool_result.slice(0, 500))}`;
       if (t.file_paths && t.file_paths.length > 0) line += `\n  files: ${t.file_paths.join(", ")}`;
       return line;
     })
@@ -159,6 +169,8 @@ export async function writeExtractionResults(
   projectId?: string,
   turns?: TurnData[],
 ): Promise<ExtractionCounts> {
+  sanitizeExtraction(result);
+
   const counts: ExtractionCounts = {
     causal: 0, monologue: 0, resolved: 0, concept: 0,
     correction: 0, preference: 0, artifact: 0, decision: 0, skill: 0,

@@ -5,6 +5,8 @@
 
 import { Type } from "@sinclair/typebox";
 import type { GlobalPluginState, SessionState } from "../state.js";
+import { stripStructuralTags } from "../sanitize.js";
+import { log } from "../log.js";
 
 const coreMemorySchema = Type.Object({
   action: Type.Union([
@@ -59,9 +61,13 @@ export function createCoreMemoryToolDef(state: GlobalPluginState, session: Sessi
               return { content: [{ type: "text" as const, text: "Error: 'text' is required for add action." }], details: null };
             }
             const tier = params.tier ?? 0;
+            const sanitized = stripStructuralTags(params.text);
+            if (tier === 0) {
+              log.warn(`[core-memory] tier-0 write: "${sanitized.slice(0, 120)}..." (session=${session.sessionId})`);
+            }
             const sid = tier === 1 ? (params.session_id ?? session.sessionId) : undefined;
             const id = await store.createCoreMemory(
-              params.text,
+              sanitized,
               params.category ?? "general",
               params.priority ?? 50,
               tier,
@@ -86,7 +92,10 @@ export function createCoreMemoryToolDef(state: GlobalPluginState, session: Sessi
               return { content: [{ type: "text" as const, text: "Error: 'id' is required for update action." }], details: null };
             }
             const fields: Record<string, unknown> = {};
-            if (params.text !== undefined) fields.text = params.text;
+            if (params.text !== undefined) {
+              fields.text = stripStructuralTags(params.text);
+              log.warn(`[core-memory] update ${params.id}: "${String(fields.text).slice(0, 120)}..." (session=${session.sessionId})`);
+            }
             if (params.category !== undefined) fields.category = params.category;
             if (params.priority !== undefined) fields.priority = params.priority;
             if (params.tier !== undefined) fields.tier = params.tier;

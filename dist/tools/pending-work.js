@@ -15,6 +15,7 @@ import { buildSystemPrompt, buildCoalescedPrompt, buildTranscript, writeExtracti
 import { createSoul, seedSoulAsCoreMemory, reviseSoul, getSoul, checkGraduation, getQualitySignals, recordGraduationEvent } from "../engine/soul.js";
 import { swallow } from "../engine/errors.js";
 import { log } from "../engine/log.js";
+import { stripStructuralTags } from "../engine/sanitize.js";
 import { commitKnowledge } from "../engine/commit.js";
 // ── Helpers ──────────────────────────────────────────────────────────────────
 /** Validate a SurrealDB record id before direct interpolation. Same pattern as
@@ -535,20 +536,17 @@ export async function handleCreateKnowledgeGems(state, session, args) {
                 skipped++;
                 continue;
             }
+            const cleanContent = stripStructuralTags(gem.content);
             let gemEmb = null;
             if (embeddings.isAvailable()) {
                 try {
-                    gemEmb = await embeddings.embed(gem.content);
+                    gemEmb = await embeddings.embed(cleanContent);
                 }
                 catch { /* ok */ }
             }
-            // Route through commitKnowledge so the gem auto-seals into the graph
-            // (linkConceptHierarchy + linkToRelevantConcepts fire automatically).
-            // Previously this path wrote the concept row but left it unlinked —
-            // the root cause PR #1's merge-duplicate-concepts.mjs was cleaning up.
             const { id: conceptId } = await commitKnowledge(state, {
                 kind: "concept",
-                name: gem.content,
+                name: cleanContent,
                 source: `gem:${source}`,
                 provenance: {
                     session_id: session.sessionId,

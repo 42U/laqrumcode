@@ -17,6 +17,7 @@
  * Every write auto-seals about_concept edges via commitKnowledge.
  */
 import { commitKnowledge } from "../engine/commit.js";
+import { stripStructuralTags } from "../engine/sanitize.js";
 const DEFAULT_IMPORTANCE = {
     correction: 9, // highest signal — user correcting the bot
     decision: 7, // structural choice worth preserving
@@ -47,9 +48,11 @@ export async function handleRecordFinding(state, session, args) {
     // Compose the stored text so the category prefix is human-readable AND the
     // text itself is standalone (recall returns it verbatim). If `why` is
     // provided, append it so rationale rides with the finding.
-    const storedText = why
-        ? `[${findingType.toUpperCase()}] ${text}\nRationale: ${why}`
-        : `[${findingType.toUpperCase()}] ${text}`;
+    const cleanText = stripStructuralTags(text);
+    const cleanWhy = stripStructuralTags(why);
+    const storedText = cleanWhy
+        ? `[${findingType.toUpperCase()}] ${cleanText}\nRationale: ${cleanWhy}`
+        : `[${findingType.toUpperCase()}] ${cleanText}`;
     const { id, edges } = await commitKnowledge({ store: state.store, embeddings: state.embeddings }, {
         kind: "memory",
         text: storedText,

@@ -8,31 +8,31 @@
         "platform": "linux-amd64",
         "ext": "tgz",
         "binaryName": "surreal",
-        "sha256": null
+        "sha256": "48dbeba4896765f33e07acc25224073f0850c190872052b917ebda1f7b4375cb"
       },
       "linux-arm64": {
         "platform": "linux-arm64",
         "ext": "tgz",
         "binaryName": "surreal",
-        "sha256": null
+        "sha256": "86837a439a549ba35f78f463857ae74f0aa08b49bb473ca0fa09a122eaa6374e"
       },
       "darwin-x64": {
         "platform": "darwin-amd64",
         "ext": "tgz",
         "binaryName": "surreal",
-        "sha256": null
+        "sha256": "1377f8b97b9aefe70109f6f6af5f7c8f371b59878aaba9e5cff81c02afc6c685"
       },
       "darwin-arm64": {
         "platform": "darwin-arm64",
         "ext": "tgz",
         "binaryName": "surreal",
-        "sha256": null
+        "sha256": "76655a2b42097f66133a0d1affda6c67dbc1454923da14d71f78c73fa0f69d17"
       },
       "win32-x64": {
         "platform": "windows-amd64",
         "ext": "exe",
         "binaryName": "surreal.exe",
-        "sha256": null
+        "sha256": "fa96694e3ebc3c21da08493518c2199354b3a34f5022187b4cbdd4a6f4d325ec"
       }
     }
   },
@@ -40,13 +40,13 @@
     "$comment": "BGE-M3 GGUF Q4_K_M. Single download for all platforms (model file is portable). 420MB.",
     "name": "bge-m3-Q4_K_M.gguf",
     "url": "https://huggingface.co/gpustack/bge-m3-GGUF/resolve/main/bge-m3-Q4_K_M.gguf?download=true",
-    "sha256": null
+    "sha256": "6d39681b26c61279ac1f82db35a04a05009e94c415b51c858ff571489a82fc06"
   },
   "rerankerModel": {
     "$comment": "bge-reranker-v2-m3 GGUF Q8_0. Cross-encoder reranker for two-stage retrieve-then-rerank. ~606MB. Optional — when absent, recall falls back to WMR/ACAN scoring. Same configuration that hit 98.2% R@5 on LongMemEval in kongclaw.",
     "name": "bge-reranker-v2-m3-Q8_0.gguf",
     "url": "https://huggingface.co/gpustack/bge-reranker-v2-m3-GGUF/resolve/main/bge-reranker-v2-m3-Q8_0.gguf?download=true",
-    "sha256": null
+    "sha256": "a43c7c9b11a4c1517e5bf95151960e1621d1b72f7a493364b01e386cf1aaa1d3"
   },
   "nodeLlamaCpp": {
     "$comment": "node-llama-cpp main package + per-platform native binding. Downloaded by bootstrap on first run when running under SEA (no node_modules available). Each <platform> tarball goes to <cache>/native/node_modules/@node-llama-cpp/<platform>/ so Node's normal module resolution finds it from <cache>/native/node-llama-cpp/.",

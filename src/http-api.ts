@@ -9,13 +9,16 @@
 
 import { createServer, type Server as HttpServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { existsSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
+import { randomBytes } from "node:crypto";
+import { dirname, join } from "node:path";
 import type { GlobalPluginState } from "./engine/state.js";
 import { log } from "./engine/log.js";
 
 let server: HttpServer | null = null;
 let socketPath: string | null = null;
 let portFilePath: string | null = null;
+let authToken: string | null = null;
+let authTokenPath: string | null = null;
 
 /** Hook response format matching Claude Code's expected output.
  *
@@ -87,11 +90,28 @@ async function handleRequest(
 
   // Hook endpoints: POST /hook/<event-name>
   if (req.method === "POST" && req.url?.startsWith("/hook/")) {
+    if (authToken) {
+      const bearer = req.headers.authorization?.replace(/^Bearer\s+/i, "");
+      if (bearer !== authToken) {
+        res.writeHead(401, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "unauthorized" }));
+        return;
+      }
+    }
     const event = req.url.slice("/hook/".length);
 
-    // Read body
+    // Read body (capped at 8 MB to prevent OOM from malicious payloads)
     const chunks: Buffer[] = [];
+    let bodyLen = 0;
+    const MAX_BODY = 8 * 1024 * 1024;
     for await (const chunk of req) {
+      bodyLen += (chunk as Buffer).length;
+      if (bodyLen > MAX_BODY) {
+        res.writeHead(413, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "payload too large" }));
+        req.destroy();
+        return;
+      }
       chunks.push(chunk as Buffer);
     }
     let payload: Record<string, unknown> = {};
@@ -194,6 +214,17 @@ export async function startHttpApi(
   sock?: string,
   projectDir?: string,
 ): Promise<void> {
+  const cacheDir = join(process.env.HOME || process.env.USERPROFILE || "/tmp", ".kongcode", "cache");
+  try {
+    authToken = randomBytes(24).toString("hex");
+    authTokenPath = join(cacheDir, "auth-token");
+    writeFileSync(authTokenPath, authToken, { mode: 0o600 });
+    log.info("[http-api] auth token written to", authTokenPath);
+  } catch (err) {
+    log.warn("[http-api] failed to write auth token, running unauthenticated:", err);
+    authToken = null;
+  }
+
   server = createServer((req, res) => {
     handleRequest(state, req, res).catch(err => {
       log.error("HTTP API error:", err);
@@ -264,5 +295,10 @@ export async function stopHttpApi(): Promise<void> {
   if (portFilePath && existsSync(portFilePath)) {
     try { unlinkSync(portFilePath); } catch { /* ignore */ }
     portFilePath = null;
+  }
+  if (authTokenPath && existsSync(authTokenPath)) {
+    try { unlinkSync(authTokenPath); } catch { /* ignore */ }
+    authTokenPath = null;
+    authToken = null;
   }
 }

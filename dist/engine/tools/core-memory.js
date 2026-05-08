@@ -3,6 +3,8 @@
  * Ported from kongbrain with SurrealStore injection.
  */
 import { Type } from "@sinclair/typebox";
+import { stripStructuralTags } from "../sanitize.js";
+import { log } from "../log.js";
 const coreMemorySchema = Type.Object({
     action: Type.Union([
         Type.Literal("list"),
@@ -49,8 +51,12 @@ export function createCoreMemoryToolDef(state, session) {
                             return { content: [{ type: "text", text: "Error: 'text' is required for add action." }], details: null };
                         }
                         const tier = params.tier ?? 0;
+                        const sanitized = stripStructuralTags(params.text);
+                        if (tier === 0) {
+                            log.warn(`[core-memory] tier-0 write: "${sanitized.slice(0, 120)}..." (session=${session.sessionId})`);
+                        }
                         const sid = tier === 1 ? (params.session_id ?? session.sessionId) : undefined;
-                        const id = await store.createCoreMemory(params.text, params.category ?? "general", params.priority ?? 50, tier, sid);
+                        const id = await store.createCoreMemory(sanitized, params.category ?? "general", params.priority ?? 50, tier, sid);
                         if (!id) {
                             return {
                                 content: [{ type: "text", text: "FAILED: Core memory entry was not created." }],
@@ -69,8 +75,10 @@ export function createCoreMemoryToolDef(state, session) {
                             return { content: [{ type: "text", text: "Error: 'id' is required for update action." }], details: null };
                         }
                         const fields = {};
-                        if (params.text !== undefined)
-                            fields.text = params.text;
+                        if (params.text !== undefined) {
+                            fields.text = stripStructuralTags(params.text);
+                            log.warn(`[core-memory] update ${params.id}: "${String(fields.text).slice(0, 120)}..." (session=${session.sessionId})`);
+                        }
                         if (params.category !== undefined)
                             fields.category = params.category;
                         if (params.priority !== undefined)
