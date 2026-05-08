@@ -4,6 +4,26 @@ All notable changes to KongCode are documented here. The 0.7.x series introduced
 
 ## [Unreleased]
 
+## [0.7.63] — 2026-05-08
+
+### Security
+- **Prompt injection defense** (`src/engine/sanitize.ts`): New `stripStructuralTags()` strips all kongcode structural XML tags (`<system-reminder>`, `<active_directives>`, `<recalled_memory>`, etc.) from stored content. Applied at both write (core-memory, record-finding, knowledge-gems, memory-daemon) and read (context injection, recall, cluster_scan, what_is_missing) paths.
+- **Bearer token auth on HTTP API** (`src/http-api.ts`): Random 48-char hex token generated at startup, written to `~/.kongcode/cache/auth-token` (mode 0600), validated on every POST. Hook-proxy reads token and includes Authorization header.
+- **Body/buffer size limits**: 8 MB cap on HTTP API request bodies and daemon IPC line buffers.
+- **Edit gate cold-path restricted to user turns** (`src/engine/hooks/edit-gates.ts`): DB query filters `AND role = 'user'` so the LLM cannot self-authorize edits by mentioning paths in its own output.
+- **Hardened bash gate regex patterns**: Covers separated flags, long flags, absolute binary paths, git config flags, `git clean -f`, `git checkout -- .`.
+- **SHA256 verification for all downloads** (`bin-manifest.json`): Populated hashes for 5 SurrealDB platform binaries and 2 GGUF model files.
+- **SurrealDB credentials via env vars** (`src/engine/bootstrap.ts`): Passes `SURREAL_USER`/`SURREAL_PASS` instead of `--user`/`--pass` CLI args, hiding creds from `/proc/<pid>/cmdline`.
+- **Restricted file permissions**: Sockets (0600), auth token (0600), data/cache directories (0700) — set in bootstrap on every daemon startup.
+- **Auto-drain hardening** (`src/daemon/auto-drain.ts`): Security warning in DRAIN_PROMPT, atomic spending file writes, `statSync().isFile()` validation for KONGCODE_CLAUDE_BIN.
+- **Error disclosure reduction**: Stack traces truncated to first frame in production, HTTP API logs only `err.message`, startup warning when LOG_LEVEL=debug.
+- **eval() removed** (`src/engine/schema-loader.ts`): Replaced with `typeof globalThis.require`.
+- **Path normalization**: `resolve()` applied in config-protection, port file, and lock file paths.
+- **Embedding cache validation** (`src/engine/embeddings.ts`): `Number.isFinite` check on cached vectors.
+
+### Fixed
+- **Soul table sub-field schema** (`src/engine/schema.surql`): Added explicit field definitions for `emotional_dimensions.*`, `earned_values.*`, and `revisions.*` inner shapes on the SCHEMAFULL soul table.
+
 ## [0.7.62] — 2026-05-07
 
 ### Fixed

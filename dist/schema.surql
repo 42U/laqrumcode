@@ -386,9 +386,18 @@ DEFINE TABLE IF NOT EXISTS soul SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS agent_id ON soul TYPE string;
 DEFINE FIELD IF NOT EXISTS working_style ON soul TYPE array<string>;
 DEFINE FIELD IF NOT EXISTS emotional_dimensions ON soul TYPE array<object>;
+DEFINE FIELD IF NOT EXISTS emotional_dimensions.*.dimension ON soul TYPE string;
+DEFINE FIELD IF NOT EXISTS emotional_dimensions.*.description ON soul TYPE string;
+DEFINE FIELD IF NOT EXISTS emotional_dimensions.*.adopted_at ON soul TYPE string;
 DEFINE FIELD IF NOT EXISTS self_observations ON soul TYPE array<string>;
 DEFINE FIELD IF NOT EXISTS earned_values ON soul TYPE array<object>;
+DEFINE FIELD IF NOT EXISTS earned_values.*.value ON soul TYPE string;
+DEFINE FIELD IF NOT EXISTS earned_values.*.grounded_in ON soul TYPE string;
 DEFINE FIELD IF NOT EXISTS revisions ON soul TYPE array<object> DEFAULT [];
+DEFINE FIELD IF NOT EXISTS revisions.*.timestamp ON soul TYPE string;
+DEFINE FIELD IF NOT EXISTS revisions.*.section ON soul TYPE string;
+DEFINE FIELD IF NOT EXISTS revisions.*.change ON soul TYPE string;
+DEFINE FIELD IF NOT EXISTS revisions.*.rationale ON soul TYPE string;
 DEFINE FIELD IF NOT EXISTS created_at ON soul TYPE datetime DEFAULT time::now();
 DEFINE FIELD IF NOT EXISTS updated_at ON soul TYPE datetime DEFAULT time::now();
 
