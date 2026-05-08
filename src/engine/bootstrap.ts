@@ -578,6 +578,7 @@ async function findExistingKongcodeSurreal(
 
 async function writeSurrealPidFile(cacheDir: string, pid: number): Promise<void> {
   await mkdir(cacheDir, { recursive: true });
+  try { chmodSync(cacheDir, 0o700); } catch {}
   await writeFile(join(cacheDir, SURREAL_PID_FILENAME), String(pid), "utf-8");
 }
 
@@ -590,20 +591,18 @@ async function spawnManagedSurreal(
   cacheDir: string,
 ): Promise<ChildProcess> {
   await mkdir(dataDir, { recursive: true });
+  try { chmodSync(dataDir, 0o700); } catch {}
   // KONGCODE_DETACH_SURREAL=0 forces the legacy child-tied-to-parent behavior
   // (mainly for tests + advanced setups that want the old cleanup-on-MCP-exit
   // semantics). Default: detach so the child outlives the MCP.
   const detach = process.env.KONGCODE_DETACH_SURREAL !== "0";
-  // SurrealDB v3 syntax: `surreal start surrealkv:<absolute-path> --user X --pass Y --bind host:port`
+  // SurrealDB v3 syntax: `surreal start surrealkv:<absolute-path> --bind host:port`
+  // Credentials passed via env vars to keep them out of /proc/<pid>/cmdline.
   const child = spawn(
     binPath,
     [
       "start",
       `surrealkv:${dataDir}`,
-      "--user",
-      user,
-      "--pass",
-      pass,
       "--bind",
       `127.0.0.1:${port}`,
       "--log",
@@ -611,6 +610,7 @@ async function spawnManagedSurreal(
     ],
     {
       detached: detach,
+      env: { ...process.env, SURREAL_USER: user, SURREAL_PASS: pass },
       // When detached, ignore stdio entirely — leaving pipes open creates a
       // back-channel that prevents the parent from cleanly exiting and
       // disowning the child. With ignore, the child becomes a true daemon.

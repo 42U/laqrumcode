@@ -7,6 +7,7 @@ import { Type } from "@sinclair/typebox";
 import type { GlobalPluginState, SessionState } from "../state.js";
 import { findRelevantSkills, formatSkillContext } from "../skills.js";
 import { swallow } from "../errors.js";
+import { stripStructuralTags } from "../sanitize.js";
 import type { VectorSearchResult } from "../surreal.js";
 
 const recallSchema = Type.Object({
@@ -93,7 +94,7 @@ export function createRecallToolDef(state: GlobalPluginState, session: SessionSt
           const tag = r.table === "turn" ? `[${r.role ?? "turn"}]` : `[${r.table}]`;
           const time = r.timestamp ? ` (${new Date(r.timestamp).toLocaleDateString()})` : "";
           const score = r.score ? ` score:${r.score.toFixed(2)}` : "";
-          return `${i + 1}. ${tag}${time}${score}\n   ${(r.text ?? "").slice(0, 300)}`;
+          return `${i + 1}. ${tag}${time}${score}\n   ${stripStructuralTags((r.text ?? "").slice(0, 300))}`;
         }).join("\n\n");
 
         const neighborBlock = neighborList.length > 0
@@ -101,7 +102,7 @@ export function createRecallToolDef(state: GlobalPluginState, session: SessionSt
             neighborList.map((n, i) => {
               const tag = `[${n.table}]`;
               const score = n.score ? ` score:${n.score.toFixed(2)}` : "";
-              return `${i + 1}. ${tag}${score}\n   ${(n.text ?? "").slice(0, 200)}`;
+              return `${i + 1}. ${tag}${score}\n   ${stripStructuralTags((n.text ?? "").slice(0, 200))}`;
             }).join("\n\n")
           : "";
 

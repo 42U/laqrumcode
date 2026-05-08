@@ -19,6 +19,7 @@
 
 import type { GlobalPluginState, SessionState } from "../engine/state.js";
 import { swallow } from "../engine/errors.js";
+import { stripStructuralTags } from "../engine/sanitize.js";
 
 interface ConceptNode {
   id: string;
@@ -201,8 +202,8 @@ export async function handleWhatIsMissing(
         context_preview: context.slice(0, 100),
         seeds_found: seeds.length,
         gaps_found: gaps.length,
-        seeds: seeds.map(s => ({ id: s.id, preview: s.content.slice(0, 80), score: Number((s.score ?? 0).toFixed(3)) })),
-        gaps: gaps.map(g => ({ id: g.id, preview: g.content.slice(0, 120) })),
+        seeds: seeds.map(s => ({ id: s.id, preview: stripStructuralTags(s.content.slice(0, 80)), score: Number((s.score ?? 0).toFixed(3)) })),
+        gaps: gaps.map(g => ({ id: g.id, preview: stripStructuralTags(g.content.slice(0, 120)) })),
         suggested_recalls: suggestedRecalls,
       }, null, 2),
     }],

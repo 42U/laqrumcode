@@ -25,6 +25,7 @@
  * authorization (the user just told the agent what to do).
  */
 import { swallow } from "../errors.js";
+import { log } from "../log.js";
 const DEFAULT_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
 function readIdleTimeout() {
     const raw = process.env.KONGCODE_GATE_TIMEOUT_MS;
@@ -78,8 +79,7 @@ async function hasInvestigatedFile(state, session, filePath) {
     // mentioning a path in its own output. Costs one CONTAINS scan;
     // cached on hit.
     if (!state.store.isAvailable() || !session.surrealSessionId) {
-        // No store / no session row — fail open. We can't enforce without
-        // state, and blocking blindly would be hostile.
+        log.warn(`[edit-gate] fail-open: store=${state.store.isAvailable()}, session=${!!session.surrealSessionId}, path=${filePath}`);
         return true;
     }
     try {
@@ -95,7 +95,7 @@ async function hasInvestigatedFile(state, session, filePath) {
     }
     catch (e) {
         swallow.warn("editGate:queryTurns", e);
-        // Fail open on store error — the gate is an enhancement, not a brick wall.
+        log.warn(`[edit-gate] fail-open on store error for ${filePath}`);
         return true;
     }
     return false;
@@ -114,8 +114,10 @@ async function hasInvestigatedBashCommand(state, session, command, matchedPatter
         session._editGateChecked.add(cacheKey);
         return true;
     }
-    if (!state.store.isAvailable() || !session.surrealSessionId)
+    if (!state.store.isAvailable() || !session.surrealSessionId) {
+        log.warn(`[bash-gate] fail-open: store=${state.store.isAvailable()}, pattern=${matchedPattern}`);
         return true;
+    }
     try {
         const rows = await state.store.queryFirst(`SELECT id FROM turn
          WHERE session_id = $sid

@@ -28,6 +28,7 @@
 import type { GlobalPluginState, SessionState } from "../state.js";
 import type { HookResponse } from "../../http-api.js";
 import { swallow } from "../errors.js";
+import { log } from "../log.js";
 
 const DEFAULT_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
 
@@ -91,8 +92,7 @@ async function hasInvestigatedFile(
   // mentioning a path in its own output. Costs one CONTAINS scan;
   // cached on hit.
   if (!state.store.isAvailable() || !session.surrealSessionId) {
-    // No store / no session row — fail open. We can't enforce without
-    // state, and blocking blindly would be hostile.
+    log.warn(`[edit-gate] fail-open: store=${state.store.isAvailable()}, session=${!!session.surrealSessionId}, path=${filePath}`);
     return true;
   }
 
@@ -111,7 +111,7 @@ async function hasInvestigatedFile(
     }
   } catch (e) {
     swallow.warn("editGate:queryTurns", e);
-    // Fail open on store error — the gate is an enhancement, not a brick wall.
+    log.warn(`[edit-gate] fail-open on store error for ${filePath}`);
     return true;
   }
 
@@ -140,7 +140,10 @@ async function hasInvestigatedBashCommand(
     return true;
   }
 
-  if (!state.store.isAvailable() || !session.surrealSessionId) return true;
+  if (!state.store.isAvailable() || !session.surrealSessionId) {
+    log.warn(`[bash-gate] fail-open: store=${state.store.isAvailable()}, pattern=${matchedPattern}`);
+    return true;
+  }
 
   try {
     const rows = await state.store.queryFirst<{ id: string }>(

@@ -17,6 +17,7 @@
 
 import type { GlobalPluginState, SessionState } from "../engine/state.js";
 import { swallow } from "../engine/errors.js";
+import { stripStructuralTags } from "../engine/sanitize.js";
 
 interface ResultItem {
   id: string;
@@ -173,7 +174,7 @@ export async function handleClusterScan(
 
   const items: ResultItem[] = searchResults.slice(0, limit * 2).map((r: any) => ({
     id: String(r.id),
-    text: String(r.text ?? "").slice(0, 200),
+    text: stripStructuralTags(String(r.text ?? "").slice(0, 200)),
     table: String(r.table ?? ""),
     score: Number(r.score ?? 0),
   }));

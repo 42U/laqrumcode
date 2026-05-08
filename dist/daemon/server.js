@@ -16,7 +16,7 @@
  * EmbeddingService) handles its own concurrency.
  */
 import { createServer } from "node:net";
-import { unlinkSync, existsSync } from "node:fs";
+import { unlinkSync, existsSync, chmodSync } from "node:fs";
 import { PROTOCOL_VERSION, isKnownMethod, } from "../shared/ipc-types.js";
 export class DaemonServer {
     opts;
@@ -67,6 +67,10 @@ export class DaemonServer {
                     resolve();
                 });
             });
+            try {
+                chmodSync(this.opts.socketPath, 0o600);
+            }
+            catch { }
             this.opts.log.info(`[daemon] listening on Unix socket ${this.opts.socketPath}`);
         }
         if (this.opts.tcpPort !== null && this.opts.tcpPort !== undefined) {

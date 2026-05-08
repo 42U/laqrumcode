@@ -17,7 +17,7 @@
  */
 
 import { createServer, type Server, type Socket } from "node:net";
-import { unlinkSync, existsSync } from "node:fs";
+import { unlinkSync, existsSync, chmodSync } from "node:fs";
 import {
   PROTOCOL_VERSION,
   IpcErrorCode,
@@ -128,6 +128,7 @@ export class DaemonServer {
           resolve();
         });
       });
+      try { chmodSync(this.opts.socketPath!, 0o600); } catch {}
       this.opts.log.info(`[daemon] listening on Unix socket ${this.opts.socketPath}`);
     }
     if (this.opts.tcpPort !== null && this.opts.tcpPort !== undefined) {

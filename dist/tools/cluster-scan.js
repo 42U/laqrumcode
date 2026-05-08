@@ -15,6 +15,7 @@
  * re-shapes the output.
  */
 import { swallow } from "../engine/errors.js";
+import { stripStructuralTags } from "../engine/sanitize.js";
 async function fetchNeighborConcepts(state, resultIds) {
     const neighborMap = new Map();
     if (resultIds.length === 0)
@@ -142,7 +143,7 @@ export async function handleClusterScan(state, session, args) {
     }).catch(() => []);
     const items = searchResults.slice(0, limit * 2).map((r) => ({
         id: String(r.id),
-        text: String(r.text ?? "").slice(0, 200),
+        text: stripStructuralTags(String(r.text ?? "").slice(0, 200)),
         table: String(r.table ?? ""),
         score: Number(r.score ?? 0),
     }));

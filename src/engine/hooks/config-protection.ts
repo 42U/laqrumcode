@@ -10,7 +10,7 @@
  * of the daemon. Useful when the user is intentionally tuning configs.
  */
 
-import { basename } from "node:path";
+import { basename, resolve } from "node:path";
 
 const PROTECTED_BASENAMES: ReadonlySet<string> = new Set([
   // ESLint
@@ -66,7 +66,7 @@ export function isProtectedConfigFile(filePath: string): boolean {
   if (!filePath) return false;
   if (bypassActive === null) bypassActive = readBypass();
   if (bypassActive) return false;
-  const base = basename(filePath);
+  const base = basename(resolve(filePath));
   return PROTECTED_BASENAMES.has(base);
 }
 

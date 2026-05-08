@@ -9,7 +9,7 @@
  * Bypass: KONGCODE_ALLOW_CONFIG_EDIT=1 skips the check for the lifetime
  * of the daemon. Useful when the user is intentionally tuning configs.
  */
-import { basename } from "node:path";
+import { basename, resolve } from "node:path";
 const PROTECTED_BASENAMES = new Set([
     // ESLint
     ".eslintrc",
@@ -65,7 +65,7 @@ export function isProtectedConfigFile(filePath) {
         bypassActive = readBypass();
     if (bypassActive)
         return false;
-    const base = basename(filePath);
+    const base = basename(resolve(filePath));
     return PROTECTED_BASENAMES.has(base);
 }
 /** Test-only: clear bypass cache and let a new env take effect. */
