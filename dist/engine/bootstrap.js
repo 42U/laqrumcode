@@ -525,6 +525,16 @@ export async function bootstrap(input) {
         };
     }
     const surrealBinary = await ensureSurrealBinary(input.cacheDir, manifest, input.surrealBinPathOverride);
+    // Tighten data/cache directory permissions on every bootstrap, not just
+    // when spawning SurrealDB. The existing-reuse path skips spawnManagedSurreal
+    // entirely, so the chmod in that function never fires for resumed instances.
+    for (const dir of [input.cacheDir, input.dataDir]) {
+        try {
+            await mkdir(dir, { recursive: true });
+            chmodSync(dir, 0o700);
+        }
+        catch { }
+    }
     const port = pickPort();
     // Reuse path covers two cases:
     //  1. A previous MCP's detached SurrealDB child is still alive on the
