@@ -110,9 +110,10 @@ export class EmbeddingService {
         `SELECT embedding FROM embedding_cache WHERE text_hash = $hash AND model_version = $mv LIMIT 1`,
         { hash, mv: this.modelVersion },
       );
-      if (rows.length > 0 && Array.isArray(rows[0].embedding)) {
+      const vec = rows[0]?.embedding;
+      if (Array.isArray(vec) && vec.length > 0 && vec.every(Number.isFinite)) {
         this.l2Hits++;
-        return rows[0].embedding;
+        return vec;
       }
     } catch (e) { swallow("embeddings:l2Get", e); }
     this.l2Misses++;

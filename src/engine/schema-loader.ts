@@ -28,9 +28,9 @@ function resolveModuleDir(): string | null {
 
 function tryLoadFromSea(): string | null {
   try {
-    // node:sea is only available in Node 20+. Use a runtime require to avoid
-    // import-resolution failures when not running under SEA.
-    const requireFn = (0, eval)("typeof require === 'function' ? require : null");
+    // node:sea is only available in Node 20+. Use globalThis to detect
+    // require without eval — CJS-in-SEA exposes it globally.
+    const requireFn = typeof globalThis.require === "function" ? globalThis.require : null;
     if (!requireFn) return null;
     const sea = requireFn("node:sea");
     if (!sea?.isSea?.()) return null;

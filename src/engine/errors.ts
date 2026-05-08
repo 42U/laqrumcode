@@ -38,8 +38,14 @@ swallow.warn = function swallowWarn(context: string, err?: unknown): void {
  */
 swallow.error = function swallowError(context: string, err?: unknown): void {
   const msg = err instanceof Error ? err.message : String(err ?? "unknown");
-  const stack = err instanceof Error ? `\n${err.stack}` : "";
-  log.error(`${context}: ${msg}${stack}`);
+  let detail = "";
+  if (DEBUG && err instanceof Error && err.stack) {
+    detail = "\n" + err.stack;
+  } else if (err instanceof Error && err.stack) {
+    const firstFrame = err.stack.split("\n").find(l => l.trimStart().startsWith("at "));
+    if (firstFrame) detail = ` (${firstFrame.trim()})`;
+  }
+  log.error(`${context}: ${msg}${detail}`);
 };
 
 export { swallow };

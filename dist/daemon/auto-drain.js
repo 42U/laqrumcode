@@ -23,9 +23,9 @@
  *   KONGCODE_CLAUDE_BIN            → explicit path to claude binary
  */
 import { spawn } from "node:child_process";
-import { existsSync, openSync, closeSync, writeSync, writeFileSync, readFileSync, unlinkSync } from "node:fs";
+import { existsSync, openSync, closeSync, writeSync, writeFileSync, readFileSync, unlinkSync, renameSync, statSync } from "node:fs";
 import { execFileSync } from "node:child_process";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { log } from "../engine/log.js";
 import { swallow } from "../engine/errors.js";
@@ -42,9 +42,15 @@ function findClaudeBin() {
     if (claudeBinUnavailable)
         return null;
     const envOverride = process.env.KONGCODE_CLAUDE_BIN;
-    if (envOverride && existsSync(envOverride)) {
-        claudeBinPath = envOverride;
-        return claudeBinPath;
+    if (envOverride) {
+        try {
+            const st = statSync(envOverride);
+            if (st.isFile()) {
+                claudeBinPath = envOverride;
+                return claudeBinPath;
+            }
+        }
+        catch { /* not found or not accessible */ }
     }
     // Try `which claude` first — fastest and respects user's PATH.
     try {
@@ -71,7 +77,7 @@ function findClaudeBin() {
     return null;
 }
 function pidFilePath(cacheDir) {
-    return join(cacheDir, "auto-drain.pid");
+    return join(resolve(cacheDir), "auto-drain.pid");
 }
 function isPidAlive(pid) {
     if (!Number.isFinite(pid) || pid <= 0)
@@ -119,7 +125,7 @@ function releaseLock(fd, lockPath) {
     catch { }
 }
 function spendingFilePath(cacheDir) {
-    return join(cacheDir, "auto-drain-spending.json");
+    return join(resolve(cacheDir), "auto-drain-spending.json");
 }
 function todayUtc() {
     return new Date().toISOString().slice(0, 10); // YYYY-MM-DD
@@ -141,8 +147,11 @@ function readSpending(cacheDir) {
 function bumpSpending(cacheDir) {
     const cur = readSpending(cacheDir);
     const next = { date: todayUtc(), count: cur.count + 1 };
+    const dest = spendingFilePath(cacheDir);
     try {
-        writeFileSync(spendingFilePath(cacheDir), JSON.stringify(next), "utf-8");
+        const tmp = dest + ".tmp";
+        writeFileSync(tmp, JSON.stringify(next), "utf-8");
+        renameSync(tmp, dest);
     }
     catch (e) {
         swallow.warn("auto-drain:spending:write", e);

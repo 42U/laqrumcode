@@ -10,7 +10,7 @@
 import { createServer, type Server as HttpServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { existsSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve as resolvePath } from "node:path";
 import type { GlobalPluginState } from "./engine/state.js";
 import { log } from "./engine/log.js";
 
@@ -135,7 +135,7 @@ async function handleRequest(
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify(response));
     } catch (err) {
-      log.error(`Hook handler error [${event}]:`, err);
+      log.error(`Hook handler error [${event}]: ${err instanceof Error ? err.message : "unknown"}`);
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end("{}"); // Fail open
     }
@@ -227,7 +227,7 @@ export async function startHttpApi(
 
   server = createServer((req, res) => {
     handleRequest(state, req, res).catch(err => {
-      log.error("HTTP API error:", err);
+      log.error(`HTTP API error: ${err instanceof Error ? err.message : "unknown"}`);
       if (!res.headersSent) {
         res.writeHead(500);
         res.end("Internal error");
@@ -265,8 +265,8 @@ export async function startHttpApi(
       const addr = server!.address();
       if (addr && typeof addr === "object") {
         log.info(`HTTP API listening on port ${addr.port}`);
-        const dir = projectDir || process.cwd();
-        portFilePath = `${dir}/.kongcode-port`;
+        const dir = resolvePath(projectDir || process.cwd());
+        portFilePath = join(dir, ".kongcode-port");
         try {
           writeFileSync(portFilePath, String(addr.port));
           log.info(`Port file written: ${portFilePath}`);

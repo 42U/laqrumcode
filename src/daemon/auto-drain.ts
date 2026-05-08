@@ -24,9 +24,9 @@
  */
 
 import { spawn } from "node:child_process";
-import { existsSync, openSync, closeSync, writeSync, writeFileSync, readFileSync, unlinkSync } from "node:fs";
+import { existsSync, openSync, closeSync, writeSync, writeFileSync, readFileSync, unlinkSync, renameSync, statSync } from "node:fs";
 import { execFileSync } from "node:child_process";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { homedir } from "node:os";
 import type { GlobalPluginState } from "../engine/state.js";
 import { log } from "../engine/log.js";
@@ -59,9 +59,11 @@ function findClaudeBin(): string | null {
   if (claudeBinUnavailable) return null;
 
   const envOverride = process.env.KONGCODE_CLAUDE_BIN;
-  if (envOverride && existsSync(envOverride)) {
-    claudeBinPath = envOverride;
-    return claudeBinPath;
+  if (envOverride) {
+    try {
+      const st = statSync(envOverride);
+      if (st.isFile()) { claudeBinPath = envOverride; return claudeBinPath; }
+    } catch { /* not found or not accessible */ }
   }
 
   // Try `which claude` first — fastest and respects user's PATH.
@@ -91,7 +93,7 @@ function findClaudeBin(): string | null {
 }
 
 function pidFilePath(cacheDir: string): string {
-  return join(cacheDir, "auto-drain.pid");
+  return join(resolve(cacheDir), "auto-drain.pid");
 }
 
 function isPidAlive(pid: number): boolean {
@@ -129,7 +131,7 @@ function releaseLock(fd: number, lockPath: string): void {
 }
 
 function spendingFilePath(cacheDir: string): string {
-  return join(cacheDir, "auto-drain-spending.json");
+  return join(resolve(cacheDir), "auto-drain-spending.json");
 }
 
 function todayUtc(): string {
@@ -158,8 +160,11 @@ function readSpending(cacheDir: string): SpendingState {
 function bumpSpending(cacheDir: string): SpendingState {
   const cur = readSpending(cacheDir);
   const next: SpendingState = { date: todayUtc(), count: cur.count + 1 };
+  const dest = spendingFilePath(cacheDir);
   try {
-    writeFileSync(spendingFilePath(cacheDir), JSON.stringify(next), "utf-8");
+    const tmp = dest + ".tmp";
+    writeFileSync(tmp, JSON.stringify(next), "utf-8");
+    renameSync(tmp, dest);
   } catch (e) {
     swallow.warn("auto-drain:spending:write", e);
   }

@@ -3,6 +3,10 @@ type Level = keyof typeof LEVELS;
 
 const currentLevel: Level = (process.env.KONGCODE_LOG_LEVEL as Level) ?? "warn";
 
+if (currentLevel === "debug") {
+  console.warn("[kongcode] KONGCODE_LOG_LEVEL=debug — logs may contain user prompts and query data. Do not use in shared environments.");
+}
+
 export const log = {
   error: (...args: unknown[]) => { if (LEVELS[currentLevel] >= LEVELS.error) console.error("[kongcode]", ...args); },
   warn: (...args: unknown[]) => { if (LEVELS[currentLevel] >= LEVELS.warn) console.warn("[kongcode]", ...args); },

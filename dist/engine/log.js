@@ -1,5 +1,8 @@
 const LEVELS = { error: 0, warn: 1, info: 2, debug: 3 };
 const currentLevel = process.env.KONGCODE_LOG_LEVEL ?? "warn";
+if (currentLevel === "debug") {
+    console.warn("[kongcode] KONGCODE_LOG_LEVEL=debug — logs may contain user prompts and query data. Do not use in shared environments.");
+}
 export const log = {
     error: (...args) => { if (LEVELS[currentLevel] >= LEVELS.error)
         console.error("[kongcode]", ...args); },
