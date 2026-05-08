@@ -36,4 +36,7 @@ export declare function seedHookProfileDirective(store: {
     isAvailable(): boolean;
     queryExec(sql: string, b?: Record<string, unknown>): Promise<unknown>;
     createCoreMemory(text: string, category: string, priority: number, tier: number): Promise<unknown>;
-}): Promise<void>;
+}, registeredGates?: readonly {
+    id: string;
+    profiles: readonly string[];
+}[]): Promise<void>;

@@ -10,6 +10,7 @@ import { makeHookOutput, type HookResponse } from "../http-api.js";
 import { seedIdentity } from "../engine/identity.js";
 import { seedCognitiveBootstrap } from "../engine/cognitive-bootstrap.js";
 import { seedHookProfileDirective } from "../engine/hooks/profile.js";
+import { listGates } from "../engine/hooks/gate-registry.js";
 import { synthesizeWakeup } from "../engine/wakeup.js";
 import { runDeferredCleanup } from "../engine/deferred-cleanup.js";
 import { getSoul } from "../engine/soul.js";
@@ -60,7 +61,7 @@ export async function handleSessionStart(
       // Seed identity and cognitive bootstrap (idempotent)
       await seedIdentity(store, embeddings).catch(e => swallow("sessionStart:identity", e));
       await seedCognitiveBootstrap(store, embeddings).catch(e => swallow("sessionStart:cognitive", e));
-      await seedHookProfileDirective(store).catch(e => swallow("sessionStart:hookProfile", e));
+      await seedHookProfileDirective(store, listGates()).catch(e => swallow("sessionStart:hookProfile", e));
 
       // Run deferred cleanup for orphaned sessions
       await runDeferredCleanup(store).catch(e => swallow("sessionStart:deferredCleanup", e));

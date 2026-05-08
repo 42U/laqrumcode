@@ -4,6 +4,15 @@ All notable changes to KongCode are documented here. The 0.7.x series introduced
 
 ## [Unreleased]
 
+## [0.7.64] — 2026-05-08
+
+### Added
+- **Extensible gate registry** (`src/engine/hooks/gate-registry.ts`): New `GateDefinition` interface and registry that replaces hardcoded if-blocks in `pre-tool-use.ts`. Built-in gates (config-protection, edit-gate, bash-gate) auto-register at priorities 10/20/30. User-defined gates load from `~/.kongcode/gates.json` at daemon start — no code changes required to add arbitrary tool-call gates. Each config gate specifies tools, profiles, a regex match on any toolInput field, and a deny message. Gates are disableable via `KONGCODE_DISABLED_HOOKS` like built-ins.
+- **Dynamic profile directive** (`src/engine/hooks/profile.ts`): `seedHookProfileDirective` accepts the registered gate list and dynamically builds the Tier-0 status line, so custom gates appear in the agent's context.
+
+### Changed
+- **`pre-tool-use.ts` refactored**: Three hardcoded gate if-blocks replaced by single `runGates()` call iterating the priority-sorted registry. Observation pass and non-gate logic (tool budget, recall dedup, subagent capture) unchanged.
+
 ## [0.7.63] — 2026-05-08
 
 ### Security

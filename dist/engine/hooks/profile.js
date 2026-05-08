@@ -62,18 +62,26 @@ export function _resetProfileCacheForTests() {
  * (matched by its stable prefix) before inserting the current one, so a
  * profile change picks up on the next session.
  */
-export async function seedHookProfileDirective(store) {
+export async function seedHookProfileDirective(store, registeredGates) {
     if (!store.isAvailable())
         return;
     const profile = getActiveProfile();
     const disabled = Array.from(getDisabledHooks()).sort();
-    const editOn = shouldHookRun("edit-gate", ["standard", "strict"]);
-    const cpOn = shouldHookRun("config-protection", ["standard", "strict"]);
-    const bashOn = shouldHookRun("bash-gate", ["strict"]);
+    let gateStatus;
+    if (registeredGates && registeredGates.length > 0) {
+        gateStatus = registeredGates.map(g => {
+            const active = shouldHookRun(g.id, g.profiles);
+            return `${g.id}=${active ? "ON" : "off"}`;
+        }).join(", ");
+    }
+    else {
+        gateStatus =
+            `edit-gate=${shouldHookRun("edit-gate", ["standard", "strict"]) ? "ON" : "off"}, ` +
+                `bash-gate=${shouldHookRun("bash-gate", ["strict"]) ? "ON" : "off"}, ` +
+                `config-protection=${shouldHookRun("config-protection", ["standard", "strict"]) ? "ON" : "off"}`;
+    }
     const directive = `ACTIVE HOOK PROFILE: ${profile}. ` +
-        `Gates: edit-gate=${editOn ? "ON" : "off"}, ` +
-        `bash-gate=${bashOn ? "ON" : "off"}, ` +
-        `config-protection=${cpOn ? "ON" : "off"}` +
+        `Gates: ${gateStatus}` +
         (disabled.length ? ` (disabled: ${disabled.join(",")})` : "") +
         `. ` +
         `Under standard/strict, the FIRST Edit/Write/MultiEdit to a file in this session ` +

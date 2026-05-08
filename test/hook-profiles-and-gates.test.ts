@@ -19,6 +19,16 @@ import {
   checkFileEditGate,
   checkBashGate,
 } from "../src/engine/hooks/edit-gates.js";
+import {
+  registerGate,
+  unregisterGate,
+  listGates,
+  runGates,
+  makeDenyResponse,
+  _resetRegistryForTests,
+  type GateDefinition,
+  type GateContext,
+} from "../src/engine/hooks/gate-registry.js";
 import { handlePostToolUse } from "../src/hook-handlers/post-tool-use.js";
 import { GlobalPluginState, SessionState } from "../src/engine/state.js";
 
@@ -491,5 +501,251 @@ describe("Bash gate cache (regression)", () => {
     const second = await checkBashGate(state, session, "rm -rf /tmp/b");
     expect(second).toBeNull();
     expect(queryFirst).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────
+// Gate registry tests
+// ─────────────────────────────────────────────────────────────────────
+
+describe("gate registry", () => {
+  beforeEach(() => {
+    // skipAutoInit=true prevents lazy init from loading builtins,
+    // so each test controls the gate list precisely.
+    _resetRegistryForTests(true);
+    _resetProfileCacheForTests();
+  });
+
+  it("registerGate adds a gate and listGates returns it", () => {
+    registerGate({
+      id: "test-gate",
+      profiles: ["standard"],
+      priority: 50,
+      async check() { return null; },
+    });
+    const gates = listGates();
+    expect(gates).toHaveLength(1);
+    expect(gates[0].id).toBe("test-gate");
+  });
+
+  it("registerGate replaces a gate with the same id", () => {
+    registerGate({ id: "g1", profiles: ["standard"], async check() { return null; } });
+    registerGate({ id: "g1", profiles: ["strict"], async check() { return null; } });
+    const gates = listGates();
+    expect(gates).toHaveLength(1);
+    expect(gates[0].profiles).toEqual(["strict"]);
+  });
+
+  it("unregisterGate removes a gate by id", () => {
+    registerGate({ id: "g1", profiles: ["standard"], async check() { return null; } });
+    expect(unregisterGate("g1")).toBe(true);
+    expect(listGates()).toHaveLength(0);
+  });
+
+  it("unregisterGate returns false for unknown id", () => {
+    expect(unregisterGate("nonexistent")).toBe(false);
+  });
+
+  it("gates are sorted by priority (lower first)", () => {
+    registerGate({ id: "high", profiles: ["standard"], priority: 90, async check() { return null; } });
+    registerGate({ id: "low", profiles: ["standard"], priority: 10, async check() { return null; } });
+    registerGate({ id: "mid", profiles: ["standard"], priority: 50, async check() { return null; } });
+    const ids = listGates().map(g => g.id);
+    expect(ids).toEqual(["low", "mid", "high"]);
+  });
+
+  it("runGates returns null when no gates are registered", async () => {
+    const { state } = makeMockState([]);
+    const session = makeSession();
+    const result = await runGates({
+      state, session, toolName: "Edit", toolInput: {}, payload: {},
+    });
+    expect(result).toBeNull();
+  });
+
+  it("runGates returns first deny from matching gates", async () => {
+    process.env.KONGCODE_HOOK_PROFILE = "standard";
+    _resetProfileCacheForTests();
+
+    registerGate({
+      id: "g-allow",
+      profiles: ["standard"],
+      priority: 10,
+      async check() { return null; },
+    });
+    registerGate({
+      id: "g-deny",
+      profiles: ["standard"],
+      priority: 20,
+      async check() { return makeDenyResponse("g-deny", "blocked"); },
+    });
+    registerGate({
+      id: "g-never-reached",
+      profiles: ["standard"],
+      priority: 30,
+      async check() { throw new Error("should not run"); },
+    });
+
+    const { state } = makeMockState([]);
+    const session = makeSession();
+    const result = await runGates({
+      state, session, toolName: "Bash", toolInput: {}, payload: {},
+    });
+    expect(result).not.toBeNull();
+    expect(result?.hookSpecificOutput?.permissionDecision).toBe("deny");
+    expect(result?.hookSpecificOutput?.permissionDecisionReason).toContain("g-deny");
+  });
+
+  it("runGates skips gates whose profile is not active", async () => {
+    process.env.KONGCODE_HOOK_PROFILE = "standard";
+    _resetProfileCacheForTests();
+
+    const checkFn = vi.fn(async () => makeDenyResponse("strict-only", "nope"));
+    registerGate({
+      id: "strict-only",
+      profiles: ["strict"],
+      priority: 10,
+      check: checkFn,
+    });
+
+    const { state } = makeMockState([]);
+    const session = makeSession();
+    const result = await runGates({
+      state, session, toolName: "Bash", toolInput: {}, payload: {},
+    });
+    expect(result).toBeNull();
+    expect(checkFn).not.toHaveBeenCalled();
+  });
+
+  it("runGates skips gates whose tool set does not match", async () => {
+    process.env.KONGCODE_HOOK_PROFILE = "standard";
+    _resetProfileCacheForTests();
+
+    const checkFn = vi.fn(async () => makeDenyResponse("edit-only", "nope"));
+    registerGate({
+      id: "edit-only",
+      profiles: ["standard"],
+      tools: new Set(["Edit"]),
+      priority: 10,
+      check: checkFn,
+    });
+
+    const { state } = makeMockState([]);
+    const session = makeSession();
+    const result = await runGates({
+      state, session, toolName: "Bash", toolInput: {}, payload: {},
+    });
+    expect(result).toBeNull();
+    expect(checkFn).not.toHaveBeenCalled();
+  });
+
+  it("gates with no tools set apply to all tools", async () => {
+    process.env.KONGCODE_HOOK_PROFILE = "standard";
+    _resetProfileCacheForTests();
+
+    registerGate({
+      id: "universal",
+      profiles: ["standard"],
+      priority: 10,
+      async check() { return makeDenyResponse("universal", "applies everywhere"); },
+    });
+
+    const { state } = makeMockState([]);
+    const session = makeSession();
+    const result = await runGates({
+      state, session, toolName: "AnyTool", toolInput: {}, payload: {},
+    });
+    expect(result).not.toBeNull();
+    expect(result?.hookSpecificOutput?.permissionDecisionReason).toContain("universal");
+  });
+
+  it("KONGCODE_DISABLED_HOOKS disables a registered gate", async () => {
+    process.env.KONGCODE_HOOK_PROFILE = "standard";
+    process.env.KONGCODE_DISABLED_HOOKS = "my-gate";
+    _resetProfileCacheForTests();
+
+    registerGate({
+      id: "my-gate",
+      profiles: ["standard"],
+      priority: 10,
+      async check() { return makeDenyResponse("my-gate", "blocked"); },
+    });
+
+    const { state } = makeMockState([]);
+    const session = makeSession();
+    const result = await runGates({
+      state, session, toolName: "Bash", toolInput: {}, payload: {},
+    });
+    expect(result).toBeNull();
+  });
+});
+
+describe("gate registry lazy init loads builtins", () => {
+  beforeEach(() => {
+    _resetRegistryForTests(false); // allow lazy init
+    _resetProfileCacheForTests();
+    _resetConfigProtectionCacheForTests();
+    delete process.env.KONGCODE_HOOK_PROFILE;
+    delete process.env.KONGCODE_DISABLED_HOOKS;
+  });
+
+  it("listGates returns 3 built-in gates after lazy init", () => {
+    const gates = listGates();
+    const ids = gates.map(g => g.id);
+    expect(ids).toContain("config-protection");
+    expect(ids).toContain("edit-gate");
+    expect(ids).toContain("bash-gate");
+    expect(gates.length).toBeGreaterThanOrEqual(3);
+  });
+
+  it("built-in gates are in priority order: config-protection < edit-gate < bash-gate", () => {
+    const gates = listGates();
+    const cp = gates.find(g => g.id === "config-protection")!;
+    const eg = gates.find(g => g.id === "edit-gate")!;
+    const bg = gates.find(g => g.id === "bash-gate")!;
+    expect(cp.priority!).toBeLessThan(eg.priority!);
+    expect(eg.priority!).toBeLessThan(bg.priority!);
+  });
+
+  it("builtin config-protection gate blocks .eslintrc via runGates", async () => {
+    process.env.KONGCODE_HOOK_PROFILE = "standard";
+    _resetProfileCacheForTests();
+
+    const { state } = makeMockState([]);
+    const session = makeSession();
+    const result = await runGates({
+      state, session, toolName: "Edit",
+      toolInput: { file_path: "/repo/.eslintrc.js" }, payload: {},
+    });
+    expect(result?.hookSpecificOutput?.permissionDecision).toBe("deny");
+    expect(result?.hookSpecificOutput?.permissionDecisionReason).toContain("config-protection");
+  });
+
+  it("builtin edit-gate blocks first edit to unknown file via runGates", async () => {
+    process.env.KONGCODE_HOOK_PROFILE = "standard";
+    _resetProfileCacheForTests();
+
+    const { state } = makeMockState([]);
+    const session = makeSession();
+    const result = await runGates({
+      state, session, toolName: "Write",
+      toolInput: { file_path: "/repo/src/new-file.ts" }, payload: {},
+    });
+    expect(result?.hookSpecificOutput?.permissionDecision).toBe("deny");
+    expect(result?.hookSpecificOutput?.permissionDecisionReason).toContain("edit-gate");
+  });
+});
+
+describe("makeDenyResponse", () => {
+  it("includes gate id and message in the deny reason", () => {
+    const resp = makeDenyResponse("my-gate", "you cannot do this");
+    expect(resp.hookSpecificOutput?.permissionDecision).toBe("deny");
+    expect(resp.hookSpecificOutput?.permissionDecisionReason).toContain("kongcode/my-gate:");
+    expect(resp.hookSpecificOutput?.permissionDecisionReason).toContain("you cannot do this");
+  });
+
+  it("includes Tier-0 prefix", () => {
+    const resp = makeDenyResponse("test", "reason");
+    expect(resp.hookSpecificOutput?.permissionDecisionReason).toContain("tier0 directives");
   });
 });

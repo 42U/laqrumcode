@@ -70,20 +70,29 @@ export function _resetProfileCacheForTests(): void {
  */
 export async function seedHookProfileDirective(
   store: { isAvailable(): boolean; queryExec(sql: string, b?: Record<string, unknown>): Promise<unknown>; createCoreMemory(text: string, category: string, priority: number, tier: number): Promise<unknown> },
+  registeredGates?: readonly { id: string; profiles: readonly string[] }[],
 ): Promise<void> {
   if (!store.isAvailable()) return;
 
   const profile = getActiveProfile();
   const disabled = Array.from(getDisabledHooks()).sort();
-  const editOn = shouldHookRun("edit-gate", ["standard", "strict"]);
-  const cpOn = shouldHookRun("config-protection", ["standard", "strict"]);
-  const bashOn = shouldHookRun("bash-gate", ["strict"]);
+
+  let gateStatus: string;
+  if (registeredGates && registeredGates.length > 0) {
+    gateStatus = registeredGates.map(g => {
+      const active = shouldHookRun(g.id, g.profiles as HookProfile[]);
+      return `${g.id}=${active ? "ON" : "off"}`;
+    }).join(", ");
+  } else {
+    gateStatus =
+      `edit-gate=${shouldHookRun("edit-gate", ["standard", "strict"]) ? "ON" : "off"}, ` +
+      `bash-gate=${shouldHookRun("bash-gate", ["strict"]) ? "ON" : "off"}, ` +
+      `config-protection=${shouldHookRun("config-protection", ["standard", "strict"]) ? "ON" : "off"}`;
+  }
 
   const directive =
     `ACTIVE HOOK PROFILE: ${profile}. ` +
-    `Gates: edit-gate=${editOn ? "ON" : "off"}, ` +
-    `bash-gate=${bashOn ? "ON" : "off"}, ` +
-    `config-protection=${cpOn ? "ON" : "off"}` +
+    `Gates: ${gateStatus}` +
     (disabled.length ? ` (disabled: ${disabled.join(",")})` : "") +
     `. ` +
     `Under standard/strict, the FIRST Edit/Write/MultiEdit to a file in this session ` +

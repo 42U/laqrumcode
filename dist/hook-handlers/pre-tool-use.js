@@ -7,10 +7,7 @@
 import { makeHookOutput } from "../http-api.js";
 import { log } from "../engine/log.js";
 import { swallow } from "../engine/errors.js";
-import { shouldHookRun } from "../engine/hooks/profile.js";
-import { isProtectedConfigFile } from "../engine/hooks/config-protection.js";
-import { checkFileEditGate, checkBashGate } from "../engine/hooks/edit-gates.js";
-const FILE_EDIT_TOOLS = new Set(["Write", "Edit", "MultiEdit"]);
+import { runGates } from "../engine/hooks/gate-registry.js";
 /** Tools that touch a file via an explicit `file_path` argument. The gate
  *  treats any of these as an "observation" of that path for the rest of
  *  the session, so a Read followed by an Edit in the same response is
@@ -37,47 +34,18 @@ export async function handlePreToolUse(state, payload) {
         if (filePath)
             session._observedFilePaths.add(filePath);
     }
-    // ── Config protection (standard, strict) ──────────────────────────────
-    // Block edits to lint/format configs before anything else. Cheap, no
-    // store calls. Bypass with KONGCODE_ALLOW_CONFIG_EDIT=1.
-    if (FILE_EDIT_TOOLS.has(toolName) && shouldHookRun("config-protection", ["standard", "strict"])) {
-        const toolInput = payload.tool_input;
-        const filePath = toolInput?.file_path;
-        if (filePath && isProtectedConfigFile(filePath)) {
-            return {
-                hookSpecificOutput: {
-                    hookEventName: "PreToolUse",
-                    permissionDecision: "deny",
-                    permissionDecisionReason: `Make sure you're following the Tier-0 rules (RECALL BEFORE GUESSING, ` +
-                        `MEMORY REFLEX, GRAPH-AWARE SAVING, AUTO-SEAL CONTRACT, ACTIVE HOOK PROFILE). ` +
-                        `kongcode/config-protection: editing ${filePath} is blocked under the ` +
-                        `current hook profile. Lint/format configs should not be weakened to make ` +
-                        `code pass — fix the code instead. Set KONGCODE_ALLOW_CONFIG_EDIT=1 to ` +
-                        `override (and restart the daemon).`,
-                },
-            };
-        }
-    }
-    // ── First-touch edit gate (standard, strict) ──────────────────────────
-    if (FILE_EDIT_TOOLS.has(toolName) && shouldHookRun("edit-gate", ["standard", "strict"])) {
-        const toolInput = payload.tool_input;
-        const filePath = toolInput?.file_path;
-        if (filePath) {
-            const denied = await checkFileEditGate(state, session, filePath);
-            if (denied)
-                return denied;
-        }
-    }
-    // ── Destructive Bash gate (strict only) ───────────────────────────────
-    if (toolName === "Bash" && shouldHookRun("bash-gate", ["strict"])) {
-        const toolInput = payload.tool_input;
-        const command = toolInput?.command;
-        if (command) {
-            const denied = await checkBashGate(state, session, command);
-            if (denied)
-                return denied;
-        }
-    }
+    // ── Gate evaluation (extensible registry) ─────────────────────────────
+    // Built-in gates (config-protection, edit-gate, bash-gate) plus any
+    // user-defined gates from ~/.kongcode/gates.json. First deny wins.
+    const gateResult = await runGates({
+        state,
+        session,
+        toolName,
+        toolInput: payload.tool_input ?? {},
+        payload,
+    });
+    if (gateResult)
+        return gateResult;
     // Detect git push — flag for CI reminder at Stop
     if (toolName === "Bash") {
         const toolInput = payload.tool_input;
