@@ -1,7 +1,5 @@
 # kongcode
 
-This repo **is** kongcode: a graph-backed persistent memory plugin for Claude Code (SurrealDB + BGE-M3 embeddings + cross-encoder rerank). GitHub: `42U/kongcode`. When you work in this repo, you are using the tool you are building. The daemon is likely running locally and injecting context into every turn. Treat this as both a test environment and the canonical use case for the patterns below.
-
 ## Standards for every action
 
 **Be factually correct.** Do not guess. If you do not know, check. If you cannot check, say so. Speculation is allowed only when the user explicitly invites it.

@@ -73,6 +73,7 @@
     "commands/",
     "agents/",
     "scripts/",
+    "templates/",
     "README.md",
     "LICENSE"
   ]

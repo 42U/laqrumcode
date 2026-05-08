@@ -77,17 +77,22 @@ The plugin system is shared across CLI and IDE extensions. Open a Claude Code se
 
 </details>
 
-### 2. Use the shipped system prompt (recommended)
+### 2. Set up prompts (before launching Claude Code)
 
-KongCode ships a system prompt at [`templates/kongcode.txt`](templates/kongcode.txt) that teaches Claude how to use the memory graph effectively. **For best results, use it.** Without it, Claude defaults to its built-in file-based memory and won't use the graph well.
-
-Copy it to your home directory:
+KongCode ships two template files that teach Claude how to use the memory graph. **Set both up before your first session.**
 
 ```bash
-cp ~/.claude/plugins/cache/kongcode-marketplace/kongcode/*/templates/kongcode.txt ~/.kongcode-prompt.txt
+# Find the plugin cache (installed by step 1)
+KONGCODE_DIR=$(ls -d ~/.claude/plugins/cache/kongcode-marketplace/kongcode/* 2>/dev/null | head -1)
+
+# Copy the system prompt (appended every session via CLI flag)
+cp "$KONGCODE_DIR/templates/kongcode.txt" ~/.kongcode-prompt.txt
+
+# Copy the global CLAUDE.md (loaded automatically by Claude Code in every project)
+cp "$KONGCODE_DIR/templates/CLAUDE.md" ~/.claude/CLAUDE.md
 ```
 
-Then add a shell alias so every session uses it automatically.
+Then add a shell alias so every session uses the system prompt automatically:
 
 **bash:**
 ```bash
@@ -101,15 +106,11 @@ echo 'alias claude="claude --append-system-prompt-file ~/.kongcode-prompt.txt"' 
 source ~/.zshrc
 ```
 
-Or pass the flag directly each time:
+> **VS Code / IDE users**: The `--append-system-prompt-file` flag is CLI-only. IDE sessions still get the global `~/.claude/CLAUDE.md` automatically, which covers the core rules. For full prompt coverage, paste the contents of `kongcode.txt` into your IDE's system prompt settings.
 
-```bash
-claude --append-system-prompt-file ~/.kongcode-prompt.txt
-```
+> **Existing `~/.claude/CLAUDE.md`**: If you already have a global CLAUDE.md, append the kongcode template rather than overwriting: `cat "$KONGCODE_DIR/templates/CLAUDE.md" >> ~/.claude/CLAUDE.md`
 
-> **VS Code / IDE users**: The `--append-system-prompt-file` flag is CLI-only. For IDE sessions, copy the prompt contents into your global `~/.claude/CLAUDE.md` instead.
-
-### 3. Start a session
+### 3. First session
 
 ```bash
 claude
@@ -123,25 +124,32 @@ On first run the daemon provisions everything it needs (one-time, ~2-3 minutes):
 
 Subsequent sessions start in seconds.
 
-<details>
-<summary><strong>Optional: per-project CLAUDE.md</strong></summary>
+### 4. Migrate existing memory files (one-time)
 
-Drop a short file at your repo root for project-specific notes:
+If you have existing `.md` memory files from Claude Code's built-in memory system (`~/.claude/projects/*/memory/*.md`), migrate them into the graph on your first session:
+
+1. Wait for the kongcode healthcheck to be green (the daemon will report status at session start)
+2. Ask Claude to ingest the old files:
+   > "Ingest all my old memory .md files from `~/.claude/projects/*/memory/` into knowledge gems, then archive the originals."
+3. Claude will use `create_knowledge_gems` to import each file, then move the originals to an archive directory
+4. A single `MEMORY.md` will be left behind pointing to the graph:
 
 ```markdown
-# <project name>
+# MEMORY POINTS AT KONGCODE
 
-The kongcode daemon may be running locally and injecting context every turn. Query the kongcode MCP tools (`recall`, `record_finding`, `core_memory`, `introspect`) for historical decisions, architecture, and user preferences before guessing.
+This file-based memory system is deprecated. Memory lives in the kongcode
+graph database at ~/.kongcode/data/ (SurrealDB).
+
+Use kongcode MCP tools for memory operations:
+- `recall` — search the graph
+- `record_finding` — save a decision / preference / correction / fact
+- `core_memory` — manage always-loaded directives
+- `introspect` — DB health and diagnostics
+
+Do not write new .md files in this directory.
 ```
 
-</details>
-
-<details>
-<summary><strong>Optional: migrating an existing memory directory</strong></summary>
-
-If `~/.claude/projects/<project>/memory/` already has `.md` files, ask Claude in a session to ingest them into kongcode (`create_knowledge_gems` or `record_finding`), then delete the originals and replace `MEMORY.md` with a pointer that says "deprecated, see kongcode."
-
-</details>
+After migration, all future memory operations go through the graph — no more scattered `.md` files.
 
 ### Updating
 
