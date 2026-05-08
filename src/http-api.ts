@@ -8,7 +8,7 @@
  */
 
 import { createServer, type Server as HttpServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { existsSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { dirname, join, resolve as resolvePath } from "node:path";
 import type { GlobalPluginState } from "./engine/state.js";
@@ -252,6 +252,7 @@ export async function startHttpApi(
         });
         server!.on("error", reject);
       });
+      try { chmodSync(sock, 0o600); } catch {}
       return;
     } catch (err) {
       log.warn(`Unix socket failed, falling back to TCP:`, err);

@@ -7,7 +7,7 @@
  * shared GlobalPluginState and returns hook response JSON.
  */
 import { createServer } from "node:http";
-import { existsSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { dirname, join, resolve as resolvePath } from "node:path";
 import { log } from "./engine/log.js";
@@ -212,6 +212,10 @@ export async function startHttpApi(state, sock, projectDir) {
                 });
                 server.on("error", reject);
             });
+            try {
+                chmodSync(sock, 0o600);
+            }
+            catch { }
             return;
         }
         catch (err) {
