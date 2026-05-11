@@ -41,8 +41,10 @@ interface ExtractedSkill {
 }
 declare function parseSkillResult(results: unknown): ExtractedSkill | null;
 declare function parseCausalGraduationResult(results: unknown): ExtractedSkill[];
+declare function parseSoulResult(results: unknown): Record<string, any> | null;
 export declare const __test__: {
     parseSkillResult: typeof parseSkillResult;
     parseCausalGraduationResult: typeof parseCausalGraduationResult;
+    parseSoulResult: typeof parseSoulResult;
 };
 export {};

@@ -65,9 +65,25 @@ const soulSchema = {
   type: "object",
   properties: {
     working_style: { type: "array", items: { type: "string" } },
-    emotional_dimensions: { type: "array", items: { type: "object" } },
+    emotional_dimensions: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: { dimension: { type: "string" }, description: { type: "string" } },
+        required: ["dimension", "description"],
+        additionalProperties: false,
+      },
+    },
     self_observations: { type: "array", items: { type: "string" } },
-    earned_values: { type: "array", items: { type: "object" } },
+    earned_values: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: { value: { type: "string" }, grounded_in: { type: "string" } },
+        required: ["value", "grounded_in"],
+        additionalProperties: false,
+      },
+    },
   },
   required: ["working_style", "emotional_dimensions", "self_observations", "earned_values"],
 };
@@ -544,10 +560,17 @@ async function commitResults(
       if (!doc) throw new Error("Invalid soul document JSON");
       const now = new Date().toISOString();
       const soulDoc = {
-        working_style: doc.working_style ?? [],
-        emotional_dimensions: (doc.emotional_dimensions ?? []).map((d: any) => ({ ...d, adopted_at: now })),
-        self_observations: doc.self_observations ?? [],
-        earned_values: doc.earned_values ?? [],
+        working_style: (doc.working_style ?? []).filter((s: unknown) => typeof s === "string").slice(0, 20),
+        emotional_dimensions: (doc.emotional_dimensions ?? []).map((d: any) => ({
+          dimension: String(d.dimension ?? d.name ?? ""),
+          description: String(d.description ?? d.rationale ?? ""),
+          adopted_at: now,
+        })).filter((d: any) => d.dimension).slice(0, 10),
+        self_observations: (doc.self_observations ?? []).filter((s: unknown) => typeof s === "string").slice(0, 20),
+        earned_values: (doc.earned_values ?? []).map((v: any) => ({
+          value: String(v.value ?? v.name ?? ""),
+          grounded_in: String(v.grounded_in ?? v.evidence ?? v.description ?? ""),
+        })).filter((v: any) => v.value).slice(0, 10),
       };
       const success = await createSoul(soulDoc, store);
       if (!success) throw new Error("Failed to create soul record");
@@ -562,10 +585,25 @@ async function commitResults(
     case "soul_evolve": {
       const changes = parseSoulResult(results);
       if (!changes || Object.keys(changes).length === 0) return { skipped: true, reason: "no changes" };
+      const now = new Date().toISOString();
+      const sanitized: Record<string, unknown[]> = {
+        working_style: (changes.working_style ?? []).filter((s: unknown) => typeof s === "string"),
+        emotional_dimensions: (changes.emotional_dimensions ?? []).map((d: any) => ({
+          dimension: String(d.dimension ?? d.name ?? ""),
+          description: String(d.description ?? d.rationale ?? ""),
+          adopted_at: now,
+        })).filter((d: any) => d.dimension),
+        self_observations: (changes.self_observations ?? []).filter((s: unknown) => typeof s === "string"),
+        earned_values: (changes.earned_values ?? []).map((v: any) => ({
+          value: String(v.value ?? v.name ?? ""),
+          grounded_in: String(v.grounded_in ?? v.evidence ?? v.description ?? ""),
+        })).filter((v: any) => v.value),
+      };
       let revised = 0;
       for (const section of ["working_style", "emotional_dimensions", "self_observations", "earned_values"] as const) {
-        if (changes[section] && Array.isArray(changes[section]) && changes[section].length > 0) {
-          await reviseSoul(section, changes[section], "Evolved by subagent based on new experience", store);
+        const vals = sanitized[section];
+        if (vals && vals.length > 0) {
+          await reviseSoul(section, vals, "Evolved by subagent based on new experience", store);
           revised++;
         }
       }
@@ -948,4 +986,5 @@ async function createSkillRecord(
 export const __test__ = {
   parseSkillResult,
   parseCausalGraduationResult,
+  parseSoulResult,
 };

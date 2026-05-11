@@ -4,6 +4,11 @@ All notable changes to KongCode are documented here. The 0.7.x series introduced
 
 ## [Unreleased]
 
+## [0.7.66] — 2026-05-11
+
+### Fixed
+- **`soul_generate` schema mismatch** (`src/tools/pending-work.ts`): LLM-generated soul documents contained fields not in the SCHEMAFULL `soul` table (`earned_values[].name`, `.evidence`, `.description`; `emotional_dimensions[].adopted_at`; `revisions[].change`), causing SurrealDB `InternalError` rejections — 20 errors across 6 pending_work items. Two-part fix: (1) `soulSchema` now specifies exact inner-object shapes with `additionalProperties: false` so the LLM generates correct fields, (2) commit handler strips unknown fields and maps common aliases (`name`→`value`, `evidence`→`grounded_in`) as defense-in-depth. Same sanitization applied to `soul_evolve` path.
+
 ## [0.7.65] — 2026-05-11
 
 ### Fixed
