@@ -13,7 +13,7 @@
 [![SurrealDB](https://img.shields.io/badge/SurrealDB-3.0-ff00a0?style=for-the-badge&logo=surrealdb&logoColor=white)](https://surrealdb.com)
 [![Tests](https://img.shields.io/badge/Tests-728_passing-brightgreen?style=for-the-badge&logo=vitest&logoColor=white)](https://vitest.dev)
 
-**Persistent cognitive architecture for [Claude Code](https://claude.ai/claude-code) — graph memory with learned retrieval (98.2% R@5), automatic extraction of concepts, causal chains, skills, and corrections, emergent identity via soul graduation. SurrealDB + BGE-M3.**
+**Graph-backed permanent memory for [Claude Code](https://claude.ai/claude-code).**
 
 [Quick start](#quick-start) | [Architecture](#architecture) | [Configuration](#configuration) | [Troubleshooting](#troubleshooting) | [Development](#development)
 
