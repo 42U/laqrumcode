@@ -76,6 +76,13 @@ export interface GraphTransformResult {
     /** Static content for the system prompt — benefits from API prefix caching (10% cost). */
     systemPromptSection?: string;
 }
+export declare function recordTransformOutcome(ok: boolean): void;
+export declare function resetTransformErrorRate(): void;
+export declare function getTransformErrorRate(): {
+    total: number;
+    failures: number;
+    rate: number;
+};
 /**
  * Main entry point for graph-based context assembly. Retrieves, scores, deduplicates,
  * and budget-trims graph nodes, then splices them into the conversation message array.

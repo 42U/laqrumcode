@@ -20,6 +20,7 @@
  */
 import { swallow } from "./errors.js";
 import { log } from "./log.js";
+import { getTransformErrorRate } from "./graph-context.js";
 const COOLDOWN_MS = {
     critical: 60 * 60 * 1000, // 1h
     warn: 24 * 60 * 60 * 1000, // 24h
@@ -206,6 +207,7 @@ export async function detectAnomalies(store, cooldown) {
     const flags = [];
     const now = Date.now();
     for (const detector of [
+        detectContextTransformFailures,
         detectEmbeddingGap,
         detectPendingWorkBuildup,
         detectPendingWorkAging,
@@ -320,6 +322,20 @@ async function detectGraduationClose(store) {
         message: `Quality score ${report.qualityScore.toFixed(2)} is within ${gap} of graduation gate (0.85)`,
         evidence: `volumeScore=${report.volumeScore.toFixed(2)}, qualityScore=${report.qualityScore.toFixed(2)}`,
         suggestion: report.diagnostics[0]?.suggestion,
+    };
+}
+async function detectContextTransformFailures(_store) {
+    const { total, failures, rate } = getTransformErrorRate();
+    if (total < 3 || failures < 3)
+        return null;
+    if (rate < 0.3)
+        return null;
+    return {
+        code: "substrate.context_transform_failures",
+        severity: rate >= 0.8 ? "critical" : "warn",
+        message: `graphTransformContext failing ${failures}/${total} calls (${(rate * 100).toFixed(0)}%) in the last 10 minutes — memory context is not being injected`,
+        evidence: `failures=${failures}, total=${total}, rate=${rate.toFixed(2)}`,
+        suggestion: "Check daemon.log for timeout/DB errors. Common causes: slow SurrealDB queries, broken embeddings, stale daemon. Try restarting the daemon.",
     };
 }
 // ── Format anomalies as injection block ──

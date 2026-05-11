@@ -19,6 +19,7 @@ import {
   type AnomalyFlag,
   type DailyRollup,
 } from "../src/engine/observability.js";
+import { getTransformErrorRate, recordTransformOutcome, resetTransformErrorRate } from "../src/engine/graph-context.js";
 
 function mockStore(handlers: {
   metricsRollup?: { n: number; mean_tc?: number; mean_dur?: number; mean_in?: number; mean_out?: number; p95_dur?: number; p95_in?: number; fast_n?: number };
@@ -187,6 +188,80 @@ describe("detectAnomalies", () => {
     const store = mockStore({ pendingWorkAging: { n: 0, oldest: null } });
     const flags = await detectAnomalies(store as any, cooldown);
     expect(flags.find(f => f.code === "substrate.pending_work_aging")).toBeUndefined();
+  });
+});
+
+describe("getTransformErrorRate", () => {
+  beforeEach(() => { resetTransformErrorRate(); });
+
+  it("returns zero rate when no calls recorded", () => {
+    const r = getTransformErrorRate();
+    expect(r.total).toBe(0);
+    expect(r.failures).toBe(0);
+    expect(r.rate).toBe(0);
+  });
+
+  it("tracks successes and failures", () => {
+    recordTransformOutcome(true);
+    recordTransformOutcome(true);
+    recordTransformOutcome(false);
+    const r = getTransformErrorRate();
+    expect(r.total).toBe(3);
+    expect(r.failures).toBe(1);
+    expect(r.rate).toBeCloseTo(1 / 3, 2);
+  });
+
+  it("100% failure rate when all calls fail", () => {
+    for (let i = 0; i < 5; i++) recordTransformOutcome(false);
+    const r = getTransformErrorRate();
+    expect(r.total).toBe(5);
+    expect(r.failures).toBe(5);
+    expect(r.rate).toBe(1);
+  });
+});
+
+describe("detectContextTransformFailures", () => {
+  let cooldown: ReturnType<typeof makeCooldownState>;
+
+  beforeEach(() => {
+    cooldown = makeCooldownState();
+    resetTransformErrorRate();
+  });
+
+  it("fires substrate.context_transform_failures at high failure rate", async () => {
+    for (let i = 0; i < 10; i++) recordTransformOutcome(false);
+    const store = mockStore({});
+    const flags = await detectAnomalies(store as any, cooldown);
+    const ctf = flags.find(f => f.code === "substrate.context_transform_failures");
+    expect(ctf).toBeDefined();
+    expect(ctf!.severity).toBe("critical");
+    expect(ctf!.message).toContain("100%");
+  });
+
+  it("does NOT fire when failure rate is low", async () => {
+    for (let i = 0; i < 8; i++) recordTransformOutcome(true);
+    recordTransformOutcome(false);
+    const store = mockStore({});
+    const flags = await detectAnomalies(store as any, cooldown);
+    expect(flags.find(f => f.code === "substrate.context_transform_failures")).toBeUndefined();
+  });
+
+  it("does NOT fire with fewer than 3 total calls", async () => {
+    recordTransformOutcome(false);
+    recordTransformOutcome(false);
+    const store = mockStore({});
+    const flags = await detectAnomalies(store as any, cooldown);
+    expect(flags.find(f => f.code === "substrate.context_transform_failures")).toBeUndefined();
+  });
+
+  it("fires as warn when rate is between 30-80%", async () => {
+    for (let i = 0; i < 4; i++) recordTransformOutcome(true);
+    for (let i = 0; i < 4; i++) recordTransformOutcome(false);
+    const store = mockStore({});
+    const flags = await detectAnomalies(store as any, cooldown);
+    const ctf = flags.find(f => f.code === "substrate.context_transform_failures");
+    expect(ctf).toBeDefined();
+    expect(ctf!.severity).toBe("warn");
   });
 });
 

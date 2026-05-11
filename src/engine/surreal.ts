@@ -836,7 +836,7 @@ export class SurrealStore {
     const bindings = { vec: queryVec };
     const selectFields = `SELECT id, text, content, description, importance, stability,
                   access_count AS accessCount, created_at AS timestamp,
-                  meta::tb(id) AS table${scoreExpr}`;
+                  IF id IS NOT NONE THEN meta::tb(id) ELSE 'unknown' END AS table${scoreExpr}`;
 
     const seen = new Set<string>(nodeIds);
     const allNeighbors: VectorSearchResult[] = [];
@@ -861,6 +861,7 @@ export class SurrealStore {
 
       for (const rows of queryResults) {
         for (const row of rows) {
+          if (row.id == null) continue;
           const nodeId = String(row.id);
           if (seen.has(nodeId)) continue;
           seen.add(nodeId);

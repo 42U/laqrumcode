@@ -104,6 +104,22 @@ describe("handleSubagentStop", () => {
     );
   });
 
+  it("uses ?? coalesce for spawned_at to avoid time::unix(NONE)", async () => {
+    const session = mockSession();
+    session._activeSubagents.set("tool-use-x", "subagent:s5");
+    const state = mockState(session);
+
+    await handleSubagentStop(state, {
+      session_id: session.sessionId,
+      tool_use_id: "tool-use-x",
+      outcome: "completed",
+    });
+
+    const sql = (state.store.queryExec as ReturnType<typeof vi.fn>).mock.calls[0][0] as string;
+    expect(sql).toContain("spawned_at ?? time::now()");
+    expect(sql).not.toContain("IF spawned_at IS NOT NONE");
+  });
+
   it("returns empty {} when store is unavailable", async () => {
     const session = mockSession();
     const state = mockState(session);

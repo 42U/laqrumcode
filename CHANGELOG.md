@@ -4,6 +4,16 @@ All notable changes to KongCode are documented here. The 0.7.x series introduced
 
 ## [Unreleased]
 
+## [0.7.65] — 2026-05-11
+
+### Fixed
+- **`purgeEmbedCache` SurrealQL error** (`src/engine/maintenance.ts`): `LIMIT` inside `DELETE` subquery is invalid SurrealQL — restructured to `LET $stale = (SELECT ... LIMIT 500); FOR $row IN $stale { DELETE $row.id; }`.
+- **`graphExpand` crash on deleted records** (`src/engine/surreal.ts`): Edge traversals to deleted nodes returned `id=NONE`, causing `meta::tb(NONE)` to throw. Added SQL-side `IF id IS NOT NONE` guard and JS-side null check.
+- **`subagent:stop` crash on null `spawned_at`** (`src/hook-handlers/subagent.ts`): `time::unix(spawned_at)` failed when `spawned_at` was NONE despite IF guard (SurrealDB evaluates both branches). Replaced with `spawned_at ?? time::now()` coalesce.
+
+### Added
+- **`graphTransformContext` timeout alerting** (`src/engine/observability.ts`, `src/engine/graph-context.ts`): Sliding-window error-rate tracker (`getTransformErrorRate()`) + `detectContextTransformFailures` anomaly detector. Surfaces a `<kongcode-alert>` when failure rate exceeds 30% over 10 minutes. Previously, all 39 timeout errors were silently swallowed — the pipeline returned raw messages with zero user visibility.
+
 ## [0.7.64] — 2026-05-08
 
 ### Added

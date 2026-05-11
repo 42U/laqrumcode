@@ -1141,6 +1141,25 @@ function getRecentTurns(messages, convTokens, toolTokens, contextWindow, session
     }
     return selectedGroups.flat();
 }
+// ── graphTransformContext error-rate tracking ──
+// Sliding window of recent call outcomes for observability alerting.
+const _recentCalls = [];
+const WINDOW_MS = 10 * 60_000; // 10 minutes
+export function recordTransformOutcome(ok) {
+    const now = Date.now();
+    _recentCalls.push({ ts: now, ok });
+    // Trim entries older than the window
+    while (_recentCalls.length > 0 && _recentCalls[0].ts < now - WINDOW_MS) {
+        _recentCalls.shift();
+    }
+}
+export function resetTransformErrorRate() { _recentCalls.length = 0; }
+export function getTransformErrorRate() {
+    const now = Date.now();
+    const recent = _recentCalls.filter(c => c.ts >= now - WINDOW_MS);
+    const failures = recent.filter(c => !c.ok).length;
+    return { total: recent.length, failures, rate: recent.length > 0 ? failures / recent.length : 0 };
+}
 /**
  * Main entry point for graph-based context assembly. Retrieves, scores, deduplicates,
  * and budget-trims graph nodes, then splices them into the conversation message array.
@@ -1175,10 +1194,12 @@ export async function graphTransformContext(params) {
             graphTransformInner(messages, session, store, embeddings, contextWindow, budgets, signal, tier0ForSys),
             new Promise((_, reject) => setTimeout(() => reject(new Error("graphTransformContext timed out")), TRANSFORM_TIMEOUT_MS)),
         ]);
+        recordTransformOutcome(true);
         result.systemPromptSection = systemPromptSection;
         return result;
     }
     catch (err) {
+        recordTransformOutcome(false);
         log.error("graphTransformContext fatal error, returning raw messages:", err);
         return {
             messages,

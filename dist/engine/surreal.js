@@ -616,7 +616,7 @@ export class SurrealStore {
         const bindings = { vec: queryVec };
         const selectFields = `SELECT id, text, content, description, importance, stability,
                   access_count AS accessCount, created_at AS timestamp,
-                  meta::tb(id) AS table${scoreExpr}`;
+                  IF id IS NOT NONE THEN meta::tb(id) ELSE 'unknown' END AS table${scoreExpr}`;
         const seen = new Set(nodeIds);
         const allNeighbors = [];
         let frontier = nodeIds.slice(0, MAX_FRONTIER_SEEDS).filter((id) => RECORD_ID_RE.test(id));
@@ -644,6 +644,8 @@ export class SurrealStore {
             const nextFrontier = [];
             for (const rows of queryResults) {
                 for (const row of rows) {
+                    if (row.id == null)
+                        continue;
                     const nodeId = String(row.id);
                     if (seen.has(nodeId))
                         continue;

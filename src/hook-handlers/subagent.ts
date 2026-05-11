@@ -71,7 +71,7 @@ export async function handleSubagentStop(
       await store.queryExec(
         `UPDATE ${subagentId} SET
            ended_at = time::now(),
-           duration_ms = IF spawned_at IS NOT NONE THEN <int>(time::unix(time::now()) * 1000 - time::unix(spawned_at) * 1000) ELSE 0 END,
+           duration_ms = <int>(time::unix(time::now()) * 1000 - time::unix(spawned_at ?? time::now()) * 1000),
            outcome = $outcome,
            result_summary = $result`,
         {
