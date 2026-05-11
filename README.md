@@ -13,7 +13,7 @@
 [![SurrealDB](https://img.shields.io/badge/SurrealDB-3.0-ff00a0?style=for-the-badge&logo=surrealdb&logoColor=white)](https://surrealdb.com)
 [![Tests](https://img.shields.io/badge/Tests-728_passing-brightgreen?style=for-the-badge&logo=vitest&logoColor=white)](https://vitest.dev)
 
-**Graph-backed permanent memory for [Claude Code](https://claude.ai/claude-code).**
+**Persistent cognitive architecture for [Claude Code](https://claude.ai/claude-code) — graph memory with learned retrieval (98.2% R@5), automatic extraction of concepts, causal chains, skills, and corrections, emergent identity via soul graduation. SurrealDB + BGE-M3.**
 
 [Quick start](#quick-start) | [Architecture](#architecture) | [Configuration](#configuration) | [Troubleshooting](#troubleshooting) | [Development](#development)
 
@@ -23,7 +23,7 @@
 
 ## What it does
 
-KongCode gives Claude Code a persistent, queryable memory that grows with every session, backed by a SurrealDB graph and BGE-M3 vector embeddings running locally.
+KongCode gives Claude Code a persistent, queryable memory that grows with every session. It extracts concepts, causal chains, corrections, preferences, decisions, and skills from conversations automatically — then retrieves them with a multi-stage pipeline (BGE-M3 vectors → learned ACAN scoring → cross-encoder reranking, 98.2% R@5) backed by a SurrealDB graph running locally. After enough sessions, the agent earns an emergent identity (soul graduation) grounded in its actual working history.
 
 | Capability | Stock Claude Code | With KongCode |
 |---|---|---|
