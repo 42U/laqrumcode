@@ -31,6 +31,7 @@ KongCode gives Claude Code a persistent, queryable memory that grows with every 
 | **Context window** | Sliding, lost on `/clear` or session end | Retrieval-augmented from prior turns and concepts |
 | **Knowledge extraction** | None | Concepts, causal chains, monologues, corrections, preferences, artifacts, decisions, skills, reflections |
 | **Procedural memory** | None | Skills mined from successful workflows, surfaced when preconditions match |
+| **Retrieval quality** | None (no memory to retrieve) | Vector search → ACAN reranker → cross-encoder rerank → graph expansion (98.2% R@5 on LongMemEval) |
 | **Identity** | Stateless on every turn | Earned soul after a graduation gate (volume + quality thresholds) |
 
 ## Quick start
@@ -212,8 +213,12 @@ KongCode runs as **two cooperating processes**:
    +---------------------+    +---------------------+    +---------------------+
 ```
 
-- **kongcode-daemon**: Long-lived background process owning the SurrealDB connection, BGE-M3 embedding model, ACAN weights, all tool/hook handlers, and the auto-drain scheduler. Survives plugin updates, MCP restarts, and Claude Code crashes.
+- **kongcode-daemon**: Long-lived background process owning the SurrealDB connection, BGE-M3 embedding model, BGE-reranker-v2-m3 cross-encoder, ACAN weights, all tool/hook handlers, and the auto-drain scheduler. Survives plugin updates, MCP restarts, and Claude Code crashes.
 - **kongcode-mcp**: Thin per-session client. Forwards MCP RPC to the daemon over local IPC. Plugin updates only restart this; the daemon keeps running.
+
+**ACAN** (Attentive Cross-Attention Network) is a learned scoring model that replaces the fixed WMR (Weighted Memory Relevance) heuristic once enough retrieval-outcome data accumulates. It trains on query-memory pairs labeled by actual utilization — whether the retrieved item was referenced, cited, or acted on. Training runs in a worker thread; weights are hot-reloaded across concurrent sessions via a shared JSON file. Before ACAN activates, WMR provides a solid baseline using six hand-tuned signals (recency, importance, access count, neighbor bonus, proven utility, reflection boost).
+
+**BGE-reranker-v2-m3** is a cross-encoder that rescores the top candidates pairwise against the query after the initial vector + ACAN pass. This two-stage retrieve-then-rerank pipeline achieves 98.2% R@5 on the LongMemEval benchmark.
 
 Multiple Claude Code sessions share one daemon: one BGE-M3 in RAM instead of N copies, one SurrealDB connection pool.
 
@@ -305,7 +310,17 @@ All env vars are optional with sensible defaults.
 ## How it works
 
 ### Every turn
-Before each prompt, KongCode retrieves relevant context from the graph (vector similarity + reranker) and injects it into the conversation. Tool calls and their outcomes are tracked. After the assistant responds, the turn is ingested and trailing work is queued.
+
+Before each prompt, KongCode runs a multi-stage retrieval pipeline to surface the most relevant prior knowledge:
+
+1. **Vector search** — BGE-M3 embeds the prompt and retrieves candidates by cosine similarity from concepts, memories, turns, artifacts, and skills
+2. **WMR/ACAN scoring** — a 6-signal Weighted Memory Relevance score (recency, importance, access frequency, neighbor bonus, proven utility, reflection boost) is computed per candidate. When enough retrieval-outcome data has accumulated (5000+ labeled pairs), the learned ACAN (Attentive Cross-Attention Network) weights replace the fixed WMR weights automatically
+3. **Cross-encoder rerank** — the top candidates are rescored pairwise against the query using a BGE-reranker-v2-m3 cross-encoder (~606 MB GGUF, loaded lazily on first retrieval). This stage is what pushes recall to 98.2% R@5 on LongMemEval. Falls back to WMR/ACAN-only when the model isn't available
+4. **Graph expansion** — each top-scored node's graph neighbors (broader/narrower/related_to edges, causal chains, skill links) are pulled in
+5. **Dedup + budget trim** — duplicates are collapsed and the final set is trimmed to fit the context budget
+6. **Format + inject** — results are assembled into `<recalled_memory>` blocks and injected into the conversation
+
+Tool calls and their outcomes are tracked. After the assistant responds, the turn is ingested and trailing work is queued.
 
 ### Between sessions
 When a session ends, KongCode queues extraction work (concepts, causal chains, skills, etc.). The auto-drain scheduler processes these in the background. A cleanup pass on the next session start handles orphaned sessions (e.g. terminals closed without a clean shutdown).
