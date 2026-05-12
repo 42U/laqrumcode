@@ -71,6 +71,20 @@ export declare class SessionState {
     };
     /** Whether workspace has files from the default context engine that can be migrated. */
     _hasMigratableFiles?: boolean;
+    /** Cached previous-session turns (stable within a session). */
+    _cachedPrevTurns?: {
+        role: string;
+        text: string;
+        tool_name?: string;
+        timestamp: string;
+    }[];
+    /** Prefetch promise for previous-session turns — fires at session start, awaited in ensureRecentTurns. */
+    _prevTurnsPrefetch?: Promise<{
+        role: string;
+        text: string;
+        tool_name?: string;
+        timestamp: string;
+    }[]>;
     constructor(sessionId: string, sessionKey: string);
     /** Reset per-turn counters at the start of each prompt. */
     resetTurn(): void;
@@ -94,6 +108,8 @@ export declare class GlobalPluginState {
     removeSession(sessionKey: string): void;
     /** Return all active sessions (for exit handlers). */
     allSessions(): SessionState[];
+    /** Reap sessions that have been idle for longer than maxAgeMs. */
+    reapStaleSessions(maxAgeMs?: number): number;
     /** Shut down all shared resources. */
     shutdown(): Promise<void>;
 }

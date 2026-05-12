@@ -66,11 +66,7 @@ export declare function rollupDailyMetrics(store: SurrealStore, day: string): Pr
  */
 export declare function pruneRawMetrics(store: SurrealStore, retentionDays?: number): Promise<void>;
 export declare function computeTrends(store: SurrealStore, windowDays?: number): Promise<TrendReport>;
-/**
- * Run all enabled anomaly detectors and return only flags that fire AND
- * are out of cooldown. Cooldown state is in-memory on `cooldown` — pass
- * `globalState.observabilityCooldown` from the call site.
- */
+export declare function resetAnomalyCache(): void;
 export declare function detectAnomalies(store: SurrealStore, cooldown: CooldownState): Promise<AnomalyFlag[]>;
 export declare function makeCooldownState(): CooldownState;
 export declare function formatAnomalyBlock(flags: AnomalyFlag[]): string;

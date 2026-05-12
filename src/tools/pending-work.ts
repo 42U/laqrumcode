@@ -21,19 +21,7 @@ import { log } from "../engine/log.js";
 import { stripStructuralTags } from "../engine/sanitize.js";
 import { commitKnowledge } from "../engine/commit.js";
 import { supersedeOldSkills } from "../engine/skills.js";
-
-// ── Helpers ──────────────────────────────────────────────────────────────────
-
-/** Validate a SurrealDB record id before direct interpolation. Same pattern as
- * surreal.ts assertRecordId (which isn't exported). Prevents injection and
- * avoids the `UPDATE $id` bug where SurrealDB rejects a string param as an
- * UPDATE target. */
-const RECORD_ID_RE = /^[a-zA-Z_][a-zA-Z0-9_]*:[a-zA-Z0-9_\-]+$/;
-function assertWorkRecordId(id: string): void {
-  if (!RECORD_ID_RE.test(id)) {
-    throw new Error(`Invalid record ID format: ${id.slice(0, 50)}`);
-  }
-}
+import { assertRecordId } from "../engine/surreal.js";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -121,8 +109,8 @@ export async function handleFetchPendingWork(
     let item: PendingWorkItem | null = null;
     for (const candidate of candidates) {
       const claimedId = String(candidate.id);
-      assertWorkRecordId(claimedId);
-      // Direct interpolation safe: assertWorkRecordId validates format above.
+      assertRecordId(claimedId);
+      // Direct interpolation safe: assertRecordId validates format above.
       // WHERE status="pending" ensures only the first claimer wins the race.
       const items = await store.queryFirst<PendingWorkItem>(
         `UPDATE ${claimedId} SET status = "processing" WHERE status = "pending" RETURN AFTER`,
@@ -226,7 +214,7 @@ async function buildWorkPayload(
       const eligible = groups.filter(g => g.cnt >= 3);
       if (eligible.length === 0) {
         // No chains to graduate — mark complete immediately
-        assertWorkRecordId(item.id); await store.queryExec(`UPDATE ${item.id} SET status = "completed", completed_at = time::now()`);
+        assertRecordId(item.id); await store.queryExec(`UPDATE ${item.id} SET status = "completed", completed_at = time::now()`);
         return { work_id: item.id, work_type: "causal_graduate", empty: true, message: "No causal chains ready for graduation. Already marked complete." };
       }
       return {
@@ -241,7 +229,7 @@ async function buildWorkPayload(
     case "soul_generate": {
       const report = await checkGraduation(store);
       if (!report.ready) {
-        assertWorkRecordId(item.id); await store.queryExec(`UPDATE ${item.id} SET status = "completed", completed_at = time::now()`);
+        assertRecordId(item.id); await store.queryExec(`UPDATE ${item.id} SET status = "completed", completed_at = time::now()`);
         return { work_id: item.id, work_type: "soul_generate", empty: true, message: "Not ready for graduation yet. Already marked complete." };
       }
       const [reflections, causalChains, monologues] = await Promise.all([
@@ -271,7 +259,7 @@ async function buildWorkPayload(
     case "soul_evolve": {
       const soul = await getSoul(store);
       if (!soul) {
-        assertWorkRecordId(item.id); await store.queryExec(`UPDATE ${item.id} SET status = "completed", completed_at = time::now()`);
+        assertRecordId(item.id); await store.queryExec(`UPDATE ${item.id} SET status = "completed", completed_at = time::now()`);
         return { work_id: item.id, work_type: "soul_evolve", empty: true, message: "No soul exists yet. Already marked complete." };
       }
       const [reflections, causalChains, monologues] = await Promise.all([
@@ -280,7 +268,7 @@ async function buildWorkPayload(
         store.queryFirst<{ content: string }>(`SELECT content FROM monologue WHERE timestamp > $since ORDER BY timestamp DESC LIMIT 10`, { since: soul.updated_at }).catch(() => []),
       ]);
       if (reflections.length === 0 && causalChains.length === 0 && monologues.length === 0) {
-        assertWorkRecordId(item.id); await store.queryExec(`UPDATE ${item.id} SET status = "completed", completed_at = time::now()`);
+        assertRecordId(item.id); await store.queryExec(`UPDATE ${item.id} SET status = "completed", completed_at = time::now()`);
         return { work_id: item.id, work_type: "soul_evolve", empty: true, message: "No new experience since last soul update. Already marked complete." };
       }
       return {
@@ -325,7 +313,7 @@ async function buildWorkPayload(
     }
 
     default: {
-      assertWorkRecordId(item.id); await store.queryExec(`UPDATE ${item.id} SET status = "completed", completed_at = time::now()`);
+      assertRecordId(item.id); await store.queryExec(`UPDATE ${item.id} SET status = "completed", completed_at = time::now()`);
       return { work_id: item.id, work_type: item.work_type, empty: true, message: `Unknown work type: ${item.work_type}` };
     }
   }
@@ -346,7 +334,7 @@ export async function handleCommitWorkResults(
   if (!store.isAvailable()) return text("Error: database unavailable");
 
   // Look up the work item to know what type it is
-  assertWorkRecordId(workId);
+  assertRecordId(workId);
   const items = await store.queryFirst<PendingWorkItem>(
     `SELECT * FROM ${workId}`,
   );
@@ -523,7 +511,7 @@ async function commitResults(
           const cuWeight = row.context_util != null ? 0.3 : 0;
           const composite = (0.6 * rulesCompliance) + (cuWeight * cu) + (0.1 * curation);
           try {
-            assertWorkRecordId(String(row.id));
+            assertRecordId(String(row.id));
             await store.queryExec(
               `UPDATE ${row.id} SET rules_compliance = $rc, curation = $cur, composite = $comp`,
               { rc: rulesCompliance, cur: curation, comp: composite },

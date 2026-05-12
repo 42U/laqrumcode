@@ -114,6 +114,12 @@ export async function handleUserPromptSubmit(
 
   session.lastUserText = userPrompt;
 
+  // Prefetch previous-session turns concurrently with pipeline (5s+ query)
+  if (state.store.isAvailable() && !session._prevTurnsPrefetch && session._cachedPrevTurns === undefined) {
+    session._prevTurnsPrefetch = state.store.getPreviousSessionTurns(session.sessionId, 5)
+      .catch(() => []);
+  }
+
   // Ingest user message into graph (async, don't block context assembly)
   ingestTurn(state, session, "user", userPrompt).catch(() => {});
 
@@ -129,20 +135,28 @@ export async function handleUserPromptSubmit(
     return {};
   }
 
-  // Run full context retrieval pipeline
+  // Fire anomaly detection + pending work check concurrently with pipeline
+  const anomalyPromise = state.store.isAvailable()
+    ? detectAnomalies(state.store, state.observabilityCooldown).catch(() => [] as import("../engine/observability.js").AnomalyFlag[])
+    : Promise.resolve([] as import("../engine/observability.js").AnomalyFlag[]);
+  const pendingPromise = (session.userTurnCount <= 1 && state.store.isAvailable())
+    ? state.store.queryFirst<{ count: number }>(`SELECT count() AS count FROM pending_work WHERE status = "pending" GROUP ALL`).catch(() => [])
+    : Promise.resolve([] as { count: number }[]);
+
+  // Run full context retrieval pipeline (concurrent with anomaly + pending)
   const contextString = await assembleContextString(state, session, userPrompt);
 
-  // On first turn, check for pending background work from previous sessions
+  // Await the prefetched anomaly + pending results
+  const [anomalyFlags, pendingRows] = await Promise.all([anomalyPromise, pendingPromise]);
+
+  let anomalyBlock = "";
+  if (anomalyFlags.length > 0) anomalyBlock = formatAnomalyBlock(anomalyFlags);
+
   let pendingWorkMessage = "";
-  if (session.userTurnCount <= 1 && state.store.isAvailable()) {
-    try {
-      const pending = await state.store.queryFirst<{ count: number }>(
-        `SELECT count() AS count FROM pending_work WHERE status = "pending" GROUP ALL`,
-      );
-      const count = pending[0]?.count ?? 0;
-      if (count > 0) {
-        pendingWorkMessage = `\n\n<kongcode_pending_work>
-KongCode has ${count} pending memory operation${count > 1 ? "s" : ""} from previous sessions (extraction, reflection, skills, soul).
+  const pendingCount = pendingRows[0]?.count ?? 0;
+  if (pendingCount > 0) {
+    pendingWorkMessage = `\n\n<kongcode_pending_work>
+KongCode has ${pendingCount} pending memory operation${pendingCount > 1 ? "s" : ""} from previous sessions (extraction, reflection, skills, soul).
 
 IMPORTANT: Spawn a background agent to process these. Use:
 - subagent_type: "kongcode:memory-extractor"
@@ -152,24 +166,7 @@ IMPORTANT: Spawn a background agent to process these. Use:
 
 This runs silently in the background. Respond to the user normally.
 </kongcode_pending_work>`;
-        log.info(`[pending_work] ${count} items queued for subagent processing`);
-      }
-    } catch (e) {
-      swallow("userPromptSubmit:pendingCheck", e);
-    }
-  }
-
-  // E3: anomaly-only health injection. Runs cheap absolute-threshold
-  // detectors and prepends a [kongcode-alert] block ONLY if any flag fires.
-  // Cooldowns prevent spam; absent alerts mean substrate is healthy.
-  let anomalyBlock = "";
-  if (state.store.isAvailable()) {
-    try {
-      const flags = await detectAnomalies(state.store, state.observabilityCooldown);
-      if (flags.length > 0) anomalyBlock = formatAnomalyBlock(flags);
-    } catch (e) {
-      swallow("userPromptSubmit:anomalies", e);
-    }
+    log.info(`[pending_work] ${pendingCount} items queued for subagent processing`);
   }
 
   const additionalContext = [anomalyBlock, contextString, pendingWorkMessage].filter(Boolean).join("") || undefined;

@@ -97,6 +97,10 @@ export class SessionState {
     _graduationCelebration;
     /** Whether workspace has files from the default context engine that can be migrated. */
     _hasMigratableFiles;
+    /** Cached previous-session turns (stable within a session). */
+    _cachedPrevTurns;
+    /** Prefetch promise for previous-session turns — fires at session start, awaited in ensureRecentTurns. */
+    _prevTurnsPrefetch;
     constructor(sessionId, sessionKey) {
         this.sessionId = sessionId;
         this.sessionKey = sessionKey;
@@ -160,6 +164,18 @@ export class GlobalPluginState {
     /** Return all active sessions (for exit handlers). */
     allSessions() {
         return [...this.sessions.values()];
+    }
+    /** Reap sessions that have been idle for longer than maxAgeMs. */
+    reapStaleSessions(maxAgeMs = 2 * 60 * 60_000) {
+        const now = Date.now();
+        let reaped = 0;
+        for (const [key, session] of this.sessions) {
+            if (now - session.turnStartMs > maxAgeMs) {
+                this.sessions.delete(key);
+                reaped++;
+            }
+        }
+        return reaped;
     }
     /** Shut down all shared resources. */
     async shutdown() {

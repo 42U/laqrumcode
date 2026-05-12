@@ -92,24 +92,29 @@ async function ensurePrototypes(embeddings: EmbeddingService): Promise<{ categor
   let promise = centroidInitPromise.get(embeddings);
   if (!promise) {
     promise = (async () => {
-      const vecs = await embeddings.embedBatch(PROTOTYPES.map(p => p.text));
-      const byCategory = new Map<IntentCategory, number[][]>();
-      for (let i = 0; i < PROTOTYPES.length; i++) {
-        const cat = PROTOTYPES[i].category;
-        if (!byCategory.has(cat)) byCategory.set(cat, []);
-        byCategory.get(cat)!.push(vecs[i]);
-      }
-      const centroids: { category: IntentCategory; vec: number[] }[] = [];
-      for (const [category, catVecs] of byCategory) {
-        const dim = catVecs[0].length;
-        const centroid = new Array(dim).fill(0);
-        for (const v of catVecs) {
-          for (let d = 0; d < dim; d++) centroid[d] += v[d];
+      try {
+        const vecs = await embeddings.embedBatch(PROTOTYPES.map(p => p.text));
+        const byCategory = new Map<IntentCategory, number[][]>();
+        for (let i = 0; i < PROTOTYPES.length; i++) {
+          const cat = PROTOTYPES[i].category;
+          if (!byCategory.has(cat)) byCategory.set(cat, []);
+          byCategory.get(cat)!.push(vecs[i]);
         }
-        for (let d = 0; d < dim; d++) centroid[d] /= catVecs.length;
-        centroids.push({ category, vec: centroid });
+        const centroids: { category: IntentCategory; vec: number[] }[] = [];
+        for (const [category, catVecs] of byCategory) {
+          const dim = catVecs[0].length;
+          const centroid = new Array(dim).fill(0);
+          for (const v of catVecs) {
+            for (let d = 0; d < dim; d++) centroid[d] += v[d];
+          }
+          for (let d = 0; d < dim; d++) centroid[d] /= catVecs.length;
+          centroids.push({ category, vec: centroid });
+        }
+        centroidCache.set(embeddings, centroids);
+      } catch (e) {
+        centroidInitPromise.delete(embeddings);
+        throw e;
       }
-      centroidCache.set(embeddings, centroids);
     })();
     centroidInitPromise.set(embeddings, promise);
   }

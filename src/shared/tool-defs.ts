@@ -83,7 +83,7 @@ export const MCP_TOOLS = [
       type: "object" as const,
       properties: {
         work_id: { type: "string", description: "The work item ID from fetch_pending_work" },
-        results: { description: "The extraction results — JSON object or plain text depending on work type" },
+        results: { type: "object" as const, description: "The extraction results — JSON object or plain text depending on work type" },
       },
       required: ["work_id", "results"],
     },
@@ -105,7 +105,7 @@ export const MCP_TOOLS = [
             properties: {
               name: { type: "string", description: "Short identifier used for cross-link resolution" },
               content: { type: "string", description: "The actual insight text — this is what gets embedded and stored" },
-              importance: { type: "number", description: "1-10, defaults to 7" },
+              importance: { type: "number", description: "Reserved for future use (concepts do not currently store importance)" },
             },
             required: ["name", "content"],
           },
@@ -118,7 +118,7 @@ export const MCP_TOOLS = [
             properties: {
               from: { type: "string", description: "Source gem name" },
               to: { type: "string", description: "Target gem name" },
-              edge: { type: "string", description: "Relation name, e.g. 'elaborates', 'contrasts_with', 'applies_to', 'prerequisite_for'" },
+              edge: { type: "string", description: "Relation name: 'broader', 'narrower', or 'related_to'" },
             },
             required: ["from", "to", "edge"],
           },

@@ -431,7 +431,7 @@ export class DaemonServer {
       this.sendResponse(sock, {
         jsonrpc: "2.0",
         id: req.id,
-        error: { code: IpcErrorCode.HANDLER_ERROR, message: err.message, data: err.stack },
+        error: { code: IpcErrorCode.HANDLER_ERROR, message: err.message },
       });
     } finally {
       this.rpcsInFlight--;

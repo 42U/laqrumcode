@@ -29,10 +29,3 @@ export declare function linkCausalEdges(chains: CausalChain[], sessionId: string
  * Computes cosine similarity server-side so results compete fairly in scoring.
  */
 export declare function queryCausalContext(seedIds: string[], queryVec: number[], hops?: number, minConfidence?: number, store?: SurrealStore): Promise<VectorSearchResult[]>;
-/**
- * Get causal chain metadata for a session (for metrics/display).
- */
-export declare function getSessionCausalChains(sessionId: string, store: SurrealStore): Promise<{
-    count: number;
-    successRate: number;
-}>;

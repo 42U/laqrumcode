@@ -9,21 +9,11 @@
  * Ported from kongbrain — takes SurrealStore/EmbeddingService as params.
  */
 
-import type { EmbeddingService } from "./embeddings.js";
 import type { SurrealStore } from "./surreal.js";
 import { swallow } from "./errors.js";
 import { cosineSimilarity } from "./graph-context.js";
 
 // --- Types ---
-
-export interface ReflectionMetrics {
-  avgUtilization: number;
-  toolFailureRate: number;
-  steeringCandidates: number;
-  wastedTokens: number;
-  totalToolCalls: number;
-  totalTurns: number;
-}
 
 export interface Reflection {
   id: string;
@@ -32,129 +22,6 @@ export interface Reflection {
   severity: string;
   importance: number;
   score?: number;
-}
-
-// --- Thresholds ---
-
-const UTIL_THRESHOLD = 0.2;
-const TOOL_FAILURE_THRESHOLD = 0.2;
-const STEERING_THRESHOLD = 1;
-
-let _reflectionContextWindow = 200000;
-
-export function setReflectionContextWindow(cw: number): void {
-  _reflectionContextWindow = cw;
-}
-
-function getWasteThreshold(): number {
-  return Math.round(_reflectionContextWindow * 0.005);
-}
-
-// --- Reflection Generation ---
-
-/**
- * Gather session metrics and determine if reflection is warranted.
- */
-export async function gatherSessionMetrics(
-  sessionId: string,
-  store: SurrealStore,
-): Promise<ReflectionMetrics | null> {
-  if (!store.isAvailable()) return null;
-
-  try {
-    const metricsRows = await store.queryFirst<any>(
-      `SELECT
-         count() AS totalTurns,
-         math::sum(actual_tool_calls) AS totalTools,
-         math::sum(steering_candidates) AS totalSteering
-       FROM orchestrator_metrics WHERE session_id = $sid GROUP ALL`,
-      { sid: sessionId },
-    );
-    const metrics = metricsRows[0];
-
-    const qualityRows = await store.queryFirst<any>(
-      `SELECT
-         count() AS totalRetrievals,
-         math::mean(utilization) AS avgUtil,
-         math::sum(context_tokens) AS totalContextTokens,
-         math::sum(IF tool_success = false THEN 1 ELSE 0 END) AS toolFailures,
-         math::sum(IF utilization < 0.1 THEN context_tokens ELSE 0 END) AS wastedTokens
-       FROM retrieval_outcome WHERE session_id = $sid GROUP ALL`,
-      { sid: sessionId },
-    );
-    const quality = qualityRows[0];
-
-    const totalTurns = Number(metrics?.totalTurns ?? 0);
-    const totalTools = Number(metrics?.totalTools ?? 0);
-    const totalSteering = Number(metrics?.totalSteering ?? 0);
-    const rawRetrievals = Number(quality?.totalRetrievals ?? 0);
-    const totalRetrievals = Number.isFinite(rawRetrievals) ? rawRetrievals : 0;
-    const rawUtil = Number(quality?.avgUtil ?? 1);
-    const avgUtilization = Number.isFinite(rawUtil) ? rawUtil : 1;
-    const rawFailures = Number(quality?.toolFailures ?? 0);
-    const toolFailures = Number.isFinite(rawFailures) ? rawFailures : 0;
-    const rawWasted = Number(quality?.wastedTokens ?? 0);
-    const wastedTokens = Number.isFinite(rawWasted) ? rawWasted : 0;
-
-    const toolFailureRate = totalRetrievals > 0 ? toolFailures / totalRetrievals : 0;
-
-    return {
-      avgUtilization,
-      toolFailureRate,
-      steeringCandidates: totalSteering,
-      wastedTokens,
-      totalToolCalls: totalTools,
-      totalTurns,
-    };
-  } catch (e) {
-    swallow.warn("reflection:gatherMetrics", e);
-    return null;
-  }
-}
-
-/**
- * Determine if session performance warrants a reflection.
- */
-export function shouldReflect(metrics: ReflectionMetrics): { reflect: boolean; reasons: string[] } {
-  const reasons: string[] = [];
-
-  if (metrics.avgUtilization < UTIL_THRESHOLD && metrics.totalTurns > 1) {
-    reasons.push(`Low retrieval utilization: ${(metrics.avgUtilization * 100).toFixed(0)}% (threshold: ${UTIL_THRESHOLD * 100}%)`);
-  }
-  if (metrics.toolFailureRate > TOOL_FAILURE_THRESHOLD) {
-    reasons.push(`High tool failure rate: ${(metrics.toolFailureRate * 100).toFixed(0)}% (threshold: ${TOOL_FAILURE_THRESHOLD * 100}%)`);
-  }
-  if (metrics.steeringCandidates >= STEERING_THRESHOLD) {
-    reasons.push(`${metrics.steeringCandidates} steering candidate(s) detected`);
-  }
-  if (metrics.wastedTokens > getWasteThreshold()) {
-    reasons.push(`~${metrics.wastedTokens} wasted context tokens`);
-  }
-
-  return { reflect: reasons.length > 0, reasons };
-}
-
-/**
- * Generate a structured reflection from session performance data.
- * Only called when shouldReflect() returns true.
- */
-export async function generateReflection(
-  sessionId: string,
-  store: SurrealStore,
-  embeddings: EmbeddingService,
-  surrealSessionId?: string,
-): Promise<void> {
-  if (!store.isAvailable()) return;
-
-  // Gate: only reflect if session metrics warrant it
-  const metrics = await gatherSessionMetrics(sessionId, store);
-  if (metrics) {
-    const { reflect } = shouldReflect(metrics);
-    if (!reflect) return;
-  }
-
-  // LLM call logic removed — reflection writes are now handled by
-  // the subagent-driven pending_work pipeline (commit_work_results tool).
 }
 
 // --- Reflection Retrieval ---

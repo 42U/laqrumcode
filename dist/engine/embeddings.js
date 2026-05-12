@@ -15,6 +15,7 @@ export class EmbeddingService {
     initError = null;
     consecutiveTimeouts = 0;
     maxConsecutiveTimeouts = 3;
+    breakerOpenedAt = null;
     embedTimeoutMs;
     store = null;
     modelVersion = null;
@@ -96,14 +97,19 @@ export class EmbeddingService {
     l2Put(hash, vec) {
         if (!this.store?.isAvailable() || !this.modelVersion)
             return;
-        this.store.queryExec(`INSERT INTO embedding_cache (text_hash, embedding, model_version) VALUES ($hash, $vec, $mv)
-       ON DUPLICATE KEY UPDATE embedding = $vec, model_version = $mv`, { hash, vec, mv: this.modelVersion }).catch(e => swallow("embeddings:l2Put", e));
+        this.store.queryExec(`UPSERT embedding_cache SET text_hash = $hash, embedding = $vec, model_version = $mv WHERE text_hash = $hash`, { hash, vec, mv: this.modelVersion }).catch(e => swallow("embeddings:l2Put", e));
     }
     async embed(text) {
         if (!this.ready || !this.ctx)
             throw new Error("Embeddings not initialized");
         if (this.consecutiveTimeouts >= this.maxConsecutiveTimeouts) {
-            throw new Error(`Embedding circuit breaker open: ${this.consecutiveTimeouts} consecutive timeouts`);
+            if (!this.breakerOpenedAt)
+                this.breakerOpenedAt = Date.now();
+            if (Date.now() - this.breakerOpenedAt < 60_000) {
+                throw new Error(`Embedding circuit breaker open: ${this.consecutiveTimeouts} consecutive timeouts`);
+            }
+            this.consecutiveTimeouts = 0;
+            this.breakerOpenedAt = null;
         }
         const cached = this.cache.get(text);
         if (cached) {
@@ -121,10 +127,14 @@ export class EmbeddingService {
             return l2;
         }
         try {
+            let timer;
             const result = await Promise.race([
                 this.ctx.getEmbeddingFor(text),
-                new Promise((_, reject) => setTimeout(() => reject(new Error(`embed() timed out after ${this.embedTimeoutMs}ms`)), this.embedTimeoutMs)),
+                new Promise((_, reject) => {
+                    timer = setTimeout(() => reject(new Error(`embed() timed out after ${this.embedTimeoutMs}ms`)), this.embedTimeoutMs);
+                }),
             ]);
+            clearTimeout(timer);
             this.consecutiveTimeouts = 0;
             const vec = Array.from(result.vector);
             if (this.cache.size >= this.maxCacheSize) {

@@ -91,7 +91,7 @@ const MAX_TRAINING_SAMPLES = 15000;
 function acquireTrainingLock(lockPath: string): (() => void) | null {
   const tryCreate = (): (() => void) | null => {
     try {
-      const fd = openSync(lockPath, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY, 0o644);
+      const fd = openSync(lockPath, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY, 0o600);
       writeSync(fd, JSON.stringify({ pid: process.pid, startedAt: Date.now() }));
       closeSync(fd);
       return () => {
@@ -172,7 +172,7 @@ function saveWeights(weights: ACANWeights, path: string): void {
   const dir = join(path, "..");
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
   const tmpPath = `${path}.${process.pid}.tmp`;
-  writeFileSync(tmpPath, JSON.stringify(weights), "utf-8");
+  writeFileSync(tmpPath, JSON.stringify(weights), { encoding: "utf-8", mode: 0o600 });
   renameSync(tmpPath, path);
 }
 

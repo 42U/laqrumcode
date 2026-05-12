@@ -31,6 +31,7 @@ export declare class EmbeddingService {
     private initError;
     private consecutiveTimeouts;
     private readonly maxConsecutiveTimeouts;
+    private breakerOpenedAt;
     private readonly embedTimeoutMs;
     private store;
     private modelVersion;

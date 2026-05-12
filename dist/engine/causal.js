@@ -94,7 +94,7 @@ export async function linkCausalEdges(chains, sessionId, store, embeddings) {
 export async function queryCausalContext(seedIds, queryVec, hops = 2, minConfidence = 0.4, store) {
     if (seedIds.length === 0 || !store?.isAvailable())
         return [];
-    const RECORD_ID_RE = /^[a-zA-Z_][a-zA-Z0-9_]*:[a-zA-Z0-9_]+$/;
+    const RECORD_ID_RE = /^[a-zA-Z_][a-zA-Z0-9_]*:[a-zA-Z0-9_\-]+$/;
     const validIds = seedIds.filter((id) => RECORD_ID_RE.test(id)).slice(0, 10);
     if (validIds.length === 0)
         return [];
@@ -155,18 +155,31 @@ export async function queryCausalContext(seedIds, queryVec, hops = 2, minConfide
         }
         frontier = nextFrontier.slice(0, 5);
     }
-    // Filter by causal_chain confidence
+    // Filter by causal_chain confidence — only exclude nodes that appear
+    // exclusively in low-confidence chains. Nodes reached via graph traversal
+    // that aren't chain endpoints are kept unconditionally.
     if (results.length > 0 && minConfidence > 0) {
         const resultIds = results.map(r => r.id);
         try {
-            const chains = await store.queryFirst(`SELECT trigger_memory, outcome_memory, confidence FROM causal_chain
+            const lowChains = await store.queryFirst(`SELECT trigger_memory, outcome_memory FROM causal_chain
+         WHERE confidence < $minConf AND (trigger_memory IN $ids OR outcome_memory IN $ids)`, { minConf: minConfidence, ids: resultIds });
+            const highChains = await store.queryFirst(`SELECT trigger_memory, outcome_memory FROM causal_chain
          WHERE confidence >= $minConf AND (trigger_memory IN $ids OR outcome_memory IN $ids)`, { minConf: minConfidence, ids: resultIds });
-            const allowedIds = new Set();
-            for (const c of chains) {
-                allowedIds.add(String(c.trigger_memory));
-                allowedIds.add(String(c.outcome_memory));
+            const highIds = new Set();
+            for (const c of highChains) {
+                highIds.add(String(c.trigger_memory));
+                highIds.add(String(c.outcome_memory));
             }
-            return results.filter(r => allowedIds.has(r.id));
+            const lowOnlyIds = new Set();
+            for (const c of lowChains) {
+                const t = String(c.trigger_memory);
+                const o = String(c.outcome_memory);
+                if (!highIds.has(t))
+                    lowOnlyIds.add(t);
+                if (!highIds.has(o))
+                    lowOnlyIds.add(o);
+            }
+            return results.filter(r => !lowOnlyIds.has(r.id));
         }
         catch (e) {
             swallow.warn("causal:confidence-filter", e);
@@ -174,26 +187,4 @@ export async function queryCausalContext(seedIds, queryVec, hops = 2, minConfide
         }
     }
     return results;
-}
-/**
- * Get causal chain metadata for a session (for metrics/display).
- */
-export async function getSessionCausalChains(sessionId, store) {
-    try {
-        if (!store.isAvailable())
-            return { count: 0, successRate: 0 };
-        const rows = await store.queryFirst(`SELECT count() AS total, math::sum(IF success THEN 1 ELSE 0 END) AS successes
-       FROM causal_chain WHERE session_id = $sid GROUP ALL`, { sid: sessionId });
-        const row = rows[0];
-        if (!row || !row.total)
-            return { count: 0, successRate: 0 };
-        return {
-            count: Number(row.total),
-            successRate: Number(row.successes) / Number(row.total),
-        };
-    }
-    catch (e) {
-        swallow("causal:metrics", e);
-        return { count: 0, successRate: 0 };
-    }
 }

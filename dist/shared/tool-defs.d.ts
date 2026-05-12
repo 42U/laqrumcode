@@ -121,6 +121,7 @@ export declare const MCP_TOOLS: readonly [{
                 readonly description: "The work item ID from fetch_pending_work";
             };
             readonly results: {
+                readonly type: "object";
                 readonly description: "The extraction results — JSON object or plain text depending on work type";
             };
         };
@@ -161,7 +162,7 @@ export declare const MCP_TOOLS: readonly [{
                         };
                         readonly importance: {
                             readonly type: "number";
-                            readonly description: "1-10, defaults to 7";
+                            readonly description: "Reserved for future use (concepts do not currently store importance)";
                         };
                     };
                     readonly required: readonly ["name", "content"];
@@ -183,7 +184,7 @@ export declare const MCP_TOOLS: readonly [{
                         };
                         readonly edge: {
                             readonly type: "string";
-                            readonly description: "Relation name, e.g. 'elaborates', 'contrasts_with', 'applies_to', 'prerequisite_for'";
+                            readonly description: "Relation name: 'broader', 'narrower', or 'related_to'";
                         };
                     };
                     readonly required: readonly ["from", "to", "edge"];

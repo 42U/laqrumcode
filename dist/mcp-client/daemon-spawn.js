@@ -79,7 +79,6 @@ async function pingSocket(socketPath, timeoutMs = 1500) {
     }
 }
 async function pollSocketReady(socketPath, deadline, log) {
-    let lastErr = null;
     while (Date.now() < deadline) {
         if (existsSync(socketPath)) {
             if (await pingSocket(socketPath, 1500))
@@ -87,7 +86,7 @@ async function pollSocketReady(socketPath, deadline, log) {
         }
         await new Promise((r) => setTimeout(r, 500));
     }
-    log.warn(`[daemon-spawn] daemon never became ready (last err: ${lastErr})`);
+    log.warn(`[daemon-spawn] daemon never became ready within deadline`);
     return false;
 }
 /** Resolve the daemon script path from this file's compiled location. Mirrors
@@ -174,6 +173,7 @@ export async function ensureDaemon(opts = {}) {
             env: process.env,
         });
         child.unref();
+        closeSync(logFd);
         log.info(`[daemon-spawn] daemon spawned pid=${child.pid} — waiting for ready`);
         const deadline = Date.now() + readyTimeoutMs;
         const ok = await pollSocketReady(socketPath, deadline, log);

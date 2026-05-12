@@ -53,7 +53,7 @@ import { handlePreCompact } from "../hook-handlers/pre-compact.js";
 import { handlePostCompact } from "../hook-handlers/post-compact.js";
 import { handleTaskCreated, handleSubagentStop } from "../hook-handlers/subagent.js";
 import { startHttpApi, stopHttpApi, registerHookHandler } from "../http-api.js";
-import { startDrainScheduler } from "./auto-drain.js";
+import { startDrainScheduler, stopDrainScheduler } from "./auto-drain.js";
 import { configureReranker, disposeReranker, initReranker, isRerankerActive } from "../engine/graph-context.js";
 import { disposeSharedLlama } from "../engine/llama-loader.js";
 import { detectResourceProfile } from "../engine/resource-tier.js";
@@ -354,6 +354,7 @@ async function main() {
             return new Promise(() => { });
         shuttingDown = true;
         log.info(`[daemon] graceful exit: ${reason}`);
+        stopDrainScheduler();
         try {
             await server.close();
         }
@@ -380,7 +381,7 @@ async function main() {
             await disposeSharedLlama();
         }
         catch { }
-        shutdownManagedSurreal();
+        shutdownManagedSurreal({ force: true });
         removeOwnPidFile();
         process.exit(0);
     };

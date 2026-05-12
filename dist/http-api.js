@@ -181,8 +181,8 @@ export async function startHttpApi(state, sock, projectDir) {
         log.info("[http-api] auth token written to", authTokenPath);
     }
     catch (err) {
-        log.warn("[http-api] failed to write auth token, running unauthenticated:", err);
-        authToken = null;
+        log.error("[http-api] FATAL: failed to write auth token — refusing to start unauthenticated:", err);
+        throw err;
     }
     server = createServer((req, res) => {
         handleRequest(state, req, res).catch(err => {
@@ -211,7 +211,7 @@ export async function startHttpApi(state, sock, projectDir) {
                     log.info(`HTTP API listening on Unix socket: ${sock}`);
                     resolve();
                 });
-                server.on("error", reject);
+                server.once("error", reject);
             });
             try {
                 chmodSync(sock, 0o600);
@@ -233,7 +233,7 @@ export async function startHttpApi(state, sock, projectDir) {
                 const dir = resolvePath(projectDir || process.cwd());
                 portFilePath = join(dir, ".kongcode-port");
                 try {
-                    writeFileSync(portFilePath, String(addr.port));
+                    writeFileSync(portFilePath, String(addr.port), { mode: 0o600 });
                     log.info(`Port file written: ${portFilePath}`);
                 }
                 catch (e) {
@@ -242,12 +242,13 @@ export async function startHttpApi(state, sock, projectDir) {
             }
             resolve();
         });
-        server.on("error", reject);
+        server.once("error", reject);
     });
 }
 /** Stop the internal HTTP API and clean up socket/port files. */
 export async function stopHttpApi() {
     if (server) {
+        server.closeAllConnections();
         await new Promise((resolve) => {
             server.close(() => resolve());
         });

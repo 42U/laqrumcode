@@ -367,7 +367,7 @@ export class SurrealStore {
         assertRecordId(fromId);
         assertRecordId(toId);
         const safeName = edge.replace(/[^a-zA-Z0-9_]/g, "");
-        // Direct interpolation safe: assertRecordId validates format above
+        assertValidEdge(safeName);
         await this.queryExec(`RELATE ${fromId}->${safeName}->${toId}`);
     }
     // ── 5-Pillar entity operations ─────────────────────────────────────────
@@ -407,6 +407,7 @@ export class SurrealStore {
         const existing = await this.queryFirst(`SELECT id FROM session WHERE kc_session_id = $kc LIMIT 1`, { kc: kcSessionId });
         if (existing[0]?.id) {
             const id = String(existing[0].id);
+            assertRecordId(id);
             if (projectId) {
                 await this.queryExec(`UPDATE ${id} SET project_id = IF project_id IS NONE THEN $pid ELSE project_id END`, { pid: projectId }).catch(() => { });
             }
@@ -681,9 +682,7 @@ export class SurrealStore {
         const rows = await this.queryFirst(`SELECT id FROM concept WHERE string::lowercase(content) = string::lowercase($content) LIMIT 1`, { content });
         if (rows.length > 0) {
             const id = String(rows[0].id);
-            // Backfill embedding if the existing concept is missing one. Also
-            // backfill project_id if missing (0.7.26 — concepts created pre-project-
-            // scoping won't have it; first re-touch fills it in).
+            assertRecordId(id);
             if (embedding?.length) {
                 await this.queryExec(`UPDATE ${id} SET access_count += 1, last_accessed = time::now(), embedding = IF embedding IS NONE OR array::len(embedding) = 0 THEN $emb ELSE embedding END${projectId ? ", project_id = IF project_id IS NONE THEN $pid ELSE project_id END" : ""}`, projectId ? { emb: embedding, pid: projectId } : { emb: embedding });
             }
@@ -727,9 +726,11 @@ export class SurrealStore {
          LIMIT 1`, { vec: embedding, cat: source });
             if (dupes.length > 0 && dupes[0].score > 0.92) {
                 const existing = dupes[0];
+                const existingId = String(existing.id);
+                assertRecordId(existingId);
                 const newImp = Math.max(existing.importance ?? 0, importance);
-                await this.queryExec(`UPDATE ${String(existing.id)} SET access_count += 1, importance = $imp, last_accessed = time::now()`, { imp: newImp });
-                return String(existing.id);
+                await this.queryExec(`UPDATE ${existingId} SET access_count += 1, importance = $imp, last_accessed = time::now()`, { imp: newImp });
+                return existingId;
             }
         }
         const record = { text, importance, category: source, source };
@@ -908,9 +909,9 @@ export class SurrealStore {
         try {
             await this.queryExec(`UPSERT memory_utility_cache SET
           memory_id = $mid,
-          retrieval_count += 1,
-          avg_utilization = IF retrieval_count > 1
-            THEN (avg_utilization * (retrieval_count - 1) + $util) / retrieval_count
+          retrieval_count = (retrieval_count ?? 0) + 1,
+          avg_utilization = IF (retrieval_count ?? 0) > 0
+            THEN (avg_utilization * (retrieval_count ?? 0) + $util) / ((retrieval_count ?? 0) + 1)
             ELSE $util
           END,
           last_updated = time::now()

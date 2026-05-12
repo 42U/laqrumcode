@@ -48,13 +48,15 @@ export async function handleSubagentStop(state, payload) {
             const rows = await store.queryFirst(`SELECT id FROM subagent
          WHERE parent_session_id = $sid AND outcome = 'in_progress'
          ${agentType ? "AND agent_type = $at" : ""}
-         ORDER BY spawned_at DESC LIMIT 1`, agentType ? { sid: sessionId, at: agentType } : { sid: sessionId }).catch(() => []);
+         ORDER BY created_at DESC LIMIT 1`, agentType ? { sid: sessionId, at: agentType } : { sid: sessionId }).catch(() => []);
             subagentId = rows[0]?.id ? String(rows[0].id) : null;
         }
         if (subagentId) {
+            if (!/^[a-zA-Z_][a-zA-Z0-9_]*:[a-zA-Z0-9_\-]+$/.test(subagentId))
+                return {};
             await store.queryExec(`UPDATE ${subagentId} SET
            ended_at = time::now(),
-           duration_ms = <int>(time::unix(time::now()) * 1000 - time::unix(spawned_at ?? time::now()) * 1000),
+           duration_ms = <int>(time::unix(time::now()) * 1000 - time::unix(created_at ?? time::now()) * 1000),
            outcome = $outcome,
            result_summary = $result`, {
                 outcome,

@@ -201,32 +201,46 @@ export async function computeTrends(store, windowDays = 7) {
  * are out of cooldown. Cooldown state is in-memory on `cooldown` — pass
  * `globalState.observabilityCooldown` from the call site.
  */
+let _anomalyCacheRaw = [];
+let _anomalyCacheAt = 0;
+const ANOMALY_CACHE_TTL_MS = 60_000;
+export function resetAnomalyCache() {
+    _anomalyCacheRaw = [];
+    _anomalyCacheAt = 0;
+}
 export async function detectAnomalies(store, cooldown) {
     if (!store.isAvailable())
         return [];
-    const flags = [];
     const now = Date.now();
-    for (const detector of [
-        detectContextTransformFailures,
-        detectEmbeddingGap,
-        detectPendingWorkBuildup,
-        detectPendingWorkAging,
-        detectGraduationReady,
-        detectGraduationClose,
-    ]) {
-        try {
-            const flag = await detector(store);
-            if (!flag)
-                continue;
-            const last = cooldown.lastFired.get(flag.code) ?? 0;
-            if (now - last < COOLDOWN_MS[flag.severity])
-                continue;
-            cooldown.lastFired.set(flag.code, now);
-            flags.push(flag);
+    let rawFlags;
+    if (now - _anomalyCacheAt < ANOMALY_CACHE_TTL_MS) {
+        rawFlags = _anomalyCacheRaw;
+    }
+    else {
+        const detectors = [
+            detectContextTransformFailures,
+            detectEmbeddingGap,
+            detectPendingWorkBuildup,
+            detectPendingWorkAging,
+            detectGraduationReady,
+            detectGraduationClose,
+        ];
+        const results = await Promise.allSettled(detectors.map(d => d(store)));
+        rawFlags = [];
+        for (const r of results) {
+            if (r.status === "fulfilled" && r.value)
+                rawFlags.push(r.value);
         }
-        catch (e) {
-            swallow.warn(`observability:detector:${detector.name}`, e);
-        }
+        _anomalyCacheRaw = rawFlags;
+        _anomalyCacheAt = now;
+    }
+    const flags = [];
+    for (const flag of rawFlags) {
+        const last = cooldown.lastFired.get(flag.code) ?? 0;
+        if (now - last < COOLDOWN_MS[flag.severity])
+            continue;
+        cooldown.lastFired.set(flag.code, now);
+        flags.push(flag);
     }
     return flags;
 }

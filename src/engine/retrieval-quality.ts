@@ -207,8 +207,8 @@ export async function evaluateRetrieval(
       await store.queryExec(`CREATE retrieval_outcome CONTENT $data`, { data: record });
       store.updateUtilityCache(idStr, signals.utilization)
         .catch(e => swallow.warn("retrieval-quality:utilityCache", e));
-    } catch {
-      // non-critical telemetry
+    } catch (e) {
+      swallow.warn("retrieval-quality:outcome", e);
     }
   }
 

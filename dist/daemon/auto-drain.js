@@ -31,6 +31,7 @@ import { log } from "../engine/log.js";
 import { swallow } from "../engine/errors.js";
 import { drainHeuristic } from "./heuristic-drain.js";
 let schedulerStarted = false;
+let schedulerTimer = null;
 let claudeBinPath = null;
 let claudeBinUnavailable = false;
 /** Build a minimal environment for the drain subprocess.
@@ -47,8 +48,9 @@ function buildDrainEnv() {
         LANG: process.env.LANG,
         XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR,
     };
+    const ALLOWED_CLAUDE = new Set(["CLAUDE_CODE_ENTRYPOINT", "CLAUDE_WORKSPACE"]);
     for (const [k, v] of Object.entries(process.env)) {
-        if (k.startsWith("KONGCODE_") || k.startsWith("CLAUDE_") || k.startsWith("NODE_")) {
+        if (k.startsWith("KONGCODE_") || k.startsWith("NODE_") || ALLOWED_CLAUDE.has(k)) {
             env[k] = v;
         }
     }
@@ -116,7 +118,7 @@ function isPidAlive(pid) {
  *  locks (dead PID) are auto-cleaned. */
 function tryAcquireLock(lockPath) {
     try {
-        return openSync(lockPath, "wx", 0o644);
+        return openSync(lockPath, "wx", 0o600);
     }
     catch (e) {
         if (e.code !== "EEXIST")
@@ -320,7 +322,7 @@ export function startDrainScheduler(state, opts) {
         .catch(e => swallow.warn("auto-drain:startup", e));
     // Periodic check.
     if (opts.intervalMs > 0) {
-        const timer = setInterval(() => {
+        schedulerTimer = setInterval(() => {
             spawnHeadlessDrainer(state, opts, "periodic")
                 .then(r => {
                 if (r.spawned)
@@ -328,8 +330,16 @@ export function startDrainScheduler(state, opts) {
             })
                 .catch(e => swallow.warn("auto-drain:periodic", e));
         }, opts.intervalMs);
-        timer.unref?.();
+        schedulerTimer.unref?.();
     }
+}
+/** Stop the periodic drain scheduler (call during shutdown). */
+export function stopDrainScheduler() {
+    if (schedulerTimer) {
+        clearInterval(schedulerTimer);
+        schedulerTimer = null;
+    }
+    schedulerStarted = false;
 }
 /** Event-driven trigger — call from SessionEnd handler after items get queued. */
 export function triggerDrainCheck(state, opts, reason = "session-end") {

@@ -164,8 +164,8 @@ export async function evaluateRetrieval(responseTurnId, responseText, store) {
             store.updateUtilityCache(idStr, signals.utilization)
                 .catch(e => swallow.warn("retrieval-quality:utilityCache", e));
         }
-        catch {
-            // non-critical telemetry
+        catch (e) {
+            swallow.warn("retrieval-quality:outcome", e);
         }
     }
     // Per-turn context utilization: MAX of knowledge items' CE scores.

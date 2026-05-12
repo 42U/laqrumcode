@@ -18,8 +18,12 @@ export function detectResourceProfile(): ResourceProfile {
   const cpuCount = cpus().length;
   const noGpu = process.env.KONGCODE_NO_GPU === "1";
 
+  const validTiers = ["constrained", "standard", "generous"];
+  if (override && !validTiers.includes(override)) {
+    console.warn(`[resource-tier] Invalid KONGCODE_RESOURCE_TIER="${override}", falling back to auto-detect`);
+  }
   const tier: ResourceTier =
-    override && ["constrained", "standard", "generous"].includes(override)
+    override && validTiers.includes(override)
       ? override
       : totalRamMb <= 3072 || cpuCount <= 2
         ? "constrained"

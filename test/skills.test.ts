@@ -5,7 +5,6 @@
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import {
-  extractSkill,
   findRelevantSkills,
   formatSkillContext,
   recordSkillOutcome,
@@ -31,13 +30,6 @@ function mockStore() {
   } as any;
 }
 
-function mockEmbeddings(available = true) {
-  return {
-    isAvailable: () => available,
-    embed: vi.fn(async () => new Array(1024).fill(0)),
-  } as any;
-}
-
 function makeSampleSkill(overrides: Partial<Skill> = {}): Skill {
   return {
     id: "skill:s1",
@@ -59,23 +51,6 @@ function makeSampleSkill(overrides: Partial<Skill> = {}): Skill {
     ...overrides,
   };
 }
-
-// ── extractSkill ──
-
-describe("extractSkill", () => {
-  it("returns null (LLM body removed — handled by pending_work pipeline)", async () => {
-    const store = mockStore();
-    const result = await extractSkill("session:s1", "task:t1", store, mockEmbeddings());
-    expect(result).toBeNull();
-  });
-
-  it("returns null when store is unavailable", async () => {
-    const store = mockStore();
-    store.isAvailable = () => false;
-    const result = await extractSkill("session:s1", "task:t1", store, mockEmbeddings());
-    expect(result).toBeNull();
-  });
-});
 
 // ── findRelevantSkills ──
 

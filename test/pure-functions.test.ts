@@ -17,7 +17,7 @@ import { predictQueries } from "../src/engine/prefetch.js";
 import { buildSystemPrompt, buildTranscript } from "../src/engine/memory-daemon.js";
 import { formatRelativeTime, expandVagueQuery } from "../src/engine/graph-context.js";
 import { formatSkillContext, type Skill } from "../src/engine/skills.js";
-import { formatReflectionContext, shouldReflect, type Reflection, type ReflectionMetrics } from "../src/engine/reflection.js";
+import { formatReflectionContext, type Reflection } from "../src/engine/reflection.js";
 
 // ── shouldRunCheck ──────────────────────────────────────────────────────────
 
@@ -471,79 +471,6 @@ describe("formatReflectionContext", () => {
   it("includes advisory header", () => {
     const result = formatReflectionContext([sampleReflection]);
     expect(result).toContain("Lessons from past sessions");
-  });
-});
-
-// ── shouldReflect ───────────────────────────────────────────────────────────
-
-describe("shouldReflect", () => {
-  it("returns reflect=false for healthy metrics", () => {
-    const metrics: ReflectionMetrics = {
-      avgUtilization: 0.8,
-      toolFailureRate: 0.05,
-      steeringCandidates: 0,
-      wastedTokens: 0,
-      totalToolCalls: 10,
-      totalTurns: 5,
-    };
-    const { reflect, reasons } = shouldReflect(metrics);
-    expect(reflect).toBe(false);
-    expect(reasons).toHaveLength(0);
-  });
-
-  it("detects low utilization", () => {
-    const metrics: ReflectionMetrics = {
-      avgUtilization: 0.1,
-      toolFailureRate: 0.0,
-      steeringCandidates: 0,
-      wastedTokens: 0,
-      totalToolCalls: 10,
-      totalTurns: 5,
-    };
-    const { reflect, reasons } = shouldReflect(metrics);
-    expect(reflect).toBe(true);
-    expect(reasons.some(r => r.includes("utilization"))).toBe(true);
-  });
-
-  it("detects high tool failure rate", () => {
-    const metrics: ReflectionMetrics = {
-      avgUtilization: 0.8,
-      toolFailureRate: 0.5,
-      steeringCandidates: 0,
-      wastedTokens: 0,
-      totalToolCalls: 10,
-      totalTurns: 5,
-    };
-    const { reflect, reasons } = shouldReflect(metrics);
-    expect(reflect).toBe(true);
-    expect(reasons.some(r => r.includes("tool failure"))).toBe(true);
-  });
-
-  it("detects steering candidates", () => {
-    const metrics: ReflectionMetrics = {
-      avgUtilization: 0.8,
-      toolFailureRate: 0.0,
-      steeringCandidates: 2,
-      wastedTokens: 0,
-      totalToolCalls: 10,
-      totalTurns: 5,
-    };
-    const { reflect, reasons } = shouldReflect(metrics);
-    expect(reflect).toBe(true);
-    expect(reasons.some(r => r.includes("steering"))).toBe(true);
-  });
-
-  it("does not flag low utilization when totalTurns <= 1", () => {
-    const metrics: ReflectionMetrics = {
-      avgUtilization: 0.05,
-      toolFailureRate: 0.0,
-      steeringCandidates: 0,
-      wastedTokens: 0,
-      totalToolCalls: 1,
-      totalTurns: 1,
-    };
-    const { reflect } = shouldReflect(metrics);
-    expect(reflect).toBe(false);
   });
 });
 

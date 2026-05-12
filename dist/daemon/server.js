@@ -379,7 +379,7 @@ export class DaemonServer {
             this.sendResponse(sock, {
                 jsonrpc: "2.0",
                 id: req.id,
-                error: { code: -32003 /* IpcErrorCode.HANDLER_ERROR */, message: err.message, data: err.stack },
+                error: { code: -32003 /* IpcErrorCode.HANDLER_ERROR */, message: err.message },
             });
         }
         finally {

@@ -33,6 +33,8 @@ export function runBootstrapMaintenance(state) {
     }).catch(e => swallow.warn("bootstrap:maintenance:group2", e));
     // Group 3: CPU-heavy — deferred so first-turn context assembly is uncontested
     const heavyTimer = setTimeout(async () => {
+        if (!store.isAvailable())
+            return;
         try {
             await store.consolidateMemories((text) => embeddings.embed(text));
         }

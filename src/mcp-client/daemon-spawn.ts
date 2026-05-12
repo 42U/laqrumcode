@@ -13,13 +13,12 @@
  */
 
 import { spawn } from "node:child_process";
-import { existsSync, openSync, closeSync, writeSync, readFileSync, statSync, unlinkSync } from "node:fs";
+import { existsSync, openSync, closeSync, writeSync, readFileSync, unlinkSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { homedir } from "node:os";
 import {
-  DEFAULT_DAEMON_SOCKET_PATH,
   DAEMON_PID_FILE,
   DAEMON_SPAWN_LOCK,
 } from "../shared/ipc-types.js";
@@ -87,14 +86,13 @@ async function pingSocket(socketPath: string, timeoutMs = 1500): Promise<boolean
 }
 
 async function pollSocketReady(socketPath: string, deadline: number, log: NonNullable<DaemonSpawnOpts["log"]>): Promise<boolean> {
-  let lastErr: unknown = null;
   while (Date.now() < deadline) {
     if (existsSync(socketPath)) {
       if (await pingSocket(socketPath, 1500)) return true;
     }
     await new Promise((r) => setTimeout(r, 500));
   }
-  log.warn(`[daemon-spawn] daemon never became ready (last err: ${lastErr})`);
+  log.warn(`[daemon-spawn] daemon never became ready within deadline`);
   return false;
 }
 
@@ -178,6 +176,7 @@ export async function ensureDaemon(opts: DaemonSpawnOpts = {}): Promise<{ socket
       env: process.env,
     });
     child.unref();
+    closeSync(logFd);
     log.info(`[daemon-spawn] daemon spawned pid=${child.pid} — waiting for ready`);
 
     const deadline = Date.now() + readyTimeoutMs;

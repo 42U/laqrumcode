@@ -59,6 +59,8 @@ declare function readSpending(cacheDir: string): SpendingState;
 declare function bumpSpending(cacheDir: string): SpendingState;
 /** Start the periodic drain scheduler. Idempotent — calling twice is a no-op. */
 export declare function startDrainScheduler(state: GlobalPluginState, opts: DrainSchedulerOpts): void;
+/** Stop the periodic drain scheduler (call during shutdown). */
+export declare function stopDrainScheduler(): void;
 /** Event-driven trigger — call from SessionEnd handler after items get queued. */
 export declare function triggerDrainCheck(state: GlobalPluginState, opts: DrainSchedulerOpts, reason?: string): void;
 /** Test-only exports. Not part of the public API. */

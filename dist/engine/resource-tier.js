@@ -4,7 +4,11 @@ export function detectResourceProfile() {
     const totalRamMb = Math.round(totalmem() / (1024 * 1024));
     const cpuCount = cpus().length;
     const noGpu = process.env.KONGCODE_NO_GPU === "1";
-    const tier = override && ["constrained", "standard", "generous"].includes(override)
+    const validTiers = ["constrained", "standard", "generous"];
+    if (override && !validTiers.includes(override)) {
+        console.warn(`[resource-tier] Invalid KONGCODE_RESOURCE_TIER="${override}", falling back to auto-detect`);
+    }
+    const tier = override && validTiers.includes(override)
         ? override
         : totalRamMb <= 3072 || cpuCount <= 2
             ? "constrained"

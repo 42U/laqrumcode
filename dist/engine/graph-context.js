@@ -125,6 +125,11 @@ export function applyDistributionBands(items) {
     const scores = items.map(n => n.finalScore ?? 0).sort((a, b) => a - b);
     const q1 = scores[Math.floor(scores.length * 0.25)];
     const q3 = scores[Math.floor(scores.length * 0.75)];
+    if (q1 === q3) {
+        for (const n of items)
+            n.band = "supporting";
+        return;
+    }
     for (const n of items) {
         const s = n.finalScore ?? 0;
         if (s >= q3)
@@ -314,9 +319,9 @@ function extractLastUserText(messages) {
 /** Estimate char-equivalent count for a single content block (claw-code: per-block-type estimation). */
 function blockCharLen(c) {
     if (c.type === "text")
-        return c.text.length;
+        return c.text?.length ?? 0;
     if (c.type === "thinking")
-        return c.thinking.length;
+        return c.thinking?.length ?? 0;
     if (c.type === "toolCall") {
         // Tool name + serialized args — JSON is denser (2 bytes/token vs 4)
         // Scale JSON args to char-equivalent at prose ratio
@@ -429,10 +434,13 @@ function injectRulesSuffix(messages, session) {
         const msg = messages[i];
         if (isUser(msg)) {
             const clone = [...messages];
-            clone[i] = {
-                ...msg,
-                content: typeof msg.content === "string" ? msg.content + suffix : msg.content,
-            };
+            if (typeof msg.content === "string") {
+                clone[i] = { ...msg, content: msg.content + suffix };
+            }
+            else if (Array.isArray(msg.content)) {
+                const content = [...msg.content, { type: "text", text: suffix }];
+                clone[i] = { ...msg, content };
+            }
             return clone;
         }
         if (isToolResult(msg)) {
@@ -696,9 +704,15 @@ function buildSystemPromptSection(session, tier0Entries) {
     return parts.length > 0 ? parts.join("\n\n") : undefined;
 }
 // ── Guaranteed recent turns from previous sessions ─────────────────────────────
-async function ensureRecentTurns(contextNodes, sessionId, store, count = 5) {
+async function ensureRecentTurns(contextNodes, session, store, count = 5) {
     try {
-        const recentTurns = await store.getPreviousSessionTurns(sessionId, count);
+        if (session._cachedPrevTurns === undefined) {
+            session._cachedPrevTurns = session._prevTurnsPrefetch
+                ? await session._prevTurnsPrefetch
+                : await store.getPreviousSessionTurns(session.sessionId, count);
+            session._prevTurnsPrefetch = undefined;
+        }
+        const recentTurns = session._cachedPrevTurns;
         if (recentTurns.length === 0)
             return contextNodes;
         const existingTexts = new Set(contextNodes.map(n => (n.text ?? "").slice(0, 100)));
@@ -1322,11 +1336,9 @@ tier0FromWrapper = []) {
             const ranked = await scoreResults(filteredCached, new Set(), queryVec, store, currentIntent);
             const deduped = deduplicateResults(ranked);
             const reranked = await rerankResults(deduped, queryText);
-            // 0.7.35: distribution-derived bands when the cross-encoder didn't
-            // fire (offline/skipped). No-op when rerank already stamped bands.
             applyDistributionBands(reranked);
             let contextNodes = takeWithConstraints(reranked, tokenBudget, budgets.maxContextItems);
-            contextNodes = await ensureRecentTurns(contextNodes, session.sessionId, store);
+            contextNodes = await ensureRecentTurns(contextNodes, session, store);
             if (contextNodes.length > 0) {
                 if (contextNodes.filter((n) => n.table === "concept" || n.table === "memory").length > 0) {
                     store.bumpAccessCounts(contextNodes.filter((n) => n.table === "concept" || n.table === "memory").map((n) => n.id)).catch(e => swallow.warn("graph-context:bumpAccess", e));
@@ -1439,7 +1451,7 @@ tier0FromWrapper = []) {
         const reranked = await rerankResults(deduped, queryText);
         applyDistributionBands(reranked);
         let contextNodes = takeWithConstraints(reranked, tokenBudget, budgets.maxContextItems);
-        contextNodes = await ensureRecentTurns(contextNodes, session.sessionId, store);
+        contextNodes = await ensureRecentTurns(contextNodes, session, store);
         if (contextNodes.length === 0) {
             const result = getRecentTurns(messages, budgets.conversation, budgets.toolHistory, contextWindow, session);
             return { messages: injectRulesSuffix(result, session), stats: makeStats(result, 0, 0, result.length, "graph") };

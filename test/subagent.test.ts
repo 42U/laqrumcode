@@ -116,8 +116,8 @@ describe("handleSubagentStop", () => {
     });
 
     const sql = (state.store.queryExec as ReturnType<typeof vi.fn>).mock.calls[0][0] as string;
-    expect(sql).toContain("spawned_at ?? time::now()");
-    expect(sql).not.toContain("IF spawned_at IS NOT NONE");
+    expect(sql).toContain("created_at ?? time::now()");
+    expect(sql).not.toContain("IF created_at IS NOT NONE");
   });
 
   it("returns empty {} when store is unavailable", async () => {

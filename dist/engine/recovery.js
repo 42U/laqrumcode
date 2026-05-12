@@ -32,11 +32,15 @@ function cosineSim(a, b) {
 async function backfillTable(store, selectSql) {
     const rows = await store.queryFirst(selectSql);
     let fixed = 0;
+    const RECORD_ID_RE = /^[a-zA-Z_][a-zA-Z0-9_]*:[a-zA-Z0-9_\-]+$/;
     for (const row of rows) {
         if (!row.project_id)
             continue;
+        const id = String(row.id);
+        if (!RECORD_ID_RE.test(id))
+            continue;
         try {
-            await store.queryExec(`UPDATE ${row.id} SET project_id = $pid`, { pid: row.project_id });
+            await store.queryExec(`UPDATE ${id} SET project_id = $pid`, { pid: row.project_id });
             fixed++;
         }
         catch { /* skip */ }
@@ -151,8 +155,11 @@ export async function recoverProjectIdRows(store) {
                 for (const row of orphans) {
                     const match = findBestProjectMatch(row.embedding, centroids);
                     if (match) {
+                        const rid = String(row.id);
+                        if (!/^[a-zA-Z_][a-zA-Z0-9_]*:[a-zA-Z0-9_\-]+$/.test(rid))
+                            continue;
                         try {
-                            await store.queryExec(`UPDATE ${row.id} SET project_id = $pid, scope = NONE`, { pid: match.projectId });
+                            await store.queryExec(`UPDATE ${rid} SET project_id = $pid, scope = NONE`, { pid: match.projectId });
                             centroidAssigned++;
                         }
                         catch { /* skip */ }
@@ -170,8 +177,11 @@ export async function recoverProjectIdRows(store) {
         try {
             const rows = await store.queryFirst(`SELECT id FROM type::table($t) WHERE project_id IS NONE AND (scope IS NONE OR scope != 'global')`, { t: table });
             for (const row of rows) {
+                const rid = String(row.id);
+                if (!/^[a-zA-Z_][a-zA-Z0-9_]*:[a-zA-Z0-9_\-]+$/.test(rid))
+                    continue;
                 try {
-                    await store.queryExec(`UPDATE ${row.id} SET scope = 'global'`);
+                    await store.queryExec(`UPDATE ${rid} SET scope = 'global'`);
                     globalsTagged++;
                 }
                 catch { /* skip */ }

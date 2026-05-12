@@ -8,7 +8,6 @@
  *
  * Ported from kongbrain — takes SurrealStore/EmbeddingService as params.
  */
-import type { EmbeddingService } from "./embeddings.js";
 import type { SurrealStore } from "./surreal.js";
 export interface SkillStep {
     tool: string;
@@ -29,18 +28,6 @@ export interface Skill {
     active: boolean;
     score?: number;
 }
-export interface ExtractedSkill {
-    name: string;
-    description: string;
-    preconditions: string;
-    steps: SkillStep[];
-    postconditions: string;
-}
-/**
- * Run at session end. If the session had 3+ tool calls and final outcomes succeeded,
- * extract the procedure as a reusable skill.
- */
-export declare function extractSkill(sessionId: string, taskId: string, store: SurrealStore, embeddings: EmbeddingService): Promise<string | null>;
 /**
  * After saving a new skill, fade similar existing skills above similarity threshold.
  */

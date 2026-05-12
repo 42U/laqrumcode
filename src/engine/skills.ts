@@ -9,7 +9,6 @@
  * Ported from kongbrain — takes SurrealStore/EmbeddingService as params.
  */
 
-import type { EmbeddingService } from "./embeddings.js";
 import type { SurrealStore } from "./surreal.js";
 import { swallow } from "./errors.js";
 import { assertRecordId } from "./surreal.js";
@@ -35,33 +34,6 @@ export interface Skill {
   confidence: number;
   active: boolean;
   score?: number;
-}
-
-export interface ExtractedSkill {
-  name: string;
-  description: string;
-  preconditions: string;
-  steps: SkillStep[];
-  postconditions: string;
-}
-
-// --- Skill Extraction ---
-
-/**
- * Run at session end. If the session had 3+ tool calls and final outcomes succeeded,
- * extract the procedure as a reusable skill.
- */
-export async function extractSkill(
-  sessionId: string,
-  taskId: string,
-  store: SurrealStore,
-  embeddings: EmbeddingService,
-): Promise<string | null> {
-  if (!store.isAvailable()) return null;
-
-  // LLM call logic removed — skill extraction is now handled by
-  // the subagent-driven pending_work pipeline (commit_work_results tool).
-  return null;
 }
 
 // --- Supersession ---
@@ -118,7 +90,7 @@ export async function findRelevantSkills(
     const rows = await store.queryFirst<any>(
       `SELECT id, name, description, preconditions, steps, postconditions,
               success_count AS successCount, failure_count AS failureCount,
-              avg_duration_ms AS avgDurationMs,
+              avg_duration_ms AS avgDurationMs, confidence,
               vector::similarity::cosine(embedding, $vec) AS score
        FROM skill
        WHERE embedding != NONE AND array::len(embedding) > 0 AND (active = NONE OR active = true)

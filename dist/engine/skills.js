@@ -10,18 +10,6 @@
  */
 import { swallow } from "./errors.js";
 import { assertRecordId } from "./surreal.js";
-// --- Skill Extraction ---
-/**
- * Run at session end. If the session had 3+ tool calls and final outcomes succeeded,
- * extract the procedure as a reusable skill.
- */
-export async function extractSkill(sessionId, taskId, store, embeddings) {
-    if (!store.isAvailable())
-        return null;
-    // LLM call logic removed — skill extraction is now handled by
-    // the subagent-driven pending_work pipeline (commit_work_results tool).
-    return null;
-}
 // --- Supersession ---
 /**
  * After saving a new skill, fade similar existing skills above similarity threshold.
@@ -63,7 +51,7 @@ export async function findRelevantSkills(queryVec, limit = 3, store) {
     try {
         const rows = await store.queryFirst(`SELECT id, name, description, preconditions, steps, postconditions,
               success_count AS successCount, failure_count AS failureCount,
-              avg_duration_ms AS avgDurationMs,
+              avg_duration_ms AS avgDurationMs, confidence,
               vector::similarity::cosine(embedding, $vec) AS score
        FROM skill
        WHERE embedding != NONE AND array::len(embedding) > 0 AND (active = NONE OR active = true)

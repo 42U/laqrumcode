@@ -10,6 +10,7 @@ import { findRelevantSkills } from "./skills.js";
 import { retrieveReflections } from "./reflection.js";
 import { swallow } from "./errors.js";
 import { isRerankerActive } from "./graph-context.js";
+let _cacheKeyCounter = 0;
 // --- LRU Cache ---
 const CACHE_TTL_MS = 5 * 60 * 1000;
 const MAX_CACHE_SIZE = 20;
@@ -145,24 +146,29 @@ export function getCachedContext(queryVec) {
     // tags; serving it now (when online) would mismatch the directive.
     const currentRerankerActive = isRerankerActive();
     let bestMatch = null;
+    let bestKey = null;
     let bestSim = 0;
-    for (const [, entry] of warmCache) {
+    for (const [key, entry] of warmCache) {
         if (entry.rerankerWasActive !== currentRerankerActive)
             continue;
         const sim = cosineSimilarity(queryVec, entry.queryVec);
         if (sim > bestSim) {
             bestSim = sim;
             bestMatch = entry;
+            bestKey = key;
         }
     }
-    if (bestMatch && bestSim >= CACHE_HIT_THRESHOLD) {
+    if (bestMatch && bestKey && bestSim >= CACHE_HIT_THRESHOLD) {
+        // Re-insert to refresh LRU position (Map iterates in insertion order)
+        warmCache.delete(bestKey);
+        warmCache.set(bestKey, bestMatch);
         return { results: bestMatch.results, skills: bestMatch.skills, reflections: bestMatch.reflections };
     }
     return null;
 }
 export function setCachedContext(queryVec, results, skills, reflections) {
     evictStale();
-    const key = `__pipeline_${Date.now()}`;
+    const key = `__pipeline_${Date.now()}_${_cacheKeyCounter++}`;
     warmCache.set(key, {
         queryVec,
         results,

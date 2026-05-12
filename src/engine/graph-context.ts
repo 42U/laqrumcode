@@ -135,6 +135,10 @@ export function applyDistributionBands<T extends { finalScore?: number; band?: S
   const scores = items.map(n => n.finalScore ?? 0).sort((a, b) => a - b);
   const q1 = scores[Math.floor(scores.length * 0.25)];
   const q3 = scores[Math.floor(scores.length * 0.75)];
+  if (q1 === q3) {
+    for (const n of items) n.band = "supporting";
+    return;
+  }
   for (const n of items) {
     const s = n.finalScore ?? 0;
     if (s >= q3) n.band = "load-bearing";
@@ -378,8 +382,8 @@ function extractLastUserText(messages: AgentMessage[]): string | null {
 
 /** Estimate char-equivalent count for a single content block (claw-code: per-block-type estimation). */
 function blockCharLen(c: any): number {
-  if (c.type === "text") return c.text.length;
-  if (c.type === "thinking") return c.thinking.length;
+  if (c.type === "text") return c.text?.length ?? 0;
+  if (c.type === "thinking") return c.thinking?.length ?? 0;
   if (c.type === "toolCall") {
     // Tool name + serialized args — JSON is denser (2 bytes/token vs 4)
     // Scale JSON args to char-equivalent at prose ratio
@@ -498,10 +502,12 @@ function injectRulesSuffix(messages: AgentMessage[], session: SessionState): Age
     const msg = messages[i];
     if (isUser(msg)) {
       const clone = [...messages];
-      clone[i] = {
-        ...msg,
-        content: typeof msg.content === "string" ? msg.content + suffix : msg.content,
-      } as UserMessage;
+      if (typeof msg.content === "string") {
+        clone[i] = { ...msg, content: msg.content + suffix } as UserMessage;
+      } else if (Array.isArray(msg.content)) {
+        const content = [...msg.content, { type: "text", text: suffix }];
+        clone[i] = { ...msg, content } as UserMessage;
+      }
       return clone;
     }
     if (isToolResult(msg)) {
@@ -783,12 +789,18 @@ function buildSystemPromptSection(session: SessionState, tier0Entries: CoreMemor
 
 async function ensureRecentTurns(
   contextNodes: ScoredResult[],
-  sessionId: string,
+  session: SessionState,
   store: SurrealStore,
   count = 5,
 ): Promise<ScoredResult[]> {
   try {
-    const recentTurns = await store.getPreviousSessionTurns(sessionId, count);
+    if (session._cachedPrevTurns === undefined) {
+      session._cachedPrevTurns = session._prevTurnsPrefetch
+        ? await session._prevTurnsPrefetch
+        : await store.getPreviousSessionTurns(session.sessionId, count);
+      session._prevTurnsPrefetch = undefined;
+    }
+    const recentTurns = session._cachedPrevTurns;
     if (recentTurns.length === 0) return contextNodes;
     const existingTexts = new Set(contextNodes.map(n => (n.text ?? "").slice(0, 100)));
     const guaranteed: ScoredResult[] = recentTurns
@@ -1490,11 +1502,9 @@ async function graphTransformInner(
       const ranked = await scoreResults(filteredCached, new Set(), queryVec, store, currentIntent);
       const deduped = deduplicateResults(ranked);
       const reranked = await rerankResults(deduped, queryText);
-      // 0.7.35: distribution-derived bands when the cross-encoder didn't
-      // fire (offline/skipped). No-op when rerank already stamped bands.
       applyDistributionBands(reranked);
       let contextNodes = takeWithConstraints(reranked, tokenBudget, budgets.maxContextItems);
-      contextNodes = await ensureRecentTurns(contextNodes, session.sessionId, store);
+      contextNodes = await ensureRecentTurns(contextNodes, session, store);
 
       if (contextNodes.length > 0) {
         if (contextNodes.filter((n) => n.table === "concept" || n.table === "memory").length > 0) {
@@ -1618,7 +1628,7 @@ async function graphTransformInner(
     const reranked = await rerankResults(deduped, queryText);
     applyDistributionBands(reranked);
     let contextNodes = takeWithConstraints(reranked, tokenBudget, budgets.maxContextItems);
-    contextNodes = await ensureRecentTurns(contextNodes, session.sessionId, store);
+    contextNodes = await ensureRecentTurns(contextNodes, session, store);
 
     if (contextNodes.length === 0) {
       const result = getRecentTurns(messages, budgets.conversation, budgets.toolHistory, contextWindow, session);

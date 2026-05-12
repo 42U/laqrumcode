@@ -15,6 +15,7 @@ import {
   detectAnomalies,
   formatAnomalyBlock,
   makeCooldownState,
+  resetAnomalyCache,
   rollupDailyMetrics,
   type AnomalyFlag,
   type DailyRollup,
@@ -119,6 +120,7 @@ describe("detectAnomalies", () => {
 
   beforeEach(() => {
     cooldown = makeCooldownState();
+    resetAnomalyCache();
   });
 
   it("fires substrate.embedding_gap when gap > 10%", async () => {
@@ -226,6 +228,7 @@ describe("detectContextTransformFailures", () => {
   beforeEach(() => {
     cooldown = makeCooldownState();
     resetTransformErrorRate();
+    resetAnomalyCache();
   });
 
   it("fires substrate.context_transform_failures at high failure rate", async () => {

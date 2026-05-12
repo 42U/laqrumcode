@@ -48,6 +48,7 @@ interface DrainSchedulerOpts {
 }
 
 let schedulerStarted = false;
+let schedulerTimer: ReturnType<typeof setInterval> | null = null;
 let claudeBinPath: string | null = null;
 let claudeBinUnavailable = false;
 
@@ -65,8 +66,9 @@ function buildDrainEnv(): Record<string, string | undefined> {
     LANG: process.env.LANG,
     XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR,
   };
+  const ALLOWED_CLAUDE = new Set(["CLAUDE_CODE_ENTRYPOINT", "CLAUDE_WORKSPACE"]);
   for (const [k, v] of Object.entries(process.env)) {
-    if (k.startsWith("KONGCODE_") || k.startsWith("CLAUDE_") || k.startsWith("NODE_")) {
+    if (k.startsWith("KONGCODE_") || k.startsWith("NODE_") || ALLOWED_CLAUDE.has(k)) {
       env[k] = v;
     }
   }
@@ -133,7 +135,7 @@ function isPidAlive(pid: number): boolean {
  *  locks (dead PID) are auto-cleaned. */
 function tryAcquireLock(lockPath: string): number | null {
   try {
-    return openSync(lockPath, "wx", 0o644);
+    return openSync(lockPath, "wx", 0o600);
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
     try {
@@ -338,15 +340,24 @@ export function startDrainScheduler(state: GlobalPluginState, opts: DrainSchedul
 
   // Periodic check.
   if (opts.intervalMs > 0) {
-    const timer = setInterval(() => {
+    schedulerTimer = setInterval(() => {
       spawnHeadlessDrainer(state, opts, "periodic")
         .then(r => {
           if (r.spawned) log.info(`[auto-drain] periodic spawn`);
         })
         .catch(e => swallow.warn("auto-drain:periodic", e));
     }, opts.intervalMs);
-    timer.unref?.();
+    schedulerTimer.unref?.();
   }
+}
+
+/** Stop the periodic drain scheduler (call during shutdown). */
+export function stopDrainScheduler(): void {
+  if (schedulerTimer) {
+    clearInterval(schedulerTimer);
+    schedulerTimer = null;
+  }
+  schedulerStarted = false;
 }
 
 /** Event-driven trigger — call from SessionEnd handler after items get queued. */

@@ -71,11 +71,14 @@ async function backfillTable(
 ): Promise<{ found: number; fixed: number }> {
   const rows = await store.queryFirst<{ id: string; project_id: string }>(selectSql);
   let fixed = 0;
+  const RECORD_ID_RE = /^[a-zA-Z_][a-zA-Z0-9_]*:[a-zA-Z0-9_\-]+$/;
   for (const row of rows) {
     if (!row.project_id) continue;
+    const id = String(row.id);
+    if (!RECORD_ID_RE.test(id)) continue;
     try {
       await store.queryExec(
-        `UPDATE ${row.id} SET project_id = $pid`,
+        `UPDATE ${id} SET project_id = $pid`,
         { pid: row.project_id },
       );
       fixed++;
@@ -221,9 +224,11 @@ export async function recoverProjectIdRows(
         for (const row of orphans) {
           const match = findBestProjectMatch(row.embedding, centroids);
           if (match) {
+            const rid = String(row.id);
+            if (!/^[a-zA-Z_][a-zA-Z0-9_]*:[a-zA-Z0-9_\-]+$/.test(rid)) continue;
             try {
               await store.queryExec(
-                `UPDATE ${row.id} SET project_id = $pid, scope = NONE`,
+                `UPDATE ${rid} SET project_id = $pid, scope = NONE`,
                 { pid: match.projectId },
               );
               centroidAssigned++;
@@ -243,8 +248,10 @@ export async function recoverProjectIdRows(
         { t: table },
       );
       for (const row of rows) {
+        const rid = String(row.id);
+        if (!/^[a-zA-Z_][a-zA-Z0-9_]*:[a-zA-Z0-9_\-]+$/.test(rid)) continue;
         try {
-          await store.queryExec(`UPDATE ${row.id} SET scope = 'global'`);
+          await store.queryExec(`UPDATE ${rid} SET scope = 'global'`);
           globalsTagged++;
         } catch { /* skip */ }
       }

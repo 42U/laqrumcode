@@ -39,7 +39,6 @@ if (!HOOK_EVENT) {
 const HOME = process.env.HOME || process.env.USERPROFILE || os.homedir();
 const TIMEOUT_MS = 15_000; // matches hooks.json UserPromptSubmit timeout (15s)
 const CACHE_DIR = path.join(HOME, ".kongcode", "cache");
-const DAEMON_SOCKET = path.join(HOME, ".kongcode-daemon.sock");
 const AUTH_TOKEN_PATH = path.join(CACHE_DIR, "auth-token");
 
 function readAuthToken() {
@@ -49,12 +48,14 @@ function readAuthToken() {
 function readStdin() {
   return new Promise((resolve, reject) => {
     const chunks = [];
+    let timer = null;
     process.stdin.on("data", (c) => chunks.push(c));
-    process.stdin.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+    process.stdin.on("end", () => {
+      if (timer) clearTimeout(timer);
+      resolve(Buffer.concat(chunks).toString("utf8"));
+    });
     process.stdin.on("error", reject);
-    // Don't hang forever if stdin is somehow not closed — Claude Code always
-    // closes it after writing the payload, but defensive timeout is cheap.
-    setTimeout(() => resolve(Buffer.concat(chunks).toString("utf8")), 1_000);
+    timer = setTimeout(() => resolve(Buffer.concat(chunks).toString("utf8")), 3_000);
   });
 }
 
