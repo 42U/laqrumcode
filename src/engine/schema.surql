@@ -317,6 +317,8 @@ DEFINE FIELD IF NOT EXISTS postconditions ON skill TYPE option<string>;
 DEFINE FIELD IF NOT EXISTS success_count ON skill TYPE int DEFAULT 1;
 DEFINE FIELD IF NOT EXISTS failure_count ON skill TYPE int DEFAULT 0;
 DEFINE FIELD IF NOT EXISTS avg_duration_ms ON skill TYPE float DEFAULT 0.0;
+DEFINE FIELD IF NOT EXISTS active ON skill TYPE bool DEFAULT true;
+DEFINE FIELD IF NOT EXISTS superseded_by ON skill TYPE option<record<skill>>;
 DEFINE FIELD IF NOT EXISTS last_used ON skill TYPE option<datetime>;
 DEFINE FIELD IF NOT EXISTS created_at ON skill TYPE datetime DEFAULT time::now();
 DEFINE INDEX IF NOT EXISTS skill_vec_idx ON skill FIELDS embedding HNSW DIMENSION 1024 DIST COSINE;

@@ -4,6 +4,23 @@ All notable changes to KongCode are documented here. The 0.7.x series introduced
 
 ## [Unreleased]
 
+## [0.7.68] — 2026-05-12
+
+### Added
+- **Skill outcome tracking** (`src/engine/retrieval-quality.ts`, `src/engine/graph-context.ts`): `recordSkillOutcome` is now wired into the retrieval-quality feedback loop via `stageSkills()` — skills injected into context have their success/failure/duration recorded after the assistant responds, closing the RL reinforcement loop.
+- **Skill supersession on creation** (`src/tools/pending-work.ts`, `src/engine/memory-daemon.ts`): `supersedeOldSkills` runs after every skill creation (both pending-work and daemon extraction paths), deactivating near-duplicate skills (≥0.82 cosine similarity) to prevent pile-up.
+- **Pipeline result cache writeback** (`src/engine/graph-context.ts`, `src/engine/prefetch.ts`): After a full cache-miss pipeline run, scored+reranked results are written back to the prefetch LRU cache via `setCachedContext()`, so subsequent similar queries hit warm cache instead of re-running the full pipeline.
+- **Schema fields for skill lifecycle** (`src/engine/schema.surql`): Added explicit `active` (bool, default true) and `superseded_by` (optional record<skill>) field definitions to the skill table.
+
+### Fixed
+- **`graphExpand` 125→10 SQL statements per hop** (`src/engine/surreal.ts`): Replaced per-edge individual queries with SurrealDB comma-separated multi-edge traversal syntax (`id->(edge1, edge2, ...)->?`), reducing statement count from 125 to 10 per hop (5 seeds × 2 directions). 3-5× speedup on real workloads.
+- **Reranker cold-start stall eliminated** (`src/daemon/index.ts`): Cross-encoder model (bge-reranker-v2-m3, 606MB) now eager-loads on daemon startup instead of lazy-loading on first query, preventing a multi-second stall on the first turn.
+- **`graphTransformContext` timeout race** (`src/engine/graph-context.ts`, `hooks/scripts/hook-proxy.cjs`): Both `TRANSFORM_TIMEOUT_MS` and hook-proxy `TIMEOUT_MS` aligned to 15s (matching hooks.json UserPromptSubmit timeout). Previously both were 10s, causing real queries (~11.7s) to race past both timeouts and trigger "daemon unreachable" warnings.
+- **Skills + reflections parallelized** (`src/engine/graph-context.ts`): Moved `findRelevantSkills` and `retrieveReflections` into the 4-way `Promise.all` with `graphExpand` and `queryCausalContext`, eliminating ~200ms of sequential overhead.
+- **Prefetch cache tuning** (`src/engine/prefetch.ts`): `MAX_CACHE_SIZE` 10→20, `CACHE_HIT_THRESHOLD` 0.85→0.82 for better hit rates.
+- **Stale `RECORD_ID_RE` in `recordSkillOutcome`** (`src/engine/skills.ts`): Removed local regex that was missing hyphens (Fix D regression) — `assertRecordId` from surreal.ts handles validation with the canonical pattern.
+- **Dead `EDGE_NEIGHBOR_LIMIT` constant** (`src/engine/surreal.ts`): Removed unused constant left over after graphExpand refactor.
+
 ## [0.7.67] — 2026-05-12
 
 ### Security

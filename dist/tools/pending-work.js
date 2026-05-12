@@ -17,12 +17,13 @@ import { swallow } from "../engine/errors.js";
 import { log } from "../engine/log.js";
 import { stripStructuralTags } from "../engine/sanitize.js";
 import { commitKnowledge } from "../engine/commit.js";
+import { supersedeOldSkills } from "../engine/skills.js";
 // ── Helpers ──────────────────────────────────────────────────────────────────
 /** Validate a SurrealDB record id before direct interpolation. Same pattern as
  * surreal.ts assertRecordId (which isn't exported). Prevents injection and
  * avoids the `UPDATE $id` bug where SurrealDB rejects a string param as an
  * UPDATE target. */
-const RECORD_ID_RE = /^[a-zA-Z_][a-zA-Z0-9_]*:[a-zA-Z0-9_]+$/;
+const RECORD_ID_RE = /^[a-zA-Z_][a-zA-Z0-9_]*:[a-zA-Z0-9_\-]+$/;
 function assertWorkRecordId(id) {
     if (!RECORD_ID_RE.test(id)) {
         throw new Error(`Invalid record ID format: ${id.slice(0, 50)}`);
@@ -869,6 +870,10 @@ async function createSkillRecord(parsed, item, state) {
     if (skillId && item.task_id) {
         await store.relate(skillId, "skill_from_task", item.task_id)
             .catch(e => swallow.warn("pending-work:skill_from_task", e));
+    }
+    if (skillId && skillEmb?.length) {
+        await supersedeOldSkills(skillId, skillEmb, store)
+            .catch(e => swallow.warn("pending-work:supersedeSkills", e));
     }
     return { skill_id: skillId, name: parsed.name };
 }

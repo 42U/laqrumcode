@@ -68,7 +68,7 @@ import { handleTaskCreated, handleSubagentStop } from "../hook-handlers/subagent
 import { startHttpApi, stopHttpApi, registerHookHandler } from "../http-api.js";
 import type { HookResponse } from "../http-api.js";
 import { startDrainScheduler } from "./auto-drain.js";
-import { configureReranker, disposeReranker, isRerankerActive } from "../engine/graph-context.js";
+import { configureReranker, disposeReranker, initReranker, isRerankerActive } from "../engine/graph-context.js";
 import { disposeSharedLlama } from "../engine/llama-loader.js";
 import { detectResourceProfile } from "../engine/resource-tier.js";
 
@@ -236,7 +236,10 @@ async function initializeStack(): Promise<void> {
   if (config.reranker.enabled) {
     if (existsSync(config.reranker.modelPath)) {
       configureReranker(config.reranker.modelPath, resourceProfile);
-      log.info(`[daemon] reranker configured for lazy init (model at ${config.reranker.modelPath})`);
+      initReranker(config.reranker.modelPath).catch(e =>
+        log.warn(`[daemon] eager reranker init failed (will retry lazily): ${(e as Error).message}`),
+      );
+      log.info(`[daemon] reranker configured with eager init (model at ${config.reranker.modelPath})`);
     } else {
       log.warn(`[daemon] reranker model not found at ${config.reranker.modelPath} — recall will use WMR/ACAN only`);
     }

@@ -1,5 +1,5 @@
-import { describe, it, expect, beforeEach } from "vitest";
-import { stageRetrieval, getStagedItems, recordToolOutcome, evaluateRetrieval, computeSignals, classifyItem } from "../src/engine/retrieval-quality.js";
+import { describe, it, expect, beforeEach, vi } from "vitest";
+import { stageRetrieval, stageSkills, getStagedItems, recordToolOutcome, evaluateRetrieval, computeSignals, classifyItem } from "../src/engine/retrieval-quality.js";
 import type { RetrievedItem } from "../src/engine/retrieval-quality.js";
 
 function makeItem(overrides: Partial<RetrievedItem> = {}): RetrievedItem {
@@ -277,5 +277,103 @@ describe("composite scoring formula", () => {
     const rules = 0.8, curation = 1.0;
     const composite = (0.6 * rules) + (0.1 * curation);
     expect(composite).toBeCloseTo(0.58, 2);
+  });
+});
+
+describe("stageSkills + evaluateRetrieval skill outcome", () => {
+  beforeEach(() => {
+    stageRetrieval("reset", [], undefined);
+    evaluateRetrieval("", "", { queryExec: async () => {}, updateUtilityCache: async () => {}, isAvailable: () => false } as any);
+  });
+
+  it("calls recordSkillOutcome for each staged skill after evaluation", async () => {
+    const execCalls: { sql: string; params: any }[] = [];
+    const mockStore = {
+      isAvailable: () => true,
+      queryExec: async (sql: string, params: any) => { execCalls.push({ sql, params }); },
+      updateUtilityCache: async () => {},
+    };
+
+    stageRetrieval("session1", [
+      makeItem({ text: "SurrealDB query optimization" }),
+    ]);
+    stageSkills(["skill:s1", "skill:s2"]);
+    recordToolOutcome(true);
+
+    await evaluateRetrieval(
+      "turn:100",
+      "I optimized the SurrealDB query using an index hint",
+      mockStore as any,
+    );
+
+    const skillUpdates = execCalls.filter(c => c.sql.includes("UPDATE skill:"));
+    expect(skillUpdates).toHaveLength(2);
+    expect(skillUpdates[0].sql).toContain("success_count");
+    expect(skillUpdates[1].sql).toContain("success_count");
+  });
+
+  it("records failure_count when tools fail", async () => {
+    const execCalls: { sql: string; params: any }[] = [];
+    const mockStore = {
+      isAvailable: () => true,
+      queryExec: async (sql: string, params: any) => { execCalls.push({ sql, params }); },
+      updateUtilityCache: async () => {},
+    };
+
+    stageRetrieval("session1", [makeItem()]);
+    stageSkills(["skill:s1"]);
+    recordToolOutcome(false);
+    recordToolOutcome(false);
+
+    await evaluateRetrieval(
+      "turn:101",
+      "The SurrealDB WebSocket connection was reset after a failed query",
+      mockStore as any,
+    );
+
+    const skillUpdates = execCalls.filter(c => c.sql.includes("UPDATE skill:"));
+    expect(skillUpdates).toHaveLength(1);
+    expect(skillUpdates[0].sql).toContain("failure_count");
+  });
+
+  it("no-ops skill outcome when no skills staged", async () => {
+    const execCalls: { sql: string }[] = [];
+    const mockStore = {
+      isAvailable: () => true,
+      queryExec: async (sql: string, params: any) => { execCalls.push({ sql }); },
+      updateUtilityCache: async () => {},
+    };
+
+    stageRetrieval("session1", [makeItem({ text: "some context" })]);
+    // No stageSkills call
+
+    await evaluateRetrieval("turn:102", "some context in response", mockStore as any);
+
+    const skillUpdates = execCalls.filter(c => c.sql.includes("UPDATE skill:"));
+    expect(skillUpdates).toHaveLength(0);
+  });
+
+  it("stageSkills no-ops when nothing is staged", () => {
+    stageSkills(["skill:s1"]);
+    expect(getStagedItems()).toHaveLength(0);
+  });
+
+  it("defaults to success when no tool outcomes recorded", async () => {
+    const execCalls: { sql: string }[] = [];
+    const mockStore = {
+      isAvailable: () => true,
+      queryExec: async (sql: string, params: any) => { execCalls.push({ sql }); },
+      updateUtilityCache: async () => {},
+    };
+
+    stageRetrieval("session1", [makeItem({ text: "deployment procedure" })]);
+    stageSkills(["skill:s1"]);
+    // No recordToolOutcome calls — toolSuccess will be null → defaults true
+
+    await evaluateRetrieval("turn:103", "I followed the deployment procedure", mockStore as any);
+
+    const skillUpdates = execCalls.filter(c => c.sql.includes("UPDATE skill:"));
+    expect(skillUpdates).toHaveLength(1);
+    expect(skillUpdates[0].sql).toContain("success_count");
   });
 });

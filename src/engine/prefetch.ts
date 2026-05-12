@@ -32,8 +32,8 @@ interface CacheEntry {
 // --- LRU Cache ---
 
 const CACHE_TTL_MS = 5 * 60 * 1000;
-const MAX_CACHE_SIZE = 10;
-const CACHE_HIT_THRESHOLD = 0.85;
+const MAX_CACHE_SIZE = 20;
+const CACHE_HIT_THRESHOLD = 0.82;
 
 const warmCache = new Map<string, CacheEntry>();
 
@@ -203,6 +203,24 @@ export function getCachedContext(queryVec: number[]): CachedContext | null {
     return { results: bestMatch.results, skills: bestMatch.skills, reflections: bestMatch.reflections };
   }
   return null;
+}
+
+export function setCachedContext(
+  queryVec: number[],
+  results: VectorSearchResult[],
+  skills: Skill[],
+  reflections: Reflection[],
+): void {
+  evictStale();
+  const key = `__pipeline_${Date.now()}`;
+  warmCache.set(key, {
+    queryVec,
+    results,
+    skills,
+    reflections,
+    timestamp: Date.now(),
+    rerankerWasActive: isRerankerActive(),
+  });
 }
 
 export function getPrefetchStats(): { entries: number; maxSize: number } {

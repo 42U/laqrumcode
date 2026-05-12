@@ -17,8 +17,8 @@ import { getPendingDirectives, clearPendingDirectives, getSessionContinuity, get
 import { queryCausalContext } from "./causal.js";
 import { findRelevantSkills, formatSkillContext } from "./skills.js";
 import { retrieveReflections, formatReflectionContext } from "./reflection.js";
-import { getCachedContext, recordPrefetchHit, recordPrefetchMiss } from "./prefetch.js";
-import { stageRetrieval, getHistoricalUtilityBatch, getLastTurnGroundingTrace } from "./retrieval-quality.js";
+import { getCachedContext, setCachedContext, recordPrefetchHit, recordPrefetchMiss } from "./prefetch.js";
+import { stageRetrieval, stageSkills, getHistoricalUtilityBatch, getLastTurnGroundingTrace } from "./retrieval-quality.js";
 import { isACANActive, scoreWithACAN, type ACANCandidate } from "./acan.js";
 import { swallow } from "./errors.js";
 import { log } from "./log.js";
@@ -1334,7 +1334,7 @@ export async function graphTransformContext(
 
   // Never throw — return raw messages on any failure
   try {
-    const TRANSFORM_TIMEOUT_MS = 10_000;
+    const TRANSFORM_TIMEOUT_MS = 15_000;
     const result = await Promise.race([
       graphTransformInner(messages, session, store, embeddings, contextWindow, budgets, signal, tier0ForSys),
       new Promise<never>((_, reject) =>
@@ -1514,6 +1514,7 @@ async function graphTransformInner(
     }
 
         const skillCtx = cached.skills.length > 0 ? formatSkillContext(cached.skills) : "";
+        if (cached.skills.length > 0) stageSkills(cached.skills.map(s => s.id));
         const reflCtx = cached.reflections.length > 0 ? formatReflectionContext(cached.reflections) : "";
 
         const injectedContext = await formatContextMessage(contextNodes, store, session, skillCtx + reflCtx, tier0, tier1);
@@ -1571,24 +1572,36 @@ async function graphTransformInner(
     let causalResults: VectorSearchResult[] = [];
     const seen = new Set<string>(results.map((r) => r.id));
     const neighborIds = new Set<string>();
-    if (topIds.length > 0) {
-      const [expandResult, causalResult] = await Promise.all([
-        store.graphExpand(topIds, queryVec, graphHops).catch(e => { swallow.error("graph-context:graphExpand", e); return [] as VectorSearchResult[]; }),
-        queryVec ? queryCausalContext(topIds, queryVec, 2, 0.4, store).catch(e => { swallow("graph-context:causal", e); return [] as VectorSearchResult[]; }) : Promise.resolve([] as VectorSearchResult[]),
-      ]);
-      for (const n of expandResult) {
-        if (!seen.has(n.id)) {
-          neighborResults.push(n);
-          neighborIds.add(n.id);
-          seen.add(n.id);
-        }
+
+    // Fire graph expansion, causal traversal, skills, and reflections in parallel.
+    // Skills + reflections only need queryVec — no dependency on graph results.
+    const SKILL_INTENTS = new Set(["code-write", "code-debug", "multi-step", "code-read"]);
+    const [expandResult, causalResult, skillsFound, reflectionsFound] = await Promise.all([
+      topIds.length > 0
+        ? store.graphExpand(topIds, queryVec, graphHops).catch(e => { swallow.error("graph-context:graphExpand", e); return [] as VectorSearchResult[]; })
+        : Promise.resolve([] as VectorSearchResult[]),
+      topIds.length > 0 && queryVec
+        ? queryCausalContext(topIds, queryVec, 2, 0.4, store).catch(e => { swallow("graph-context:causal", e); return [] as VectorSearchResult[]; })
+        : Promise.resolve([] as VectorSearchResult[]),
+      SKILL_INTENTS.has(currentIntent)
+        ? findRelevantSkills(queryVec, 5, store).catch(e => { swallow("graph-context:skills", e); return [] as import("./skills.js").Skill[]; })
+        : Promise.resolve([] as import("./skills.js").Skill[]),
+      retrieveReflections(queryVec, 5, store, session.projectId || undefined)
+        .catch(e => { swallow("graph-context:reflections", e); return [] as import("./reflection.js").Reflection[]; }),
+    ]);
+
+    for (const n of expandResult) {
+      if (!seen.has(n.id)) {
+        neighborResults.push(n);
+        neighborIds.add(n.id);
+        seen.add(n.id);
       }
-      for (const c of causalResult) {
-        if (!seen.has(c.id)) {
-          causalResults.push(c);
-          neighborIds.add(c.id);
-          seen.add(c.id);
-        }
+    }
+    for (const c of causalResult) {
+      if (!seen.has(c.id)) {
+        causalResults.push(c);
+        neighborIds.add(c.id);
+        seen.add(c.id);
       }
     }
 
@@ -1630,22 +1643,17 @@ async function graphTransformInner(
       stageRetrieval(session.sessionId, contextNodes, queryVec, stageIndexMap);
     }
 
-    // Skill retrieval
+    // Format skill + reflection context (arrays already retrieved in parallel above)
     let skillContext = "";
-    const SKILL_INTENTS = new Set(["code-write", "code-debug", "multi-step", "code-read"]);
-    if (SKILL_INTENTS.has(currentIntent)) {
-      try {
-        const skills = await findRelevantSkills(queryVec, 5, store);
-        if (skills.length > 0) skillContext = formatSkillContext(skills);
-      } catch (e) { swallow("graph-context:skills", e); }
+    if (skillsFound.length > 0) {
+      skillContext = formatSkillContext(skillsFound);
+      stageSkills(skillsFound.map(s => s.id));
     }
-
-    // Reflection retrieval
     let reflectionContext = "";
-    try {
-      const reflections = await retrieveReflections(queryVec, 5, store, session.projectId || undefined);
-      if (reflections.length > 0) reflectionContext = formatReflectionContext(reflections);
-    } catch (e) { swallow("graph-context:reflections", e); }
+    if (reflectionsFound.length > 0) reflectionContext = formatReflectionContext(reflectionsFound);
+
+    // Write full pipeline results back to prefetch cache for subsequent similar queries
+    setCachedContext(queryVec, contextNodes, skillsFound, reflectionsFound);
 
     const injectedContext = await formatContextMessage(contextNodes, store, session, skillContext + reflectionContext, tier0, tier1);
     const recentTurns = getRecentTurns(messages, budgets.conversation, budgets.toolHistory, contextWindow, session);

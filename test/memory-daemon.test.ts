@@ -375,4 +375,26 @@ describe("writeExtractionResults", () => {
     expect(counts.decision).toBe(0);
     expect(counts.skill).toBe(0);
   });
+
+  it("calls supersedeOldSkills after creating a skill with embedding", async () => {
+    store = mockStore();
+    embeddings = mockEmbeddings(true);
+    store.queryFirst.mockResolvedValue([{ id: "skill:new1" }]);
+
+    const counts = await writeExtractionResults(
+      {
+        causal: [], monologue: [], resolved: [], concepts: [], corrections: [],
+        preferences: [], artifacts: [], decisions: [],
+        skills: [{ name: "Deploy flow", steps: ["build", "push", "verify"], trigger_context: "when deploying" }],
+      },
+      "session:s1", store, embeddings, emptyPrior(),
+    );
+
+    expect(counts.skill).toBe(1);
+    // queryFirst called 3 times: CREATE skill, linkToRelevantConcepts, supersedeOldSkills
+    const supersedeCalls = store.queryFirst.mock.calls.filter(
+      (c: any[]) => typeof c[0] === "string" && c[0].includes("active") && c[0].includes("vector::similarity::cosine")
+    );
+    expect(supersedeCalls).toHaveLength(1);
+  });
 });

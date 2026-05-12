@@ -14,6 +14,7 @@
  */
 import { swallow } from "./errors.js";
 import { crossEncoderScorePairs } from "./graph-context.js";
+import { recordSkillOutcome } from "./skills.js";
 export function classifyItem(item) {
     const table = item.table;
     if (table === "concept" || table === "artifact")
@@ -52,21 +53,39 @@ export function recordToolOutcome(success) {
         _pendingRetrieval.toolResults.push({ success });
     }
 }
+export function stageSkills(skillIds) {
+    if (_pendingRetrieval && skillIds.length > 0) {
+        _pendingRetrieval.skillIds = skillIds;
+        _pendingRetrieval.skillStageTime = Date.now();
+    }
+}
 /**
  * Evaluate retrieval quality after assistant response.
  */
 export async function evaluateRetrieval(responseTurnId, responseText, store) {
-    if (!_pendingRetrieval || _pendingRetrieval.items.length === 0) {
+    if (!_pendingRetrieval || (_pendingRetrieval.items.length === 0 && !_pendingRetrieval.skillIds?.length)) {
         _pendingRetrieval = null;
         return;
     }
-    const { sessionId, items, toolResults, queryEmbedding, indexMap } = _pendingRetrieval;
+    const { sessionId, items, toolResults, queryEmbedding, indexMap, skillIds, skillStageTime } = _pendingRetrieval;
     _pendingRetrieval = null;
+    // Skill outcome runs unconditionally — the retrieval-quality filters below
+    // apply to memory/concept scoring only, not to skill reinforcement.
+    const toolSuccess = toolResults.length > 0
+        ? toolResults.filter((r) => r.success).length / toolResults.length >= 0.5
+        : null;
+    if (skillIds && skillIds.length > 0) {
+        const elapsed = skillStageTime ? Date.now() - skillStageTime : 0;
+        const skillSuccess = toolSuccess ?? true;
+        await Promise.allSettled(skillIds.map(sid => recordSkillOutcome(sid, skillSuccess, elapsed, store)));
+    }
     // Skip scoring for tool-heavy turns with minimal assistant text.
     // CE scoring can't meaningfully compare a 20-char transition phrase
     // against retrieved items. Writing near-zero utilization rows for
     // these turns pollutes the quality gate's 14-day average with noise.
     if (responseText.length < 100 && toolResults.length > 0)
+        return;
+    if (items.length === 0)
         return;
     // Skip scoring when retrieval found nothing meaningful. Items with
     // near-zero relevance scores are background noise, not real retrieval
@@ -74,12 +93,6 @@ export async function evaluateRetrieval(responseTurnId, responseText, store) {
     const maxRetrievalScore = Math.max(...items.map(it => it.finalScore ?? 0));
     if (maxRetrievalScore < 0.1)
         return;
-    // Use majority-based success: mark as successful if >= 50% of tool calls
-    // succeeded. The previous `every()` logic caused 99%+ failure rates because
-    // a single exploratory failure (e.g. file-not-found) would tank the whole turn.
-    const toolSuccess = toolResults.length > 0
-        ? toolResults.filter((r) => r.success).length / toolResults.length >= 0.5
-        : null;
     const responseLower = responseText.toLowerCase();
     // 0.7.27: parse [#N] citations from the response. Build a set of cited
     // memory_ids by intersecting parsed indexes with the indexMap built at

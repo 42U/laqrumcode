@@ -15,6 +15,7 @@ import { swallow } from "./errors.js";
 import { assertRecordId } from "./surreal.js";
 import { linkConceptHierarchy, linkToRelevantConcepts } from "./concept-links.js";
 import { linkSupersedesEdges } from "./supersedes.js";
+import { supersedeOldSkills } from "./skills.js";
 import { stripStructuralTags } from "./sanitize.js";
 
 function sanitizeExtraction(obj: unknown): void {
@@ -417,6 +418,10 @@ export async function writeExtractionResults(
             }
             // skill_uses_concept: skill → concept
             await linkToRelevantConcepts(skillId, "skill_uses_concept", content, store, embeddings, "daemon:skill:concepts", 5, 0.65, emb);
+            if (emb?.length) {
+              await supersedeOldSkills(skillId, emb, store)
+                .catch(e => swallow.warn("daemon:skill:supersede", e));
+            }
           }
         } catch (e) {
           swallow.warn("daemon:createSkill", e);

@@ -37,7 +37,7 @@ if (!HOOK_EVENT) {
 }
 
 const HOME = process.env.HOME || process.env.USERPROFILE || os.homedir();
-const TIMEOUT_MS = 10_000; // matches hook-proxy.sh's curl --max-time default
+const TIMEOUT_MS = 15_000; // matches hooks.json UserPromptSubmit timeout (15s)
 const CACHE_DIR = path.join(HOME, ".kongcode", "cache");
 const DAEMON_SOCKET = path.join(HOME, ".kongcode-daemon.sock");
 const AUTH_TOKEN_PATH = path.join(CACHE_DIR, "auth-token");

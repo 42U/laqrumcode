@@ -176,8 +176,6 @@ export async function recordSkillOutcome(
   store: SurrealStore,
 ): Promise<void> {
   if (!store.isAvailable()) return;
-  const RECORD_ID_RE = /^[a-zA-Z_][a-zA-Z0-9_]*:[a-zA-Z0-9_]+$/;
-  if (!RECORD_ID_RE.test(skillId)) return;
 
   try {
     const field = success ? "success_count" : "failure_count";

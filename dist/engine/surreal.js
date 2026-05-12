@@ -591,22 +591,10 @@ export class SurrealStore {
             return [];
         const MAX_FRONTIER_SEEDS = 5; // max seed nodes to start BFS from
         const MAX_FRONTIER_PER_HOP = 3; // max nodes carried forward per hop (by score)
-        const EDGE_NEIGHBOR_LIMIT = 3; // max neighbors per edge traversal (inlined in SQL LIMIT)
-        const forwardEdges = [
-            // Semantic edges
-            "responds_to", "tool_result_of", "summarizes",
-            "mentions", "related_to", "narrower", "broader",
-            "about_concept", "reflects_on", "skill_from_task", "skill_uses_concept",
-            // Structural pillar edges (Agent→Project→Task→Artifact→Concept)
-            "owns", "performed", "task_part_of", "session_task",
-            "produced", "derived_from", "relevant_to", "used_in",
-            "artifact_mentions",
-        ];
-        const reverseEdges = [
-            "reflects_on", "skill_from_task",
-            // Reverse pillar traversal (find what produced an artifact, what task a concept came from)
-            "produced", "derived_from", "performed", "owns",
-        ];
+        const forwardEdgeList = "responds_to, tool_result_of, summarizes, mentions, related_to, narrower, broader, about_concept, reflects_on, skill_from_task, skill_uses_concept, owns, performed, task_part_of, session_task, produced, derived_from, relevant_to, used_in, artifact_mentions";
+        const reverseEdgeList = "reflects_on, skill_from_task, produced, derived_from, performed, owns";
+        const FORWARD_LIMIT = 25;
+        const REVERSE_LIMIT = 10;
         const scoreExpr = ", IF embedding != NONE AND array::len(embedding) > 0 THEN vector::similarity::cosine(embedding, $vec) ELSE 0 END AS score";
         const bindings = { vec: queryVec };
         const selectFields = `SELECT id, text, content, description, importance, stability,
@@ -616,17 +604,11 @@ export class SurrealStore {
         const allNeighbors = [];
         let frontier = nodeIds.slice(0, MAX_FRONTIER_SEEDS).filter((id) => RECORD_ID_RE.test(id));
         for (let hop = 0; hop < hops && frontier.length > 0; hop++) {
-            // Batch all edge traversals for this hop in a single round-trip
+            // 2 stmts per seed (forward + reverse multi-edge) instead of 25
             const stmts = [];
             for (const id of frontier) {
-                for (const edge of forwardEdges) {
-                    assertValidEdge(edge);
-                    stmts.push(`${selectFields} FROM ${id}->${edge}->? LIMIT ${EDGE_NEIGHBOR_LIMIT}`);
-                }
-                for (const edge of reverseEdges) {
-                    assertValidEdge(edge);
-                    stmts.push(`${selectFields} FROM ${id}<-${edge}<-? LIMIT ${EDGE_NEIGHBOR_LIMIT}`);
-                }
+                stmts.push(`${selectFields} FROM ${id}->(${forwardEdgeList})->? LIMIT ${FORWARD_LIMIT}`);
+                stmts.push(`${selectFields} FROM ${id}<-(${reverseEdgeList})<-? LIMIT ${REVERSE_LIMIT}`);
             }
             let queryResults;
             try {

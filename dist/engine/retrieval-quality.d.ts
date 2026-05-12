@@ -29,6 +29,7 @@ interface QualitySignals {
 export declare function getStagedItems(): RetrievedItem[];
 export declare function stageRetrieval(sessionId: string, items: RetrievedItem[], queryEmbedding?: number[], indexMap?: Map<number, string>): void;
 export declare function recordToolOutcome(success: boolean): void;
+export declare function stageSkills(skillIds: string[]): void;
 /**
  * Evaluate retrieval quality after assistant response.
  */
