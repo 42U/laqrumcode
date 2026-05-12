@@ -8,7 +8,7 @@
  */
 import { createServer } from "node:http";
 import { chmodSync, existsSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
-import { randomBytes } from "node:crypto";
+import { randomBytes, timingSafeEqual } from "node:crypto";
 import { dirname, join, resolve as resolvePath } from "node:path";
 import { log } from "./engine/log.js";
 let server = null;
@@ -45,7 +45,8 @@ async function handleRequest(state, req, res) {
     if (req.method === "POST" && req.url?.startsWith("/hook/")) {
         if (authToken) {
             const bearer = req.headers.authorization?.replace(/^Bearer\s+/i, "");
-            if (bearer !== authToken) {
+            if (!bearer || bearer.length !== authToken.length ||
+                !timingSafeEqual(Buffer.from(bearer), Buffer.from(authToken))) {
                 res.writeHead(401, { "Content-Type": "application/json" });
                 res.end(JSON.stringify({ error: "unauthorized" }));
                 return;

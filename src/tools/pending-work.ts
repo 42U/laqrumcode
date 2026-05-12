@@ -107,30 +107,34 @@ export async function handleFetchPendingWork(
       `UPDATE pending_work SET status = "pending" WHERE status = "processing" AND created_at < time::now() - 10m`,
     ).catch(() => {});
 
-    // Claim the highest-priority pending item. SurrealDB's UPDATE does not
-    // accept ORDER BY / LIMIT, so we do SELECT-then-UPDATE-by-id. In
-    // single-writer contexts (one daemon) this is race-free; for multi-writer
-    // it would need a transaction.
+    // Claim the highest-priority pending item. SELECT-then-conditional-UPDATE:
+    // the WHERE status="pending" on the UPDATE acts as an optimistic lock so
+    // concurrent claimers don't double-process the same item.
     const candidates = await store.queryFirst<{ id: string }>(
-      `SELECT id FROM pending_work WHERE status = "pending" ORDER BY priority ASC, created_at ASC LIMIT 1`,
+      `SELECT id FROM pending_work WHERE status = "pending" ORDER BY priority ASC, created_at ASC LIMIT 3`,
     );
     if (candidates.length === 0) {
       return text(JSON.stringify({ empty: true, message: "No pending work items. You are done." }));
     }
-    const claimedId = String(candidates[0].id);
-    assertWorkRecordId(claimedId);
-    // Direct interpolation safe: assertWorkRecordId validates format above.
-    // SurrealDB rejects `UPDATE $id` with a string param — the param has to be
-    // a record-id type, which the JS client doesn't produce for plain strings.
-    const items = await store.queryFirst<PendingWorkItem>(
-      `UPDATE ${claimedId} SET status = "processing" RETURN AFTER`,
-    );
 
-    if (items.length === 0) {
-      return text(JSON.stringify({ empty: true, message: "No pending work items. You are done." }));
+    let item: PendingWorkItem | null = null;
+    for (const candidate of candidates) {
+      const claimedId = String(candidate.id);
+      assertWorkRecordId(claimedId);
+      // Direct interpolation safe: assertWorkRecordId validates format above.
+      // WHERE status="pending" ensures only the first claimer wins the race.
+      const items = await store.queryFirst<PendingWorkItem>(
+        `UPDATE ${claimedId} SET status = "processing" WHERE status = "pending" RETURN AFTER`,
+      );
+      if (items.length > 0) {
+        item = items[0];
+        break;
+      }
     }
 
-    const item = items[0];
+    if (!item) {
+      return text(JSON.stringify({ empty: true, message: "No pending work items. You are done." }));
+    }
     log.info(`[pending_work] Claimed ${item.work_type} (${item.id})`);
 
     const result = await buildWorkPayload(item, state);
@@ -190,7 +194,7 @@ async function buildWorkPayload(
 
     case "reflection": {
       const turns = await store.getSessionTurns(item.session_id, 15);
-      const transcript = turns.map(t => `[${t.role}] ${(t.text ?? "").slice(0, 300)}`).join("\n");
+      const transcript = turns.map(t => `[${t.role}] ${stripStructuralTags((t.text ?? "").slice(0, 300))}`).join("\n");
       return {
         work_id: item.id,
         work_type: "reflection",
@@ -202,7 +206,7 @@ async function buildWorkPayload(
 
     case "skill_extract": {
       const turns = await store.getSessionTurns(item.session_id, 30);
-      const transcript = turns.map(t => `[${t.role}] ${(t.text ?? "").slice(0, 300)}`).join("\n");
+      const transcript = turns.map(t => `[${t.role}] ${stripStructuralTags((t.text ?? "").slice(0, 300))}`).join("\n");
       return {
         work_id: item.id,
         work_type: "skill_extract",
@@ -294,7 +298,7 @@ async function buildWorkPayload(
 
     case "handoff_note": {
       const turns = await store.getSessionTurns(item.session_id, 15);
-      const transcript = turns.map(t => `[${t.role}] ${(t.text ?? "").slice(0, 200)}`).join("\n");
+      const transcript = turns.map(t => `[${t.role}] ${stripStructuralTags((t.text ?? "").slice(0, 200))}`).join("\n");
       return {
         work_id: item.id,
         work_type: "handoff_note",

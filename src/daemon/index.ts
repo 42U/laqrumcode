@@ -72,8 +72,18 @@ import { configureReranker, disposeReranker, isRerankerActive } from "../engine/
 import { disposeSharedLlama } from "../engine/llama-loader.js";
 import { detectResourceProfile } from "../engine/resource-tier.js";
 
-/** Daemon version reported via meta.handshake — kept in sync with package.json. */
-const DAEMON_VERSION = "0.7.66";
+/** Daemon version reported via meta.handshake. Read from package.json at
+ *  runtime (dev), or injected by esbuild --define at bundle time (SEA). */
+const DAEMON_VERSION: string = (() => {
+  // @ts-expect-error — replaced by esbuild --define at bundle time
+  try { if (typeof __KONGCODE_VERSION__ === "string") return __KONGCODE_VERSION__; } catch {}
+  try {
+    const pkgPath = join(resolvePluginDir(), "package.json");
+    const pkg = JSON.parse(readFileSync(pkgPath, "utf8"));
+    if (typeof pkg.version === "string") return pkg.version;
+  } catch {}
+  return "0.0.0";
+})();
 
 /** Lex-compare dotted versions ("0.7.5" vs "0.7.22"). Returns negative/0/positive
  *  the way Array.sort expects. Skips a full semver dep — kongcode's versions
@@ -148,6 +158,13 @@ async function initializeStack(): Promise<void> {
     `(ram=${resourceProfile.totalRamMb}MB, cpus=${resourceProfile.cpuCount}, ` +
     `gpu=${resourceProfile.llamaGpu}, threads=${resourceProfile.llamaMaxThreads})`,
   );
+
+  if (config.surreal.user === "root" && config.surreal.pass === "root") {
+    log.warn(
+      "[daemon] SurrealDB using default credentials (root:root). " +
+      "Set SURREAL_USER and SURREAL_PASS env vars for stronger auth.",
+    );
+  }
 
   if (process.env.KONGCODE_SKIP_BOOTSTRAP !== "1") {
     setBootstrapPhase("npm-install");
@@ -360,20 +377,24 @@ async function main(): Promise<void> {
     return resourceProfile.idleTimeoutMs;
   })();
 
-  const reaperExit = (reason: string) => () => {
+  let shuttingDown = false;
+  const gracefulCleanup = async (reason: string): Promise<never> => {
+    if (shuttingDown) return new Promise(() => {});
+    shuttingDown = true;
     log.info(`[daemon] graceful exit: ${reason}`);
-    setImmediate(async () => {
-      try { await server.close(); } catch {}
-      try { await stopHttpApi(); } catch {}
-      if (globalState) {
-        try { await globalState.shutdown(); } catch {}
-      }
-      try { await disposeReranker(); } catch {}
-      try { await disposeSharedLlama(); } catch {}
-      removeOwnPidFile();
-      process.exit(0);
-    });
+    try { await server.close(); } catch {}
+    try { await stopHttpApi(); } catch (e) { log.warn(`[daemon] stopHttpApi: ${(e as Error).message}`); }
+    if (globalState) {
+      try { await globalState.shutdown(); } catch (e) { log.warn(`[daemon] shutdown: ${(e as Error).message}`); }
+    }
+    try { await disposeReranker(); } catch {}
+    try { await disposeSharedLlama(); } catch {}
+    shutdownManagedSurreal();
+    removeOwnPidFile();
+    process.exit(0);
   };
+
+  const reaperExit = (reason: string) => () => { gracefulCleanup(reason); };
 
   const server = new DaemonServer({
     socketPath: useUds ? socketPath : null,
@@ -450,12 +471,7 @@ async function main(): Promise<void> {
 
   server.register("meta.shutdown", async () => {
     log.info("[daemon] shutdown requested via meta.shutdown");
-    // Detach the actual exit so we can return a response first.
-    setImmediate(async () => {
-      await server.close();
-      removeOwnPidFile();
-      process.exit(0);
-    });
+    setImmediate(() => { gracefulCleanup("meta.shutdown"); });
     return { ok: true };
   });
 
@@ -539,24 +555,8 @@ async function main(): Promise<void> {
 
   // ── Lifecycle ──
 
-  const shutdown = async (signal: string) => {
-    log.info(`[daemon] ${signal} — graceful shutdown`);
-    await server.close();
-    try { await stopHttpApi(); } catch (e) { log.warn(`[daemon] stopHttpApi: ${(e as Error).message}`); }
-    if (globalState) {
-      try { await globalState.shutdown(); } catch (e) { log.warn(`[daemon] globalState.shutdown: ${(e as Error).message}`); }
-    }
-    // Free the reranker's GGUF model from RAM before exit. If never loaded,
-    // this is a no-op.
-    try { await disposeReranker(); } catch { /* ignore */ }
-    // Per 0.6.3 architecture: the SurrealDB child is detached and outlives
-    // the daemon. Don't kill it here — that's the whole point of Option A.
-    shutdownManagedSurreal(); // No-op by default; only acts on explicit force.
-    removeOwnPidFile();
-    process.exit(0);
-  };
-  process.on("SIGTERM", () => shutdown("SIGTERM"));
-  process.on("SIGINT", () => shutdown("SIGINT"));
+  process.on("SIGTERM", () => { gracefulCleanup("SIGTERM"); });
+  process.on("SIGINT", () => { gracefulCleanup("SIGINT"); });
 
   await server.listen();
   writeOwnPidFile();

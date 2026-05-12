@@ -31,6 +31,7 @@ const LOCK_FILENAME = "acan_weights.lock";
 // a legitimately-held lock will never approach 30min.
 const LOCK_MAX_AGE_MS = 30 * 60 * 1000;
 const TRAINING_THRESHOLD = 5000;
+const MAX_TRAINING_SAMPLES = 15000;
 /**
  * Claim an exclusive training lock. Returns a release function, or null if
  * another process holds the lock. Stale locks (older than LOCK_MAX_AGE_MS)
@@ -238,7 +239,8 @@ async function fetchTrainingData(store) {
             importance, access_count, recency, created_at
      FROM retrieval_outcome
      WHERE query_embedding != NONE
-     ORDER BY created_at ASC`);
+     ORDER BY created_at DESC
+     LIMIT $maxSamples`, { maxSamples: MAX_TRAINING_SAMPLES });
     if (outcomes.length === 0)
         return [];
     const uniqueMemIds = [...new Set(outcomes.map((r) => String(r.memory_id)))];

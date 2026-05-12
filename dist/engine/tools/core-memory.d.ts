@@ -38,6 +38,18 @@ export declare function createCoreMemoryToolDef(state: GlobalPluginState, sessio
         details: {
             count: number;
             error?: undefined;
+            reason?: undefined;
+            id?: undefined;
+        };
+    } | {
+        content: {
+            type: "text";
+            text: string;
+        }[];
+        details: {
+            error: boolean;
+            reason: string;
+            count?: undefined;
             id?: undefined;
         };
     } | {
@@ -48,6 +60,7 @@ export declare function createCoreMemoryToolDef(state: GlobalPluginState, sessio
         details: {
             error: boolean;
             count?: undefined;
+            reason?: undefined;
             id?: undefined;
         };
     } | {
@@ -59,6 +72,7 @@ export declare function createCoreMemoryToolDef(state: GlobalPluginState, sessio
             id: string;
             count?: undefined;
             error?: undefined;
+            reason?: undefined;
         };
     }>;
 };

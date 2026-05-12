@@ -33,6 +33,27 @@ import { drainHeuristic } from "./heuristic-drain.js";
 let schedulerStarted = false;
 let claudeBinPath = null;
 let claudeBinUnavailable = false;
+/** Build a minimal environment for the drain subprocess.
+ *  The subprocess talks to the daemon over IPC — it never needs DB
+ *  credentials, API keys, or other secrets from the parent. */
+function buildDrainEnv() {
+    const env = {
+        PATH: process.env.PATH,
+        HOME: process.env.HOME,
+        TMPDIR: process.env.TMPDIR,
+        TERM: process.env.TERM,
+        USER: process.env.USER,
+        SHELL: process.env.SHELL,
+        LANG: process.env.LANG,
+        XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR,
+    };
+    for (const [k, v] of Object.entries(process.env)) {
+        if (k.startsWith("KONGCODE_") || k.startsWith("CLAUDE_") || k.startsWith("NODE_")) {
+            env[k] = v;
+        }
+    }
+    return env;
+}
 /** Look up the claude binary — env override, then PATH, then known locations.
  *  Cached after first lookup. Returns null if not findable; caller should
  *  log once and self-disable. */
@@ -235,7 +256,7 @@ async function spawnHeadlessDrainer(state, opts, reason) {
         ], {
             detached: true,
             stdio: "ignore",
-            env: process.env,
+            env: buildDrainEnv(),
         });
         if (typeof child.pid !== "number") {
             releaseLock(lockFd, lockPath);

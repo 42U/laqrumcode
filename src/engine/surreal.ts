@@ -59,7 +59,7 @@ export interface ConceptProvenance {
 }
 
 
-const RECORD_ID_RE = /^[a-zA-Z_][a-zA-Z0-9_]*:[a-zA-Z0-9_]+$/;
+const RECORD_ID_RE = /^[a-zA-Z_][a-zA-Z0-9_]*:[a-zA-Z0-9_\-]+$/;
 
 function assertRecordId(id: string): void {
   if (!RECORD_ID_RE.test(id)) {
@@ -179,6 +179,7 @@ export class SurrealStore {
           log.warn(
             `SurrealDB disconnected — reconnecting (attempt ${attempt}/${MAX_ATTEMPTS})...`,
           );
+          try { await this.db?.close(); } catch { /* drain stale socket */ }
           this.db = new Surreal();
           const CONNECT_TIMEOUT_MS = 5_000;
           await Promise.race([
@@ -259,21 +260,16 @@ export class SurrealStore {
     return msg.includes("must be connected") || msg.includes("ConnectionUnavailable");
   }
 
-  /** Run a query function with one retry on connection errors. */
+  /** Run a query function with one retry on connection errors.
+   *  Reconnection is routed through ensureConnected() so concurrent
+   *  callers share a single reconnection attempt instead of racing. */
   private async withRetry<T>(fn: () => Promise<T>): Promise<T> {
     try {
       return await fn();
     } catch (e) {
       if (!this.isConnectionError(e)) throw e;
-      // Connection died — force a fresh connection (close stale socket first)
       this.initialized = false;
-      try { await this.db?.close(); } catch { /* ignore */ }
-      this.db = new Surreal();
-      await this.db.connect(this.config.url, {
-        namespace: this.config.ns,
-        database: this.config.db,
-        authentication: { username: this.config.user, password: this.config.pass },
-      });
+      await this.ensureConnected();
       return await fn();
     }
   }
@@ -782,8 +778,7 @@ export class SurrealStore {
       .filter(w => w.length > 2 && !stopwords.has(w));
     if (words.length === 0) return [];
 
-    // Build tag match condition — match any tag that contains a query word
-    const tagConditions = words.slice(0, 8).map(w => `tags CONTAINS '${w.replace(/'/g, "")}'`).join(" OR ");
+    const tagWords = words.slice(0, 8);
 
     try {
       const rows = await this.queryFirst<any>(
@@ -792,10 +787,10 @@ export class SurrealStore {
                 vector::similarity::cosine(embedding, $vec) AS score
          FROM concept
          WHERE embedding != NONE AND array::len(embedding) > 0
-           AND (${tagConditions})
+           AND tags CONTAINSANY $tags
          ORDER BY score DESC
          LIMIT $limit`,
-        { vec: queryVec, limit },
+        { vec: queryVec, limit, tags: tagWords },
       );
       return rows as VectorSearchResult[];
     } catch (e) {

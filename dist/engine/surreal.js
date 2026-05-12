@@ -2,7 +2,7 @@ import { Surreal } from "surrealdb";
 import { swallow } from "./errors.js";
 import { log } from "./log.js";
 import { loadSchema } from "./schema-loader.js";
-const RECORD_ID_RE = /^[a-zA-Z_][a-zA-Z0-9_]*:[a-zA-Z0-9_]+$/;
+const RECORD_ID_RE = /^[a-zA-Z_][a-zA-Z0-9_]*:[a-zA-Z0-9_\-]+$/;
 function assertRecordId(id) {
     if (!RECORD_ID_RE.test(id)) {
         throw new Error(`Invalid record ID format: ${id.slice(0, 40)}`);
@@ -106,6 +106,10 @@ export class SurrealStore {
             for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
                 try {
                     log.warn(`SurrealDB disconnected — reconnecting (attempt ${attempt}/${MAX_ATTEMPTS})...`);
+                    try {
+                        await this.db?.close();
+                    }
+                    catch { /* drain stale socket */ }
                     this.db = new Surreal();
                     const CONNECT_TIMEOUT_MS = 5_000;
                     await Promise.race([
@@ -176,7 +180,9 @@ export class SurrealStore {
         const msg = String(e?.message ?? e);
         return msg.includes("must be connected") || msg.includes("ConnectionUnavailable");
     }
-    /** Run a query function with one retry on connection errors. */
+    /** Run a query function with one retry on connection errors.
+     *  Reconnection is routed through ensureConnected() so concurrent
+     *  callers share a single reconnection attempt instead of racing. */
     async withRetry(fn) {
         try {
             return await fn();
@@ -184,18 +190,8 @@ export class SurrealStore {
         catch (e) {
             if (!this.isConnectionError(e))
                 throw e;
-            // Connection died — force a fresh connection (close stale socket first)
             this.initialized = false;
-            try {
-                await this.db?.close();
-            }
-            catch { /* ignore */ }
-            this.db = new Surreal();
-            await this.db.connect(this.config.url, {
-                namespace: this.config.ns,
-                database: this.config.db,
-                authentication: { username: this.config.user, password: this.config.pass },
-            });
+            await this.ensureConnected();
             return await fn();
         }
     }
@@ -573,17 +569,16 @@ export class SurrealStore {
             .filter(w => w.length > 2 && !stopwords.has(w));
         if (words.length === 0)
             return [];
-        // Build tag match condition — match any tag that contains a query word
-        const tagConditions = words.slice(0, 8).map(w => `tags CONTAINS '${w.replace(/'/g, "")}'`).join(" OR ");
+        const tagWords = words.slice(0, 8);
         try {
             const rows = await this.queryFirst(`SELECT id, content AS text, stability AS importance, access_count AS accessCount,
                 created_at AS timestamp, 'concept' AS table,
                 vector::similarity::cosine(embedding, $vec) AS score
          FROM concept
          WHERE embedding != NONE AND array::len(embedding) > 0
-           AND (${tagConditions})
+           AND tags CONTAINSANY $tags
          ORDER BY score DESC
-         LIMIT $limit`, { vec: queryVec, limit });
+         LIMIT $limit`, { vec: queryVec, limit, tags: tagWords });
             return rows;
         }
         catch (e) {

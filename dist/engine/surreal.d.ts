@@ -81,7 +81,9 @@ export declare class SurrealStore {
     close(): Promise<void>;
     /** Returns true if an error is a connection-level failure worth retrying. */
     private isConnectionError;
-    /** Run a query function with one retry on connection errors. */
+    /** Run a query function with one retry on connection errors.
+     *  Reconnection is routed through ensureConnected() so concurrent
+     *  callers share a single reconnection attempt instead of racing. */
     private withRetry;
     queryFirst<T>(sql: string, bindings?: Record<string, unknown>): Promise<T[]>;
     queryMulti<T = unknown>(sql: string, bindings?: Record<string, unknown>): Promise<T | undefined>;

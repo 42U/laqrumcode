@@ -41,14 +41,17 @@ interface Manifest {
   nodeLlamaCpp?: {
     version: string;
     mainTarballUrl: string;
+    mainSha256: string;
     platformTarballUrl: string;
-    platforms: Record<string, string>;
+    platforms: Record<string, { name: string; sha256: string }>;
   };
   ajv?: {
     ajvVersion: string;
     ajvFormatsVersion: string;
     ajvTarballUrl: string;
+    ajvSha256: string;
     ajvFormatsTarballUrl: string;
+    ajvFormatsSha256: string;
   };
 }
 
@@ -273,23 +276,24 @@ async function ensureNodeLlamaCpp(
     return { mainPath: null, provisioned: false };
   }
   const platformKey = detectPlatformKey();
-  const platformName = manifest.nodeLlamaCpp.platforms[platformKey];
-  if (!platformName) {
+  const platformMapping = manifest.nodeLlamaCpp.platforms[platformKey];
+  if (!platformMapping) {
     log.warn(
       `[bootstrap] node-llama-cpp: no platform mapping for ${platformKey} — embeddings will fail unless KONGCODE_NODE_LLAMA_CPP_PATH is set.`,
     );
     return { mainPath: null, provisioned: false };
   }
+  const platformName = platformMapping.name;
 
   const version = manifest.nodeLlamaCpp.version;
   const nativeDir = join(cacheDir, "native");
   const mainDir = join(nativeDir, "node-llama-cpp");
   const mainEntry = join(mainDir, "dist", "index.js");
   const platformDir = join(nativeDir, "node_modules", "@node-llama-cpp", platformName);
-  const platformEntry = join(platformDir, "package.json");
+  const platformPkg = join(platformDir, "package.json");
 
   // Idempotent: skip download if both already extracted.
-  if (existsSync(mainEntry) && existsSync(platformEntry)) {
+  if (existsSync(mainEntry) && existsSync(platformPkg)) {
     process.env.KONGCODE_NODE_LLAMA_CPP_PATH = mainEntry;
     return { mainPath: mainEntry, provisioned: false };
   }
@@ -304,8 +308,8 @@ async function ensureNodeLlamaCpp(
   );
   const mainTarball = join(nativeDir, `node-llama-cpp-${version}.tgz`);
   const platformTarball = join(nativeDir, `${platformName}-${version}.tgz`);
-  await downloadFile(mainUrl, mainTarball, null);
-  await downloadFile(platformUrl, platformTarball, null);
+  await downloadFile(mainUrl, mainTarball, manifest.nodeLlamaCpp.mainSha256);
+  await downloadFile(platformUrl, platformTarball, platformMapping.sha256);
 
   // npm tarballs wrap contents in a "package/" prefix; --strip-components=1
   // unwraps that so the package files land directly in mainDir / platformDir.
@@ -375,8 +379,8 @@ async function ensureAjv(
   );
   await mkdir(ajvDir, { recursive: true });
   await mkdir(ajvFormatsDir, { recursive: true });
-  await downloadFile(ajvUrl, ajvTarball, null);
-  await downloadFile(ajvFormatsUrl, ajvFormatsTarball, null);
+  await downloadFile(ajvUrl, ajvTarball, manifest.ajv.ajvSha256);
+  await downloadFile(ajvFormatsUrl, ajvFormatsTarball, manifest.ajv.ajvFormatsSha256);
 
   // npm tarballs wrap contents in a "package/" prefix; strip-components=1
   // unwraps that so package files land directly in ajvDir / ajvFormatsDir.

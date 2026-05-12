@@ -5,6 +5,9 @@
 import { Type } from "@sinclair/typebox";
 import { stripStructuralTags } from "../sanitize.js";
 import { log } from "../log.js";
+const TIER0_MAX_PER_SESSION = 5;
+const TIER0_MAX_TOTAL = 25;
+const tier0WritesPerSession = new Map();
 const coreMemorySchema = Type.Object({
     action: Type.Union([
         Type.Literal("list"),
@@ -53,6 +56,20 @@ export function createCoreMemoryToolDef(state, session) {
                         const tier = params.tier ?? 0;
                         const sanitized = stripStructuralTags(params.text);
                         if (tier === 0) {
+                            const sessionWrites = tier0WritesPerSession.get(session.sessionId) ?? 0;
+                            if (sessionWrites >= TIER0_MAX_PER_SESSION) {
+                                return {
+                                    content: [{ type: "text", text: `Tier 0 write limit reached (${TIER0_MAX_PER_SESSION}/session). Use update to modify existing entries or deactivate unused ones first.` }],
+                                    details: { error: true, reason: "session_rate_limit" },
+                                };
+                            }
+                            const existing = await store.getAllCoreMemory(0);
+                            if (existing.length >= TIER0_MAX_TOTAL) {
+                                return {
+                                    content: [{ type: "text", text: `Tier 0 capacity reached (${TIER0_MAX_TOTAL} entries). Deactivate unused entries before adding new ones.` }],
+                                    details: { error: true, reason: "total_cap" },
+                                };
+                            }
                             log.warn(`[core-memory] tier-0 write: "${sanitized.slice(0, 120)}..." (session=${session.sessionId})`);
                         }
                         const sid = tier === 1 ? (params.session_id ?? session.sessionId) : undefined;
@@ -62,6 +79,9 @@ export function createCoreMemoryToolDef(state, session) {
                                 content: [{ type: "text", text: "FAILED: Core memory entry was not created." }],
                                 details: { error: true },
                             };
+                        }
+                        if (tier === 0) {
+                            tier0WritesPerSession.set(session.sessionId, (tier0WritesPerSession.get(session.sessionId) ?? 0) + 1);
                         }
                         // Invalidate cached section so updated content re-injects next turn
                         session.injectedSections.delete(tier === 0 ? "tier0" : "tier1");

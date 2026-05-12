@@ -4,6 +4,24 @@ All notable changes to KongCode are documented here. The 0.7.x series introduced
 
 ## [Unreleased]
 
+## [0.7.67] — 2026-05-12
+
+### Security
+- **Constant-time auth token comparison** (`src/http-api.ts`): Replaced `!==` string comparison with `timingSafeEqual` + length pre-check to prevent timing side-channel leakage of bearer tokens.
+- **SHA256 verification for bootstrap downloads** (`src/engine/bootstrap.ts`, `bin-manifest.json`): `downloadFile()` now verifies SHA256 hashes for node-llama-cpp tarballs (main + per-platform) and ajv bundles. Manifest schema changed from plain strings to `{ name, sha256 }` objects for platform entries.
+- **Parameterized SurrealQL tag queries** (`src/engine/surreal.ts`): `tagBoostedConcepts` uses `CONTAINSANY $tags` with bound parameters instead of string-interpolated tag lists.
+- **RECORD_ID_RE accepts hyphens** (`src/engine/surreal.ts`): Key character class now allows `-` for UUID-style record IDs while still rejecting injection characters (`;`, `/`, spaces, dots).
+- **buildDrainEnv allowlist** (`src/daemon/auto-drain.ts`): Environment variables passed to drain subprocesses are now filtered through an explicit allowlist (HOME, PATH, NODE_PATH, etc.) instead of forwarding the full process environment.
+- **Tier 0 core-memory rate limiting** (`src/engine/tools/core-memory.ts`): Tier 0 directives capped at 5 writes per session and 25 total, preventing runaway agents from flooding always-loaded context.
+- **Atomic pending-work claim** (`src/tools/pending-work.ts`): `fetch_pending_work` uses optimistic `UPDATE ... WHERE status="pending"` with a 3-candidate pool instead of SELECT-then-UPDATE, eliminating the TOCTOU race in concurrent sessions.
+- **Default credential warning** (`src/daemon/index.ts`): Daemon logs a warning at startup when SurrealDB is using default root:root credentials.
+
+### Fixed
+- **Unified graceful shutdown** (`src/daemon/index.ts`): All three exit paths (idle reaper, SIGTERM/SIGINT, meta.shutdown) now call a shared `gracefulCleanup()` with a reentrancy guard, ensuring SurrealDB flushes, VRAM is freed, and socket files are removed on every exit.
+- **DAEMON_VERSION read from package.json** (`src/daemon/index.ts`): Replaces hardcoded version constant with runtime read from package.json (dev) or esbuild `--define` injection (SEA binary), preventing version drift that breaks daemon supersede logic.
+- **withRetry delegates to ensureConnected** (`src/engine/surreal.ts`): Retry wrapper calls the shared reconnection function instead of duplicating connection logic.
+- **ACAN training data capped at 15K samples** (`src/engine/acan.ts`): `fetchTrainingData` now uses `ORDER BY created_at DESC LIMIT 15000`, preventing unbounded serialization of 100K+ retrieval_outcome rows and biasing toward recent (higher-quality) training signal.
+
 ## [0.7.66] — 2026-05-11
 
 ### Fixed

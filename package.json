@@ -1,6 +1,6 @@
 {
   "name": "kongcode",
-  "version": "0.7.66",
+  "version": "0.7.67",
   "description": "Graph-backed persistent memory engine for Claude Code. SurrealDB + BGE-M3 vector embeddings that learn across sessions.",
   "type": "module",
   "license": "MIT",
@@ -37,7 +37,7 @@
   "scripts": {
     "build": "tsc && cp src/engine/schema.surql dist/engine/schema.surql",
     "bundle": "npm run build && esbuild src/mcp-server.ts --bundle --platform=node --target=node20 --format=cjs --outfile=dist/mcp-server.bundle.cjs --external:node-llama-cpp --external:@node-llama-cpp/*",
-    "bundle:daemon": "npm run build && esbuild src/daemon/index.ts --bundle --platform=node --target=node20 --format=cjs --outfile=dist/daemon/bundle.cjs --external:node-llama-cpp --external:@node-llama-cpp/*",
+    "bundle:daemon": "npm run build && esbuild src/daemon/index.ts --bundle --platform=node --target=node20 --format=cjs --outfile=dist/daemon/bundle.cjs --external:node-llama-cpp --external:@node-llama-cpp/* --define:__KONGCODE_VERSION__=$(node -pe 'JSON.stringify(require(\"./package.json\").version)')",
     "bundle:mcp": "npm run build && esbuild src/mcp-client/index.ts --bundle --platform=node --target=node20 --format=cjs --outfile=dist/mcp-client/bundle.cjs --external:ajv --external:ajv-formats",
     "sea": "npm run bundle && node --experimental-sea-config sea-config.json && cp $(command -v node) dist/bin/kongcode-$(node -e \"console.log(process.platform+'-'+process.arch)\") && npx postject dist/bin/kongcode-$(node -e \"console.log(process.platform+'-'+process.arch)\") NODE_SEA_BLOB dist/sea-prep.blob --sentinel-fuse NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2",
     "sea:daemon": "npm run bundle:daemon && node --experimental-sea-config sea-daemon-config.json && mkdir -p dist/bin && cp $(command -v node) dist/bin/kongcode-daemon-$(node -e \"console.log(process.platform+'-'+process.arch)\") && npx postject dist/bin/kongcode-daemon-$(node -e \"console.log(process.platform+'-'+process.arch)\") NODE_SEA_BLOB dist/daemon-sea-prep.blob --sentinel-fuse NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2",

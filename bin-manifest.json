@@ -52,14 +52,15 @@
     "$comment": "node-llama-cpp main package + per-platform native binding. Downloaded by bootstrap on first run when running under SEA (no node_modules available). Each <platform> tarball goes to <cache>/native/node_modules/@node-llama-cpp/<platform>/ so Node's normal module resolution finds it from <cache>/native/node-llama-cpp/.",
     "version": "3.18.1",
     "mainTarballUrl": "https://registry.npmjs.org/node-llama-cpp/-/node-llama-cpp-{version}.tgz",
+    "mainSha256": "8384f18e8c779f96794b68ebff861d6ecee9feb84707f5d79d013461481bb892",
     "platformTarballUrl": "https://registry.npmjs.org/@node-llama-cpp/{platform}/-/{platform}-{version}.tgz",
     "platforms": {
-      "linux-x64": "linux-x64",
-      "linux-arm64": "linux-arm64",
-      "darwin-x64": "mac-x64",
-      "darwin-arm64": "mac-arm64-metal",
-      "win32-x64": "win-x64",
-      "win32-arm64": "win-arm64"
+      "linux-x64": { "name": "linux-x64", "sha256": "0b662aabf9794140ff71d2c34970662ac30f95cacaaa98e03b9967d21ea816d0" },
+      "linux-arm64": { "name": "linux-arm64", "sha256": "ad83af4f70fe834aeec352c4da32a69e50b5c92c9dd7cc45a2d6353ea6fe9050" },
+      "darwin-x64": { "name": "mac-x64", "sha256": "85d85035ace014622b1ef2e7a7c83de67e4601d9ca09218ffb49ccad8363dec5" },
+      "darwin-arm64": { "name": "mac-arm64-metal", "sha256": "6b653621348d1e27d32686612aa04513175de549b56dc03a6d9d97d95de36bd6" },
+      "win32-x64": { "name": "win-x64", "sha256": "af7366ee84ae42f2ab8b5677e389f5696a2ea4438b48d220ea061ebfd61d6c6f" },
+      "win32-arm64": { "name": "win-arm64", "sha256": "e3cc6ddea4b2c7bb2ce5fe11cefdf25026663e5d8b0ad5b3a44801e697c77375" }
     }
   },
   "ajv": {
@@ -67,6 +68,8 @@
     "ajvVersion": "8.18.0",
     "ajvFormatsVersion": "3.0.1",
     "ajvTarballUrl": "https://registry.npmjs.org/ajv/-/ajv-{version}.tgz",
-    "ajvFormatsTarballUrl": "https://registry.npmjs.org/ajv-formats/-/ajv-formats-{version}.tgz"
+    "ajvSha256": "522a6e330be5f537ca152618413b34e857ee8ff9e3f6a8ae17a2bffe788c9cc0",
+    "ajvFormatsTarballUrl": "https://registry.npmjs.org/ajv-formats/-/ajv-formats-{version}.tgz",
+    "ajvFormatsSha256": "f4d6980fd367381fd29199066911e863db8d97496613b6c2c5b91563a150acc5"
   }
 }
