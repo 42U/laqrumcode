@@ -1616,6 +1616,7 @@ async function graphTransformInner(
     const ranked = await scoreResults(allResults, neighborIds, queryVec, store, currentIntent);
     const deduped = deduplicateResults(ranked);
     const reranked = await rerankResults(deduped, queryText);
+    applyDistributionBands(reranked);
     let contextNodes = takeWithConstraints(reranked, tokenBudget, budgets.maxContextItems);
     contextNodes = await ensureRecentTurns(contextNodes, session.sessionId, store);
 

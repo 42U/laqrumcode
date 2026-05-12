@@ -731,7 +731,7 @@ export class SurrealStore {
 
   /**
    * BFS expansion from seed nodes along typed edges, with batched per-hop queries.
-   * Each edge query is LIMIT 3 (EDGE_NEIGHBOR_LIMIT) to bound fan-out per node.
+   * Uses multi-edge traversal (LIMIT 25 forward, LIMIT 10 reverse) to bound fan-out.
    */
   /**
    * Tag-boosted concept retrieval: extract keywords from query text,
