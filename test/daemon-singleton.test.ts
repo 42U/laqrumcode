@@ -451,7 +451,9 @@ describe("daemon singleton: O_EXCL acquire semantic", () => {
     expect(caught!.code).toBe("EEXIST");
   });
 
-  it("permission mode on created lock is 0o600 (user-only)", () => {
+  it.runIf(process.platform !== "win32")("permission mode on created lock is 0o600 (user-only)", () => {
+    // POSIX-only: Windows doesn't honor 0o600 mode bits and reports world-readable
+    // mode regardless of the openSync mode argument.
     const fd = openSync(lockPath, fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_WRONLY, 0o600);
     closeSync(fd);
     const st = statSync(lockPath);

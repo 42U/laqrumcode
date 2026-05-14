@@ -4,6 +4,11 @@ All notable changes to KongCode are documented here. The 0.7.x series introduced
 
 ## [Unreleased]
 
+## [0.7.72] — 2026-05-14
+
+### Fixed
+- **Cross-platform CI: CRLF-tolerant regex + POSIX-only mode test** (`test/mcp-tool-error.test.ts`, `test/daemon-singleton.test.ts`): The regex matching `handleToolCall` body used `\n\}\n` which fails on Windows where git checks out CRLF endings. Made the regexes accept `\r?\n`. The 0o600 permission-mode test now runs only on POSIX (`it.runIf(process.platform !== "win32")`) because Windows reports world-readable mode regardless of the openSync mode argument.
+
 ## [0.7.71] — 2026-05-14
 
 ### Fixed

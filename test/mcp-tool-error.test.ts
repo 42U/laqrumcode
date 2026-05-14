@@ -40,7 +40,7 @@ describe("mcp-server: outer try/catch translates handler throws to tool-result",
     // Anchor on the exact catch block to avoid matching unrelated content
     // assemblies elsewhere in the file.
     const handleToolCallMatch = src.match(
-      /async function handleToolCall[\s\S]*?\n\}\n/,
+      /async function handleToolCall[\s\S]*?\r?\n\}\r?\n/,
     );
     expect(handleToolCallMatch, "handleToolCall must exist").not.toBeNull();
     const body = handleToolCallMatch![0];
@@ -52,12 +52,12 @@ describe("mcp-server: outer try/catch translates handler throws to tool-result",
   it("does NOT rethrow inside the catch (avoids JSON-RPC transport error)", () => {
     const src = readFileSync(SRC_PATH, "utf-8");
     const handleToolCallMatch = src.match(
-      /async function handleToolCall[\s\S]*?\n\}\n/,
+      /async function handleToolCall[\s\S]*?\r?\n\}\r?\n/,
     );
     const body = handleToolCallMatch![0];
 
     // Isolate the catch block.
-    const catchMatch = body.match(/} catch \(err\) \{([\s\S]*?)\n\s{2}\}\n\}/);
+    const catchMatch = body.match(/} catch \(err\) \{([\s\S]*?)\r?\n\s{2}\}\r?\n\}/);
     expect(catchMatch, "catch block must exist with a closing brace").not.toBeNull();
     const catchBody = catchMatch![1];
 
