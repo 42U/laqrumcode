@@ -129,7 +129,7 @@ export function buildCoalescedPrompt(
     extras.push(`  "handoff_note": "2-3 sentence first-person summary for your future self. What was worked on, what's unfinished, what to remember."`);
   }
   if (includeReflection) {
-    extras.push(`  "reflection": "2-4 sentences: what went well, what could improve, patterns worth noting. Be specific and actionable. Return the string 'skip' if the session is too trivial."`);
+    extras.push(`  "reflection": "2-4 sentences (max 600 chars) capturing REASONING signal from this session. Valid content: a user correction worth remembering, a hypothesis that turned out wrong, a tradeoff the user resolved a specific way, or a pattern the user wants applied going forward. NEVER critique thoroughness, length, depth, or care taken. Being thorough is a non-negotiable founder rule, not a fault. NEVER write 'should have moved on faster', 'should have just acknowledged', 'overthinking it', 'too detailed', 'rushed it less', or 'acknowledge and move on'; those phrasings are forbidden. NEVER list tool calls, concept IDs, edge counts, save totals, test pass counts, or completion markers; those are operations, not reflections. If no real reasoning signal exists, return the string 'skip'."`);
   }
   extras.push(`  "rules_compliance": 0.0-1.0 — rate how well the assistant followed the injected directives and rules throughout the session. 1.0 = perfect compliance with all rules. 0.5 = mixed, some rules followed some ignored. 0.0 = consistently violated rules. Judge against the ACTIVE RULES block at the top of the transcript if present. Consider: did it cite sources when context was available, follow memory-save directives, avoid prohibited actions, apply user corrections immediately?`);
   if (extras.length > 0) {

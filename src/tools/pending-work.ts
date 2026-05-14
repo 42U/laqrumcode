@@ -451,14 +451,38 @@ async function commitHandoffNote(
   }
 }
 
+// Reflection content filter — belt-and-braces gate. Primary defense is the
+// prompt at memory-daemon.ts buildCoalescedPrompt. This catches anything the
+// LLM emits anyway. Three pathology classes from the 2026-05-14 audit.
+// Anti-thoroughness reflections are DROPPED (founder rule: thoroughness is
+// non-negotiable). Save-summary and work-completion are DOWNGRADED to
+// importance 3 with no embedding so they neither rank in retrieval nor
+// compete in dedup. Loose variants ('over-engineered', 'too verbose',
+// 'burned tool calls') extend the user's original strict regex set because
+// the manual sweep on 2026-05-14 found multiple rows that bypassed the
+// strict set with these synonyms.
+const REFLECTION_ANTI_THOROUGHNESS_RE = /should have (moved on faster|just acknowledged|rushed|skipped|moved faster)|overthinking it|too detailed|too thorough|rushed it less|acknowledge and move on|over-engineered|too verbose|more concise|shorter, punchier|burned (too many|most of the) tool|keep responses tighter/i;
+const REFLECTION_SAVE_SUMMARY_RE = /\ball saved\.|quoted ids from this turn|session totals:|\d+\s+concept gems across|edges_created\s*=\s*\d+/i;
+const REFLECTION_WORK_COMPLETION_RE = /fix verified end-to-end:|final loop summary|final state:|\d+\/\d+\s*tests|\d+\/\d+\s*postdeploy|calling it done/i;
+
 async function commitReflection(
   reflText: string,
   item: PendingWorkItem,
   state: GlobalPluginState,
 ): Promise<void> {
   const { store, embeddings } = state;
+
+  if (REFLECTION_ANTI_THOROUGHNESS_RE.test(reflText)) {
+    log.warn(`[pending-work:reflection] dropped anti-thoroughness reflection for ${item.session_id}: ${reflText.slice(0, 120)}`);
+    return;
+  }
+  const isAuditLog = REFLECTION_SAVE_SUMMARY_RE.test(reflText) || REFLECTION_WORK_COMPLETION_RE.test(reflText);
+  if (isAuditLog) {
+    log.warn(`[pending-work:reflection] downgrading audit-log-style reflection for ${item.session_id}: ${reflText.slice(0, 120)}`);
+  }
+
   let reflEmb: number[] | null = null;
-  if (embeddings.isAvailable()) {
+  if (embeddings.isAvailable() && !isAuditLog) {
     try { reflEmb = await embeddings.embed(reflText); } catch { /* ok */ }
   }
   if (reflEmb?.length) {
@@ -473,7 +497,7 @@ async function commitReflection(
     text: reflText,
     category: "session_review",
     severity: "minor",
-    importance: 7.0,
+    importance: isAuditLog ? 3.0 : 7.0,
   };
   if (reflEmb?.length) record.embedding = reflEmb;
   if (item.project_id) record.project_id = item.project_id;
