@@ -24,6 +24,8 @@ export function createBeforePromptBuildHandler(state: GlobalPluginState) {
         event.prompt,
         session,
         state.embeddings,
+        42000,
+        state.store,
       );
 
       // Store config on session for graph-context to read

@@ -18,27 +18,27 @@ function makeItem(overrides: Partial<RetrievedItem> = {}): RetrievedItem {
 
 describe("stageRetrieval / getStagedItems", () => {
   beforeEach(() => {
-    // Clear any pending state
-    stageRetrieval("reset", [], undefined);
-    evaluateRetrieval("", "", { queryExec: async () => {}, updateUtilityCache: async () => {}, isAvailable: () => false } as any);
+    // Clear any pending state (drain entries from previous tests)
+    stageRetrieval("session1", [], undefined);
+    evaluateRetrieval("session1", "", "", { queryExec: async () => {}, updateUtilityCache: async () => {}, isAvailable: () => false } as any);
   });
 
   it("stages items and retrieves them", () => {
     const items = [makeItem(), makeItem({ id: "memory:test2" })];
     stageRetrieval("session1", items);
-    const staged = getStagedItems();
+    const staged = getStagedItems("session1");
     expect(staged).toHaveLength(2);
     expect(staged[0].id).toBe("memory:test1");
   });
 
   it("returns empty array when nothing staged", () => {
-    expect(getStagedItems()).toHaveLength(0);
+    expect(getStagedItems("session-empty")).toHaveLength(0);
   });
 
   it("returns a copy, not the original array", () => {
     stageRetrieval("session1", [makeItem()]);
-    const a = getStagedItems();
-    const b = getStagedItems();
+    const a = getStagedItems("session1");
+    const b = getStagedItems("session1");
     expect(a).not.toBe(b);
   });
 });
@@ -46,14 +46,14 @@ describe("stageRetrieval / getStagedItems", () => {
 describe("recordToolOutcome", () => {
   it("records tool outcomes into pending retrieval", () => {
     stageRetrieval("session1", [makeItem()]);
-    recordToolOutcome(true);
-    recordToolOutcome(false);
+    recordToolOutcome("session1", true);
+    recordToolOutcome("session1", false);
     // Outcomes are consumed by evaluateRetrieval — we just verify no crash
   });
 
-  it("no-ops when nothing is staged", () => {
+  it("no-ops when nothing is staged for that session", () => {
     // Should not throw
-    recordToolOutcome(true);
+    recordToolOutcome("session-not-staged", true);
   });
 });
 
@@ -61,6 +61,9 @@ describe("evaluateRetrieval", () => {
   it("writes outcome records to store", async () => {
     const created: any[] = [];
     const mockStore = {
+      // SELECT-then-CREATE dedup: writer checks the UNIQUE-index tuple before
+      // inserting. Tests want the CREATE to fire, so queryFirst returns [].
+      queryFirst: async () => [],
       queryExec: async (_sql: string, params: any) => { created.push(params.data); },
       updateUtilityCache: async () => {},
     };
@@ -71,6 +74,7 @@ describe("evaluateRetrieval", () => {
 
     // Response references the retrieved content
     await evaluateRetrieval(
+      "session1",
       "turn:123",
       "The SurrealDB WebSocket connection was reset due to a timeout",
       mockStore as any,
@@ -90,6 +94,7 @@ describe("evaluateRetrieval", () => {
   it("high utilization when response references retrieved text", async () => {
     const created: any[] = [];
     const mockStore = {
+      queryFirst: async () => [],
       queryExec: async (_sql: string, params: any) => { created.push(params.data); },
       updateUtilityCache: async () => {},
     };
@@ -99,6 +104,7 @@ describe("evaluateRetrieval", () => {
     ]);
 
     await evaluateRetrieval(
+      "session1",
       "turn:456",
       "You should use useState and useEffect hooks in your React component lifecycle",
       mockStore as any,
@@ -110,6 +116,7 @@ describe("evaluateRetrieval", () => {
   it("low utilization when response ignores retrieved text", async () => {
     const created: any[] = [];
     const mockStore = {
+      queryFirst: async () => [],
       queryExec: async (_sql: string, params: any) => { created.push(params.data); },
       updateUtilityCache: async () => {},
     };
@@ -119,6 +126,7 @@ describe("evaluateRetrieval", () => {
     ]);
 
     await evaluateRetrieval(
+      "session1",
       "turn:789",
       "Here is how to write a Python function that sorts a list",
       mockStore as any,
@@ -129,13 +137,14 @@ describe("evaluateRetrieval", () => {
 
   it("clears pending state after evaluation", async () => {
     const mockStore = {
+      queryFirst: async () => [],
       queryExec: async () => {},
       updateUtilityCache: async () => {},
     };
 
     stageRetrieval("session1", [makeItem()]);
-    await evaluateRetrieval("turn:1", "response", mockStore as any);
-    expect(getStagedItems()).toHaveLength(0);
+    await evaluateRetrieval("session1", "turn:1", "response", mockStore as any);
+    expect(getStagedItems("session1")).toHaveLength(0);
   });
 
   it("no-ops when nothing staged", async () => {
@@ -144,7 +153,7 @@ describe("evaluateRetrieval", () => {
       updateUtilityCache: async () => {},
     };
     // Should not throw
-    await evaluateRetrieval("turn:1", "response", mockStore as any);
+    await evaluateRetrieval("session-empty", "turn:1", "response", mockStore as any);
   });
 });
 
@@ -282,14 +291,15 @@ describe("composite scoring formula", () => {
 
 describe("stageSkills + evaluateRetrieval skill outcome", () => {
   beforeEach(() => {
-    stageRetrieval("reset", [], undefined);
-    evaluateRetrieval("", "", { queryExec: async () => {}, updateUtilityCache: async () => {}, isAvailable: () => false } as any);
+    stageRetrieval("session1", [], undefined);
+    evaluateRetrieval("session1", "", "", { queryExec: async () => {}, updateUtilityCache: async () => {}, isAvailable: () => false } as any);
   });
 
   it("calls recordSkillOutcome for each staged skill after evaluation", async () => {
     const execCalls: { sql: string; params: any }[] = [];
     const mockStore = {
       isAvailable: () => true,
+      queryFirst: async () => [],
       queryExec: async (sql: string, params: any) => { execCalls.push({ sql, params }); },
       updateUtilityCache: async () => {},
     };
@@ -297,10 +307,11 @@ describe("stageSkills + evaluateRetrieval skill outcome", () => {
     stageRetrieval("session1", [
       makeItem({ text: "SurrealDB query optimization" }),
     ]);
-    stageSkills(["skill:s1", "skill:s2"]);
-    recordToolOutcome(true);
+    stageSkills("session1", ["skill:s1", "skill:s2"]);
+    recordToolOutcome("session1", true);
 
     await evaluateRetrieval(
+      "session1",
       "turn:100",
       "I optimized the SurrealDB query using an index hint",
       mockStore as any,
@@ -316,16 +327,18 @@ describe("stageSkills + evaluateRetrieval skill outcome", () => {
     const execCalls: { sql: string; params: any }[] = [];
     const mockStore = {
       isAvailable: () => true,
+      queryFirst: async () => [],
       queryExec: async (sql: string, params: any) => { execCalls.push({ sql, params }); },
       updateUtilityCache: async () => {},
     };
 
     stageRetrieval("session1", [makeItem()]);
-    stageSkills(["skill:s1"]);
-    recordToolOutcome(false);
-    recordToolOutcome(false);
+    stageSkills("session1", ["skill:s1"]);
+    recordToolOutcome("session1", false);
+    recordToolOutcome("session1", false);
 
     await evaluateRetrieval(
+      "session1",
       "turn:101",
       "The SurrealDB WebSocket connection was reset after a failed query",
       mockStore as any,
@@ -340,6 +353,7 @@ describe("stageSkills + evaluateRetrieval skill outcome", () => {
     const execCalls: { sql: string }[] = [];
     const mockStore = {
       isAvailable: () => true,
+      queryFirst: async () => [],
       queryExec: async (sql: string, params: any) => { execCalls.push({ sql }); },
       updateUtilityCache: async () => {},
     };
@@ -347,30 +361,31 @@ describe("stageSkills + evaluateRetrieval skill outcome", () => {
     stageRetrieval("session1", [makeItem({ text: "some context" })]);
     // No stageSkills call
 
-    await evaluateRetrieval("turn:102", "some context in response", mockStore as any);
+    await evaluateRetrieval("session1", "turn:102", "some context in response", mockStore as any);
 
     const skillUpdates = execCalls.filter(c => c.sql.includes("UPDATE skill:"));
     expect(skillUpdates).toHaveLength(0);
   });
 
   it("stageSkills no-ops when nothing is staged", () => {
-    stageSkills(["skill:s1"]);
-    expect(getStagedItems()).toHaveLength(0);
+    stageSkills("session-not-staged", ["skill:s1"]);
+    expect(getStagedItems("session-not-staged")).toHaveLength(0);
   });
 
   it("defaults to success when no tool outcomes recorded", async () => {
     const execCalls: { sql: string }[] = [];
     const mockStore = {
       isAvailable: () => true,
+      queryFirst: async () => [],
       queryExec: async (sql: string, params: any) => { execCalls.push({ sql }); },
       updateUtilityCache: async () => {},
     };
 
     stageRetrieval("session1", [makeItem({ text: "deployment procedure" })]);
-    stageSkills(["skill:s1"]);
+    stageSkills("session1", ["skill:s1"]);
     // No recordToolOutcome calls — toolSuccess will be null → defaults true
 
-    await evaluateRetrieval("turn:103", "I followed the deployment procedure", mockStore as any);
+    await evaluateRetrieval("session1", "turn:103", "I followed the deployment procedure", mockStore as any);
 
     const skillUpdates = execCalls.filter(c => c.sql.includes("UPDATE skill:"));
     expect(skillUpdates).toHaveLength(1);

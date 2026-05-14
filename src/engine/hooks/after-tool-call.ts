@@ -24,7 +24,7 @@ export function createAfterToolCallHandler(state: GlobalPluginState) {
     if (!session) return;
 
     const isError = !!event.error;
-    recordToolOutcome(!isError);
+    recordToolOutcome(session.sessionId, !isError);
 
     // Store tool result snippet
     const resultText = typeof event.result === "string"

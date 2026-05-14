@@ -18,7 +18,8 @@
  */
 
 import type { GlobalPluginState, SessionState } from "../engine/state.js";
-import { swallow } from "../engine/errors.js";
+import { swallow, safeId } from "../engine/errors.js";
+import { clamp } from "../engine/math.js";
 import { stripStructuralTags } from "../engine/sanitize.js";
 
 interface ConceptNode {
@@ -61,16 +62,19 @@ async function seedConceptsFromContext(
     const rows = await state.store.queryFirst<{ id: string; content: string; score: number }>(
       `SELECT id, content, vector::similarity::cosine(embedding, $vec) AS score
        FROM concept
-       WHERE embedding != NONE AND array::len(embedding) > 0
+       WHERE embedding != NONE AND array::len(embedding) > 0 AND superseded_at IS NONE
        ORDER BY score DESC
        LIMIT $lim`,
       { vec, lim: limit },
     );
-    return rows.filter(r => r.score >= 0.55).map(r => ({
-      id: String(r.id),
-      content: String(r.content),
-      score: Number(r.score),
-    }));
+    return rows
+      .filter(r => r.score >= 0.55)
+      .map(r => ({
+        id: safeId(r.id),
+        content: String(r.content),
+        score: Number(r.score),
+      }))
+      .filter(r => r.id);
   } catch (e) {
     swallow("whatIsMissing:seed", e);
     return [];
@@ -125,8 +129,9 @@ async function collectGraphNeighbors(
         `SELECT id, content FROM ${id}`,
       ).catch(() => []);
       const r = rows[0];
-      if (r?.id && r?.content) {
-        collected.push({ id: String(r.id), content: String(r.content) });
+      const rid = safeId(r?.id);
+      if (rid && r?.content) {
+        collected.push({ id: rid, content: String(r.content) });
       }
     } catch (e) {
       swallow("whatIsMissing:fetchContent", e);
@@ -142,8 +147,8 @@ export async function handleWhatIsMissing(
   args: Record<string, unknown>,
 ): Promise<{ content: Array<{ type: "text"; text: string }> }> {
   const context = String(args.context ?? "").trim();
-  const seedLimit = Math.min(10, Math.max(3, Number(args.seed_limit) || 6));
-  const gapLimit = Math.min(20, Math.max(5, Number(args.gap_limit) || 10));
+  const seedLimit = clamp(Number(args.seed_limit) || 6, 3, 10);
+  const gapLimit = clamp(Number(args.gap_limit) || 10, 5, 20);
 
   if (!context || context.length < 10) {
     return {

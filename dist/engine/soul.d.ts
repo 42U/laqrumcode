@@ -5,18 +5,19 @@
  * based on its own graph data. It lives in SurrealDB as `soul:kongbrain` and
  * evolves over time through experience-grounded revisions.
  *
- * Graduation is a staged process, not a binary gate:
+ * Graduation is a staged process, not a binary gate. There are 8 gates total:
+ * 7 volume thresholds + 1 quality gate (composite ≥ 0.85).
  *
- *   nascent    (0-3/7)  — Too early. Keep building experience.
- *   developing (4/7)    — Some signal. Diagnose weak areas, guide focus.
- *   emerging   (5/7)    — Volume is there. Quality gate becomes the blocker.
- *   maturing   (6/7)    — Almost there. Final thresholds + quality must pass.
- *   ready      (7/7)    — All thresholds met AND quality score ≥ 0.85.
+ *   nascent    (0-4/8)  — Too early. Keep building experience.
+ *   developing (5/8)    — Some signal. Diagnose weak areas, guide focus.
+ *   emerging   (6/8)    — Volume is there. Quality gate becomes the blocker.
+ *   maturing   (7/8)    — Either 6 volume + quality OR 7 volume - quality short.
+ *   ready      (8/8)    — All 7 volume thresholds met AND quality ≥ 0.85.
  *
  * Quality is computed from actual performance signals: retrieval utilization,
  * skill success rates, reflection severity distribution, and tool failure rates.
- * An agent that meets all 7 thresholds but has terrible quality scores will NOT
- * graduate — it needs to improve before self-authoring makes sense.
+ * An agent that meets all 7 volume thresholds but has terrible quality scores
+ * will NOT graduate — it needs to improve before self-authoring makes sense.
  *
  * Ported from kongbrain — takes SurrealStore/EmbeddingService as params.
  */
@@ -91,6 +92,11 @@ export declare function getQualitySignals(store: SurrealStore): Promise<QualityS
 export declare function computeQualityScore(q: QualitySignals): number;
 /**
  * Check graduation readiness with full stage classification and quality analysis.
+ *
+ * The `met` / `unmet` arrays cover all 8 gates: the 7 volume thresholds plus
+ * the 1 quality gate (composite ≥ 0.85). `met.length / 8` is the natural
+ * fraction-met display. `volumeScore` remains volume-only (out of 7) so callers
+ * that want the volume-vs-quality split can still see them separately.
  */
 export declare function checkGraduation(store: SurrealStore): Promise<GraduationReport>;
 export interface SoulDocument {

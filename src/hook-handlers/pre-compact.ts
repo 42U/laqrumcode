@@ -51,8 +51,7 @@ export async function handlePreCompact(
   }
 
   // Stash compaction summary for PostCompact to inject after the window
-  // shrinks. Ported from KongBrain's ContextEngine.compact() —
-  // extracts structured signals (pending work, key files, tools used,
+  // shrinks. Extracts structured signals (pending work, key files, tools used,
   // recent errors, last message) so the model doesn't lose mid-task
   // context when Claude Code drops old messages.
   const parts: string[] = [];

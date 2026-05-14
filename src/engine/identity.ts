@@ -72,65 +72,88 @@ const IDENTITY_CHUNKS: { text: string; importance: number }[] = [
   },
 ];
 
+// Per-process mutex: prevents two concurrent SessionStart hooks from both
+// passing the version gate, both DELETEing, and both inserting the full chunk
+// set (which would yield 2N rows). Single in-flight promise; subsequent
+// callers await the same result until it resolves.
+let _seedIdentityInFlight: Promise<number> | null = null;
+
 export async function seedIdentity(
   store: SurrealStore,
   embeddings: EmbeddingService,
 ): Promise<number> {
   if (!store.isAvailable() || !embeddings.isAvailable()) return 0;
-
-  try {
-    // Version-tag upgrade detection. If the current-version identity is not
-    // present, clear ALL existing core identity chunks (any version) and
-    // re-seed. Pre-0.4.0 installs had no identity_version field, which the
-    // check naturally treats as "not current version" — triggers migration.
-    const vrows = await store.queryFirst<{ count: number }>(
-      `SELECT count() AS count FROM identity_chunk
-         WHERE source = $source AND identity_version = $v GROUP ALL`,
-      { source: IDENTITY_SOURCE, v: IDENTITY_VERSION },
-    );
-    const currentVersionSeeded = (vrows[0]?.count ?? 0) >= IDENTITY_CHUNKS.length;
-    if (currentVersionSeeded) return 0;
-
-    await store.queryExec(
-      `DELETE identity_chunk WHERE source = $source`,
-      { source: IDENTITY_SOURCE },
-    );
-  } catch (e) {
-    swallow.warn("identity:check", e);
-    return 0;
-  }
-
-  let seeded = 0;
-  for (let i = 0; i < IDENTITY_CHUNKS.length; i++) {
-    const chunk = IDENTITY_CHUNKS[i];
+  if (_seedIdentityInFlight) return _seedIdentityInFlight;
+  _seedIdentityInFlight = (async () => {
     try {
-      const vec = await embeddings.embed(chunk.text);
-      await store.queryExec(
-        `CREATE identity_chunk CONTENT $data`,
-        {
-          data: {
-            agent_id: "kongcode",
-            source: IDENTITY_SOURCE,
-            identity_version: IDENTITY_VERSION,
-            chunk_index: i,
-            text: chunk.text,
-            embedding: vec,
-            importance: chunk.importance,
-          },
-        },
-      );
-      seeded++;
-    } catch (e) {
-      swallow("identity:seedChunk", e);
-    }
-  }
+      try {
+        // Version-tag upgrade detection. If the current-version identity is not
+        // present, clear ALL existing core identity chunks (any version) and
+        // re-seed. Pre-0.4.0 installs had no identity_version field, which the
+        // check naturally treats as "not current version" — triggers migration.
+        const vrows = await store.queryFirst<{ count: number }>(
+          `SELECT count() AS count FROM identity_chunk
+             WHERE source = $source AND identity_version = $v GROUP ALL`,
+          { source: IDENTITY_SOURCE, v: IDENTITY_VERSION },
+        );
+        const currentVersionSeeded = (vrows[0]?.count ?? 0) >= IDENTITY_CHUNKS.length;
+        if (currentVersionSeeded) return 0;
 
-  return seeded;
+        await store.queryExec(
+          `DELETE identity_chunk WHERE source = $source`,
+          { source: IDENTITY_SOURCE },
+        );
+      } catch (e) {
+        swallow.warn("identity:check", e);
+        return 0;
+      }
+
+      let seeded = 0;
+      for (let i = 0; i < IDENTITY_CHUNKS.length; i++) {
+        const chunk = IDENTITY_CHUNKS[i];
+        try {
+          const vec = await embeddings.embed(chunk.text);
+          await store.queryExec(
+            `CREATE identity_chunk CONTENT $data`,
+            {
+              data: {
+                agent_id: "kongcode",
+                source: IDENTITY_SOURCE,
+                identity_version: IDENTITY_VERSION,
+                chunk_index: i,
+                text: chunk.text,
+                embedding: vec,
+                importance: chunk.importance,
+              },
+            },
+          );
+          seeded++;
+        } catch (e) {
+          swallow("identity:seedChunk", e);
+        }
+      }
+
+      return seeded;
+    } finally {
+      _seedIdentityInFlight = null;
+    }
+  })();
+  return _seedIdentityInFlight;
 }
 
 // ── WAKEUP.md — User-defined identity on first run ──
 
 const USER_IDENTITY_SOURCE = "user_identity";
+
+/**
+ * Version tag for user-identity chunks. The compound UNIQUE on identity_chunk
+ * is (source, identity_version, chunk_index) — without an explicit version
+ * here, all chunks would write identity_version = NONE and any DELETE failure
+ * upstream leaves stale NONE-versioned rows occupying chunk_index 0..N-1,
+ * causing the CREATEs below to collide on the UNIQUE constraint.
+ * Bump when user-identity chunk semantics change so old rows can be migrated.
+ */
+export const USER_IDENTITY_VERSION = "user-v1";
 
 export async function hasUserIdentity(store: SurrealStore): Promise<boolean> {
   if (!store.isAvailable()) return true;
@@ -141,7 +164,11 @@ export async function hasUserIdentity(store: SurrealStore): Promise<boolean> {
     );
     return (rows[0]?.count ?? 0) > 0;
   } catch (e) {
-    swallow("identity:hasUserIdentity", e);
+    // Fail-open: return true so a transient DB error doesn't trigger a
+    // bogus first-run WAKEUP flow. Promoted to warn (was silent) so any
+    // future production caller surfaces the failure in logs rather than
+    // silently masking a broken query.
+    swallow.warn("identity:hasUserIdentity", e);
     return true;
   }
 }
@@ -192,6 +219,7 @@ export async function saveUserIdentity(
           data: {
             agent_id: "kongcode",
             source: USER_IDENTITY_SOURCE,
+            identity_version: USER_IDENTITY_VERSION,
             chunk_index: i,
             text,
             embedding: vec,

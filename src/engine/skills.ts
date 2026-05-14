@@ -10,7 +10,7 @@
  */
 
 import type { SurrealStore } from "./surreal.js";
-import { swallow } from "./errors.js";
+import { swallow, safeId } from "./errors.js";
 import { assertRecordId } from "./surreal.js";
 
 // --- Types ---
@@ -61,8 +61,14 @@ export async function supersedeOldSkills(
       if ((row.score ?? 0) >= 0.82) {
         try {
           assertRecordId(String(row.id));
+          assertRecordId(newSkillId);
+          // skill.superseded_by is `option<record<skill>>` — SurrealDB's
+          // type coercer rejects bare strings against record-typed fields,
+          // so use type::record($val) to parse the string id back into a
+          // Thing on the server side. Same pattern as supersedes.ts for
+          // concept.superseded_by after the 2026-05-13 retype migration.
           await store.queryExec(
-            `UPDATE ${row.id} SET active = false, superseded_by = $newId`,
+            `UPDATE ${row.id} SET active = false, superseded_by = type::record($newId)`,
             { newId: newSkillId },
           );
         } catch (e) {
@@ -101,7 +107,7 @@ export async function findRelevantSkills(
     return rows
       .filter((r: any) => (r.score ?? 0) > 0.4)
       .map((r: any) => ({
-        id: String(r.id),
+        id: safeId(r.id),
         name: r.name ?? "",
         description: r.description ?? "",
         preconditions: r.preconditions,
@@ -113,7 +119,8 @@ export async function findRelevantSkills(
         confidence: Number(r.confidence ?? 1.0),
         active: r.active !== false,
         score: r.score,
-      }));
+      }))
+      .filter((r) => r.id);
   } catch (e) {
     swallow.warn("skills:find", e);
     return [];

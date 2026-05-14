@@ -46,7 +46,8 @@ export function createLlmOutputHandler(state) {
             session._statsFlushCounter = (session._statsFlushCounter ?? 0) + 1;
             if (session._statsFlushCounter >= 5) {
                 try {
-                    await state.store.updateSessionStats(session.surrealSessionId, session._pendingInputTokens, session._pendingOutputTokens);
+                    await state.store.bumpSessionTurn(session.surrealSessionId);
+                    await state.store.addSessionTokens(session.surrealSessionId, session._pendingInputTokens, session._pendingOutputTokens);
                 }
                 catch (e) {
                     swallow("hook:llmOutput:sessionStats", e);

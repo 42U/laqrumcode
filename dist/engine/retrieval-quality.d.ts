@@ -13,6 +13,7 @@
  * Ported from kongbrain — uses SurrealStore instead of module-level DB.
  */
 import type { SurrealStore, VectorSearchResult } from "./surreal.js";
+import type { GlobalPluginState } from "./state.js";
 export type RetrievedItem = VectorSearchResult & {
     finalScore?: number;
     fromNeighbor?: boolean;
@@ -26,14 +27,15 @@ interface QualitySignals {
     wasNeighbor: boolean;
     recency: number;
 }
-export declare function getStagedItems(): RetrievedItem[];
+export declare function registerRetrievalQualityCleanup(state: GlobalPluginState): void;
+export declare function getStagedItems(sessionId: string): RetrievedItem[];
 export declare function stageRetrieval(sessionId: string, items: RetrievedItem[], queryEmbedding?: number[], indexMap?: Map<number, string>): void;
-export declare function recordToolOutcome(success: boolean): void;
-export declare function stageSkills(skillIds: string[]): void;
+export declare function recordToolOutcome(sessionId: string, success: boolean): void;
+export declare function stageSkills(sessionId: string, skillIds: string[]): void;
 /**
  * Evaluate retrieval quality after assistant response.
  */
-export declare function evaluateRetrieval(responseTurnId: string, responseText: string, store: SurrealStore): Promise<void>;
+export declare function evaluateRetrieval(sessionId: string, responseTurnId: string, responseText: string, store: SurrealStore): Promise<void>;
 /** 0.7.27: count how many high-salience items the assistant ignored last
  *  turn. Used by cognitive-check to inject a Reflexion-style nudge. */
 export declare function getLastTurnGroundingTrace(sessionId: string, store: SurrealStore): Promise<{

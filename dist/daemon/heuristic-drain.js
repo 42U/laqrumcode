@@ -12,7 +12,8 @@
 import { swallow } from "../engine/errors.js";
 import { log } from "../engine/log.js";
 import { commitKnowledge } from "../engine/commit.js";
-const RECORD_ID_RE = /^pending_work:[a-zA-Z0-9_]+$/;
+/** Local-narrow record-id regex: only accept ids in the `pending_work` table. */
+const pendingWorkIdRe = /^pending_work:[a-zA-Z0-9_]+$/;
 export async function drainHeuristic(state) {
     const { store, embeddings } = state;
     if (!store.isAvailable())
@@ -21,7 +22,7 @@ export async function drainHeuristic(state) {
     try {
         const items = await store.queryFirst(`SELECT * FROM pending_work WHERE status = "pending" AND work_type IN ["handoff_note", "reflection"] ORDER BY priority ASC, created_at ASC LIMIT 10`);
         for (const item of items) {
-            if (!RECORD_ID_RE.test(item.id))
+            if (!pendingWorkIdRe.test(item.id))
                 continue;
             try {
                 const ok = await processItem(item, state);

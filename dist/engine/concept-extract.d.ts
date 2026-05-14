@@ -8,7 +8,6 @@ import type { SurrealStore } from "./surreal.js";
 import type { EmbeddingService } from "./embeddings.js";
 export { linkToRelevantConcepts, linkConceptHierarchy } from "./concept-links.js";
 export declare const CONCEPT_RE: RegExp;
-export declare const TECH_TERMS: RegExp;
 /** Default upper bound on concepts returned per text. Override per call. */
 export declare const DEFAULT_CONCEPT_CAP = 20;
 /** Extract concept name strings from free text using regex heuristics. */

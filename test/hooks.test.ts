@@ -21,7 +21,8 @@ function mockStore(available = true) {
     queryBatch: vi.fn(async () => []),
     upsertTurn: vi.fn(async () => "turn:abc123"),
     relate: vi.fn(async () => {}),
-    updateSessionStats: vi.fn(async () => {}),
+    bumpSessionTurn: vi.fn(async () => {}),
+    addSessionTokens: vi.fn(async () => {}),
     createArtifact: vi.fn(async () => "artifact:xyz"),
   } as any;
 }
@@ -234,14 +235,16 @@ describe("createLlmOutputHandler", () => {
         assistantTexts: ["x"], usage: { input: 10, output: 10, total: 20 * (i + 1) },
       }, makeCtx(session));
     }
-    expect(store.updateSessionStats).not.toHaveBeenCalled();
+    expect(store.bumpSessionTurn).not.toHaveBeenCalled();
+    expect(store.addSessionTokens).not.toHaveBeenCalled();
 
     // 5th call — triggers flush
     await handler({
       runId: "r4", sessionId: "s1", provider: "anthropic", model: "claude",
       assistantTexts: ["x"], usage: { input: 50, output: 50, total: 100 },
     }, makeCtx(session));
-    expect(store.updateSessionStats).toHaveBeenCalledTimes(1);
+    expect(store.bumpSessionTurn).toHaveBeenCalledTimes(1);
+    expect(store.addSessionTokens).toHaveBeenCalledTimes(1);
   });
 
   it("handles missing session gracefully", async () => {

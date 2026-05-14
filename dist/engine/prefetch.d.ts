@@ -26,8 +26,8 @@ export interface CachedContext {
     skills: Skill[];
     reflections: Reflection[];
 }
-export declare function getCachedContext(queryVec: number[]): CachedContext | null;
-export declare function setCachedContext(queryVec: number[], results: VectorSearchResult[], skills: Skill[], reflections: Reflection[]): void;
+export declare function getCachedContext(queryVec: number[], sessionId: string, projectId?: string): CachedContext | null;
+export declare function setCachedContext(queryVec: number[], results: VectorSearchResult[], skills: Skill[], reflections: Reflection[], sessionId: string, projectId?: string): void;
 export declare function getPrefetchStats(): {
     entries: number;
     maxSize: number;

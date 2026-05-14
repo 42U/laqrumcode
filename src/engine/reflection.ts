@@ -10,7 +10,7 @@
  */
 
 import type { SurrealStore } from "./surreal.js";
-import { swallow } from "./errors.js";
+import { swallow, safeId } from "./errors.js";
 import { cosineSimilarity } from "./graph-context.js";
 
 // --- Types ---
@@ -75,13 +75,13 @@ export async function retrieveReflections(
     }
 
     return deduped.map((r: any) => ({
-      id: String(r.id),
+      id: safeId(r.id),
       text: r.text ?? "",
       category: r.category ?? "efficiency",
       severity: r.severity ?? "minor",
       importance: Number(r.importance ?? 7.0),
       score: r.score,
-    }));
+    })).filter(r => r.id);
   } catch (e) {
     swallow.warn("reflection:retrieve", e);
     return [];

@@ -8,7 +8,7 @@
 import type { GlobalPluginState } from "../engine/state.js";
 import { makeHookOutput, type HookResponse } from "../http-api.js";
 import { log } from "../engine/log.js";
-import { swallow } from "../engine/errors.js";
+import { swallow, isUniqueViolation } from "../engine/errors.js";
 import { runGates } from "../engine/hooks/gate-registry.js";
 
 /** Tools that touch a file via an explicit `file_path` argument. The gate
@@ -92,11 +92,21 @@ export async function handlePreToolUse(
     }
   }
 
-  // Track pending tool args for artifact extraction in PostToolUse
+  // Track pending tool args for artifact extraction in PostToolUse.
+  // Keyed by tool_use_id (NOT toolName) so two parallel Write calls don't
+  // overwrite each other's args. PostToolUse reads back by tool_use_id.
   if (toolName === "Write" || toolName === "Edit") {
     const toolInput = payload.tool_input as Record<string, unknown> | undefined;
-    if (toolInput?.file_path) {
-      session.pendingToolArgs.set(toolName, toolInput);
+    const toolUseId = String(payload.tool_use_id ?? "");
+    if (toolInput?.file_path && toolUseId) {
+      session.pendingToolArgs.set(toolUseId, toolInput);
+    } else if (toolInput?.file_path && !toolUseId) {
+      // Silent skip would hide a Claude Code contract change (e.g. payload
+      // shape rename). PostToolUse would then read pendingToolArgs and miss
+      // the artifact entirely, so commitKnowledge never fires for this
+      // Write/Edit and the artifact->concept edges never get sealed. Surface
+      // it instead so a future contract drift is detectable.
+      log.warn(`[pre-tool-use] ${toolName} missing tool_use_id — artifact tracking skipped for ${String(toolInput.file_path).slice(0, 120)}`);
     }
   }
 
@@ -111,31 +121,91 @@ export async function handlePreToolUse(
     const description = String(toolInput?.description ?? "").slice(0, 200);
     const prompt = String(toolInput?.prompt ?? "");
 
-    if (toolUseId) {
+    if (!toolUseId) {
+      // Subagent spawn with no correlation key — we can write the row but
+      // SubagentStop will have nothing to match against, and the row will
+      // get orphaned. Surface the contract drift instead of silently
+      // dropping the spawn capture.
+      log.warn(`[pre-tool-use] ${toolName} spawn missing tool_use_id — subagent row will not be created (orphan stop guaranteed at SubagentStop). subagent_type=${subagentType}`);
+    } else {
       (async () => {
         try {
-          const rows = await state.store.queryFirst<{ id: string }>(
-            `CREATE subagent CONTENT $data RETURN id`,
-            {
-              data: {
-                parent_session_id: session.sessionId,
-                agent_type: subagentType,
-                description,
-                prompt_preview: prompt.slice(0, 500),
-                prompt_length: prompt.length,
-                outcome: "in_progress",
-                correlation_key: toolUseId,
-                tool_call_count: 0,
+          // Dedup: PreToolUse can fire twice for the same tool_use_id on hook
+          // timeout retries. Skip if a row already exists for this correlation
+          // key. Agent 1 is adding a UNIQUE index on subagent.correlation_key
+          // that will reject a duplicate at the DB layer; this avoids even
+          // attempting the CREATE.
+          const existing = await state.store.queryFirst<{ id: string }>(
+            `SELECT id FROM subagent WHERE correlation_key = $cid LIMIT 1`,
+            { cid: toolUseId },
+          ).catch(() => []);
+          if (existing[0]?.id) {
+            const existingId = String(existing[0].id);
+            session._activeSubagents.set(toolUseId, existingId);
+            log.debug(`[subagent] duplicate spawn skipped: corr=${toolUseId.slice(0, 8)} existing=${existingId.slice(-8)}`);
+            return;
+          }
+
+          let rows: { id: string }[] = [];
+          try {
+            rows = await state.store.queryFirst<{ id: string }>(
+              `CREATE subagent CONTENT $data RETURN id`,
+              {
+                data: {
+                  parent_session_id: session.sessionId,
+                  agent_type: subagentType,
+                  description,
+                  prompt_preview: prompt.slice(0, 500),
+                  prompt_length: prompt.length,
+                  outcome: "in_progress",
+                  correlation_key: toolUseId,
+                  // Placeholder run_id = correlation_key. The new schema UNIQUE
+                  // on subagent.run_id collides when multiple rows have
+                  // run_id=NONE (NULLs are NOT distinct in the index). Stamping
+                  // the correlation_key here keeps the constraint happy at
+                  // spawn time; SubagentStop will UPDATE run_id with the real
+                  // value if one shows up in the stop event, otherwise the
+                  // placeholder stays — which is fine, because correlation_key
+                  // is already globally unique per spawn.
+                  run_id: toolUseId,
+                  tool_call_count: 0,
+                },
               },
-            },
-          );
+            );
+          } catch (createErr) {
+            // TOCTOU: between our existence-check SELECT and the CREATE, a
+            // sibling PreToolUse can race in and write the same correlation_key.
+            // The UNIQUE index then rejects ours, which is exactly the protection
+            // the index was designed for. Re-SELECT to grab the sibling's id so
+            // we can still stash it for SubagentStop, but stay on log.debug so
+            // the warn channel doesn't fill with every successful dedup race.
+            if (isUniqueViolation(createErr)) {
+              const sibling = await state.store.queryFirst<{ id: string }>(
+                `SELECT id FROM subagent WHERE correlation_key = $cid LIMIT 1`,
+                { cid: toolUseId },
+              ).catch(() => []);
+              if (sibling[0]?.id) {
+                session._activeSubagents.set(toolUseId, String(sibling[0].id));
+                log.debug(`[subagent] spawn rejected by UNIQUE (sibling won race): corr=${toolUseId.slice(0, 8)} sibling=${String(sibling[0].id).slice(-8)}`);
+              } else {
+                log.debug(`[subagent] spawn rejected by UNIQUE but no sibling row found: corr=${toolUseId.slice(0, 8)}`);
+              }
+              return;
+            }
+            throw createErr;
+          }
           const subagentId = String(rows[0]?.id ?? "");
           if (subagentId) {
             session._activeSubagents.set(toolUseId, subagentId);
             // spawned_from: subagent → parent session
+            // spawned:      parent session → subagent (forward edge — was unwired pre-0.7.70,
+            //               which left the spawned table empty graph-wide despite having ~thousands
+            //               of subagent rows. Both edges are written so traversal works either way.)
             if (session.surrealSessionId) {
               await state.store.relate(subagentId, "spawned_from", session.surrealSessionId)
                 .catch(e => swallow("preToolUse:subagent:spawned_from", e));
+              await state.store.relate(session.surrealSessionId, "spawned", subagentId)
+                .catch(e => swallow("preToolUse:subagent:spawned", e));
             }
             // derived_from: subagent → task
             if (session.taskId) {

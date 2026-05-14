@@ -16,6 +16,7 @@ import type { SurrealStore } from "./surreal.js";
 import type { SessionState } from "./state.js";
 import { getRecentUtilizationAvg } from "./retrieval-quality.js";
 import { swallow } from "./errors.js";
+import { clamp } from "./math.js";
 
 // Detects inputs that reference memory/history
 const MEMORY_REFERENCE_RE = /\b(we|our|yesterday|earlier|before|last time|prior|remember|recall|previous|discussed|decided|talked about|worked on|you said|you mentioned)\b/i;
@@ -170,6 +171,7 @@ export async function preflight(
   session: SessionState,
   embeddings: EmbeddingService,
   retrievalBudgetTokens = 42000,
+  store?: SurrealStore,
 ): Promise<PreflightResult> {
   const start = performance.now();
   const orch = getOrchState(session);
@@ -259,11 +261,11 @@ export async function preflight(
   // Adaptive token budget from rolling retrieval quality (cached, refreshed every 10 turns)
   if (!config.skipRetrieval) {
     if (orch.cachedUtilAvg === null || orch.turnIndex - orch.utilAvgTurn >= 10) {
-      orch.cachedUtilAvg = await getRecentUtilizationAvg(session.sessionId, 10).catch(() => null);
+      orch.cachedUtilAvg = await getRecentUtilizationAvg(session.sessionId, 10, store).catch(() => null);
       orch.utilAvgTurn = orch.turnIndex;
     }
     if (orch.cachedUtilAvg !== null) {
-      const scale = Math.max(0.5, Math.min(1.3, 0.5 + orch.cachedUtilAvg * 0.8));
+      const scale = clamp(0.5 + orch.cachedUtilAvg * 0.8, 0.5, 1.3);
       config.tokenBudget = Math.round(config.tokenBudget * scale);
     }
   }
@@ -304,7 +306,13 @@ export function recordToolCall(session: SessionState, name: string, args?: strin
   }
 }
 
-/** Record metrics to SurrealDB (non-blocking). */
+/** Record metrics to SurrealDB (non-blocking).
+ *
+ *  Sections that may be added here in the future (token recording, ACAN
+ *  sample write, retrieval grade write) each get their own try/catch so a
+ *  failure in one section doesn't silently swallow the whole metrics
+ *  pipeline — the previous single-blanket catch would have hidden a metrics
+ *  CREATE failure behind any earlier section's error. */
 export async function postflight(
   input: string,
   result: PreflightResult,
@@ -316,8 +324,34 @@ export async function postflight(
   store: SurrealStore,
 ): Promise<void> {
   const orch = getOrchState(session);
+  if (!store.isAvailable()) return;
+
+  // Section: metrics CREATE — highest priority. A failure here means
+  // orchestrator_metrics rows stop landing entirely, blinding observability
+  // dashboards and feeding null retrieval-budget math on subsequent turns.
+  // Surface loudly so the silent-degradation symptom (empty orchestrator_metrics
+  // table) doesn't pass for "everything's fine."
+  //
+  // Idempotency (Round 9, Option A): Claude Code can re-deliver Stop hook
+  // events, causing postflight() to fire multiple times for the same
+  // (session_id, turn_index). The UNIQUE index `orchm_unique` correctly
+  // rejects duplicates, but the resulting error trips swallow.warn and
+  // pollutes the "metrics pipeline degraded" channel. SELECT-check first
+  // and skip the CREATE if a row already exists. Mirrors the LET/IF
+  // pattern in observability.ts rollupDailyMetrics(). Race window between
+  // SELECT and CREATE remains protected by the UNIQUE index, so a true
+  // concurrent double-fire still surfaces via the existing swallow.warn.
   try {
-    if (!store.isAvailable()) return;
+    const existing = await store.queryFirst<{ id: string }>(
+      `SELECT id FROM orchestrator_metrics
+         WHERE session_id = $session_id AND turn_index = $turn_index
+         LIMIT 1`,
+      { session_id: session.sessionId, turn_index: orch.turnIndex },
+    );
+    if (existing.length > 0) {
+      // Re-fire of Stop hook for an already-recorded turn. No-op.
+      return;
+    }
     await store.queryExec(`CREATE orchestrator_metrics CONTENT $data`, {
       data: {
         session_id: session.sessionId,
@@ -342,7 +376,7 @@ export async function postflight(
       },
     });
   } catch (e) {
-    swallow("orchestrator:postflight", e);
+    swallow.warn("orchestrator:postflight:metricsCreate — metrics pipeline silently degraded", e);
   }
 }
 

@@ -1,36 +1,10 @@
 import { hasSoul } from "./soul.js";
 import { swallow } from "./errors.js";
 import { log } from "./log.js";
-// Per-process Set of surreal session record ids already processed this MCP boot.
-// Replaces the prior once-per-process guard so new orphans accumulating during
-// a long-running MCP get caught on each SessionStart, but already-queued ones
-// are never re-queued.
-const processedKey = Symbol.for("kongcode.deferredCleanup.processed");
-const _g = globalThis;
-function processed() {
-    let s = _g[processedKey];
-    if (!s) {
-        s = new Set();
-        _g[processedKey] = s;
-    }
-    return s;
-}
 const ORPHAN_LIMIT = 20;
 export async function runDeferredCleanup(store) {
     if (!store.isAvailable())
         return 0;
-    // Backfill kc_session_id on pre-0.5.5 session rows by walking part_of edges
-    // to existing turn records. Without this, orphans created before 0.5.5 would
-    // only get the unconditional causal_graduate/soul_evolve pair queued — their
-    // transcripts would stay unrecoverable.
-    try {
-        const backfilled = await store.backfillOrphanKcSessionIds(50);
-        if (backfilled > 0)
-            log.info(`[deferred] backfilled kc_session_id on ${backfilled} pre-0.5.5 orphan sessions`);
-    }
-    catch (e) {
-        swallow.warn("deferredCleanup:backfill", e);
-    }
     let orphans;
     try {
         orphans = await store.getOrphanedSessions(ORPHAN_LIMIT);
@@ -41,20 +15,28 @@ export async function runDeferredCleanup(store) {
     }
     if (orphans.length === 0)
         return 0;
-    const seen = processed();
     let queued = 0;
     const soulExists = await hasSoul(store).catch(() => false);
     for (const session of orphans) {
-        if (seen.has(session.id))
+        // Atomic claim — only one worker (any process, any handler) wins per
+        // session. If another worker already claimed it, skip silently.
+        const sessionIdStr = String(session.id);
+        let won = false;
+        try {
+            won = await store.claimSessionForCleanup(sessionIdStr);
+        }
+        catch (e) {
+            swallow.warn("deferredCleanup:claim", e);
             continue;
-        seen.add(session.id);
+        }
+        if (!won)
+            continue;
         try {
             const kcSid = session.kc_session_id ?? "";
             const turnCount = kcSid ? await store.countTurnsForSession(kcSid).catch(() => 0) : 0;
             const ops = [];
             const queue = (data) => {
-                ops.push(store.queryExec(`CREATE pending_work CONTENT $data`, { data })
-                    .catch(e => swallow("deferred:queue", e)));
+                ops.push(store.queryExec(`CREATE pending_work CONTENT $data`, { data }));
             };
             // Coalesced extraction — mirrors SessionEnd's coalesced approach.
             // If we don't have a kc_session_id (older row), skip to unconditional pair.
@@ -62,7 +44,7 @@ export async function runDeferredCleanup(store) {
                 queue({
                     work_type: "coalesced_extraction",
                     session_id: kcSid,
-                    surreal_session_id: session.id,
+                    surreal_session_id: sessionIdStr,
                     payload: {
                         turn_count: turnCount,
                         include_handoff: true,
@@ -75,15 +57,59 @@ export async function runDeferredCleanup(store) {
             // Unconditional pair — no transcript needed; both auto-skip-complete
             // when nothing is eligible. Queueing them here gives orphan sessions
             // the same chance at causal graduation / soul evolution as graceful ones.
-            queue({ work_type: "causal_graduate", session_id: kcSid || session.id, priority: 7 });
-            queue({ work_type: soulExists ? "soul_evolve" : "soul_generate", session_id: kcSid || session.id, priority: 9 });
-            await Promise.allSettled(ops);
-            await store.markSessionEnded(session.id).catch(e => swallow("deferred:markEnded", e));
-            log.info(`[deferred] queued ${ops.length} items for orphan ${session.id} (turns=${turnCount})`);
-            queued += ops.length;
+            queue({ work_type: "causal_graduate", session_id: kcSid || sessionIdStr, priority: 7 });
+            queue({ work_type: soulExists ? "soul_evolve" : "soul_generate", session_id: kcSid || sessionIdStr, priority: 9 });
+            // Surface CREATE failures (e.g. UNIQUE-index rejection from a duplicate
+            // work_type+session_id) so we can roll back the claim and let next boot
+            // retry. Promise.allSettled would silently swallow them.
+            const results = await Promise.allSettled(ops);
+            const failures = results.filter(r => r.status === "rejected");
+            if (failures.length > 0) {
+                for (const f of failures) {
+                    if (f.status === "rejected")
+                        swallow.warn("deferred:queue", f.reason);
+                }
+                // Partial-success is acceptable here only if at least one row landed;
+                // total failure (e.g. all dupes because a sibling already queued them)
+                // means we wrongly hold the claim. Roll it back so the next boot's
+                // SessionStart pass can re-attempt — but only if EVERY CREATE failed.
+                // If some landed, treat the claim as honored: the survivors will run.
+                if (failures.length === results.length) {
+                    await store.releaseSessionClaim(sessionIdStr).catch(e => swallow("deferred:release", e));
+                    log.info(`[deferred] all ${ops.length} CREATEs rejected for ${sessionIdStr}; released claim`);
+                    continue;
+                }
+            }
+            // Claim already set cleanup_completed = true + ended_at; no separate
+            // markSessionEnded call needed (it would just be a redundant UPDATE).
+            log.info(`[deferred] queued ${ops.length - failures.length}/${ops.length} items for orphan ${sessionIdStr} (turns=${turnCount})`);
+            queued += ops.length - failures.length;
+            // Clear the cleanup_claim_token now that the work is queued. The token
+            // is only useful between claim and completion; leaving it on the row
+            // makes every successful cleanup add a UUID-sized field that never gets
+            // reused, accumulating per-session forever. clearSessionClaim leaves
+            // cleanup_completed = true so the session stays "done" — we just drop
+            // the token. Silent swallow.warn on failure: a leftover token doesn't
+            // break correctness, just leaves a stale field.
+            // Retry-once with 1s backoff: clearSessionClaim is a non-critical
+            // UPDATE (leftover token is just a stale field, not a correctness
+            // bug) but a transient SurrealDB hiccup shouldn't leak the token
+            // permanently. One quick retry catches most network/lock blips;
+            // swallow.warn only after both attempts fail.
+            await store.clearSessionClaim(sessionIdStr).catch(async (e1) => {
+                await new Promise(r => setTimeout(r, 1000));
+                await store.clearSessionClaim(sessionIdStr).catch(e2 => {
+                    // swallow.warn does String(err) for non-Error → "[object Object]".
+                    // Build a synthetic Error so both attempts surface in the warn line.
+                    const combined = new Error(`first=${e1 instanceof Error ? e1.message : String(e1)} | retry=${e2 instanceof Error ? e2.message : String(e2)}`);
+                    swallow.warn("deferred:clearSessionClaim", combined);
+                });
+            });
         }
         catch (e) {
             swallow.warn("deferredCleanup:session", e);
+            // Unexpected error post-claim — release so we retry next boot.
+            await store.releaseSessionClaim(sessionIdStr).catch(rel => swallow("deferred:release", rel));
         }
     }
     return queued;

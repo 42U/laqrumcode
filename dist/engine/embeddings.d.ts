@@ -47,6 +47,19 @@ export declare class EmbeddingService {
     embed(text: string): Promise<number[]>;
     embedBatch(texts: string[]): Promise<number[][]>;
     isAvailable(): boolean;
-    resetCircuitBreaker(): void;
     dispose(): Promise<void>;
 }
+/**
+ * Runtime probe for the embedding service — distinguishes "down" (init failed
+ * or never ran), "degraded" (live but returns empty / errors on a one-token
+ * embed), and "ok" (live and returning real vectors). Used by introspect and
+ * memory-health to surface the actual init failure when `isAvailable=false`
+ * rather than just reporting the flag.
+ *
+ * The shape is intentionally minimal — callers map this into their richer
+ * report shapes locally so the two consumers can keep their own field names.
+ */
+export declare function probeEmbeddingService(embeddings: unknown): Promise<{
+    status: "ok" | "degraded" | "down";
+    message: string;
+}>;

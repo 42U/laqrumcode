@@ -12,6 +12,42 @@ const TIER0_MAX_PER_SESSION = 5;
 const TIER0_MAX_TOTAL = 25;
 const tier0WritesPerSession = new Map<string, number>();
 
+/**
+ * Per-state guard so we wire the session-removed cleanup hook exactly once
+ * per {@link GlobalPluginState} instance. A WeakSet (not a boolean) so that
+ * if the module survives a re-import while a new state is constructed in
+ * tests, each fresh state still gets its callback registered; and so old
+ * state instances are eligible for GC without leaking entries here.
+ *
+ * The registered callback deletes the per-session entry from
+ * {@link tier0WritesPerSession} on SessionEnd / stale-session reaping, so
+ * Claude Code's `sessionId` reuse across SessionEnd→SessionStart cycles no
+ * longer bleeds the prior cycle's write count into a fresh session (which
+ * was silently capping new tier-0 writes).
+ *
+ * Known dev-only limitation: under hot-reload (vite-node, ts-node-dev, etc.)
+ * this module can be re-imported while the same {@link GlobalPluginState}
+ * instance persists. The freshly-loaded module gets a new (empty)
+ * `hookedStates` and a new (empty) `tier0WritesPerSession`, so the same
+ * state gets a SECOND `onSessionRemoved` registration pointing at the new
+ * map. Both registrations fire on session removal; the old registration's
+ * `.delete()` against the old map is a no-op (the map is unreachable from
+ * the new module's code) so the only cost is one wasted callback firing
+ * per session-end per reload generation. This does not affect production —
+ * the daemon does not hot-reload — and not in tests, which fully discard
+ * the state between runs. We accept this rather than wire a deregister
+ * disposer through to module unload, which has no reliable hook in Node.
+ */
+const hookedStates = new WeakSet<GlobalPluginState>();
+
+function ensureSessionRemovedHook(state: GlobalPluginState): void {
+  if (hookedStates.has(state)) return;
+  hookedStates.add(state);
+  state.onSessionRemoved((sessionId) => {
+    tier0WritesPerSession.delete(sessionId);
+  });
+}
+
 const coreMemorySchema = Type.Object({
   action: Type.Union([
     Type.Literal("list"),
@@ -28,6 +64,10 @@ const coreMemorySchema = Type.Object({
 });
 
 export function createCoreMemoryToolDef(state: GlobalPluginState, session: SessionState) {
+  // Idempotent — registers the session-removed cleanup callback exactly
+  // once per GlobalPluginState instance. Safe to call on every toolDef
+  // construction (and the factory IS called per session/toolset build).
+  ensureSessionRemovedHook(state);
   return {
     name: "core_memory",
     label: "Core Memory",

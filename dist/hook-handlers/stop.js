@@ -11,6 +11,7 @@ import { swallow } from "../engine/errors.js";
 import { log } from "../engine/log.js";
 import { readLatestAssistantText, readTurnTokenUsage } from "../engine/transcript-reader.js";
 import { rollupDailyMetrics, pruneRawMetrics } from "../engine/observability.js";
+import { todayUtc } from "../daemon/auto-drain.js";
 export async function handleStop(state, payload) {
     const sessionId = payload.session_id ?? "default";
     const session = state.getSession(sessionId);
@@ -55,7 +56,7 @@ export async function handleStop(state, payload) {
     // Evaluate retrieval quality for ACAN training
     if (store.isAvailable() && session.lastAssistantTurnId) {
         try {
-            await evaluateRetrieval(session.lastAssistantTurnId, session.lastAssistantText, store);
+            await evaluateRetrieval(session.sessionId, session.lastAssistantTurnId, session.lastAssistantText, store);
         }
         catch (e) {
             swallow("stop:retrievalQuality", e);
@@ -93,7 +94,7 @@ export async function handleStop(state, payload) {
     // when the day hasn't changed (one string compare); the actual rollup
     // and prune fire at most once per day per running MCP.
     if (store.isAvailable()) {
-        const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD UTC
+        const today = todayUtc();
         if (state.lastRollupDay !== today) {
             const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
             rollupDailyMetrics(store, yesterday)

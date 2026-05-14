@@ -1,7 +1,6 @@
 /**
  * Shared types for the memory daemon system.
  */
-import { type Static } from "@sinclair/typebox";
 export interface TurnData {
     role: string;
     text: string;
@@ -65,7 +64,6 @@ export declare const ExtractionResultSchema: import("@sinclair/typebox").TObject
     reflection: import("@sinclair/typebox").TOptional<import("@sinclair/typebox").TString>;
     rules_compliance: import("@sinclair/typebox").TOptional<import("@sinclair/typebox").TNumber>;
 }>;
-export type ExtractionResult = Static<typeof ExtractionResultSchema>;
 export interface ValidationResult {
     data: Record<string, unknown>;
     errors: string[];

@@ -70,7 +70,10 @@ export function isProtectedConfigFile(filePath: string): boolean {
   return PROTECTED_BASENAMES.has(base);
 }
 
-/** Test-only: clear bypass cache and let a new env take effect. */
+/**
+ * Test-only: clear bypass cache and let a new env take effect.
+ * @internal
+ */
 export function _resetConfigProtectionCacheForTests(): void {
   bypassActive = null;
 }

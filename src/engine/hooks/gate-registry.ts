@@ -252,9 +252,12 @@ function ensureInitialized(): void {
 
 // ── Test helpers ──────────────────────────────────────────────────────
 
-/** Reset to empty. If skipAutoInit is true, ensureInitialized() becomes
- *  a no-op — use this when tests register gates manually and don't want
- *  builtins auto-loaded. */
+/**
+ * Reset to empty. If skipAutoInit is true, ensureInitialized() becomes
+ * a no-op — use this when tests register gates manually and don't want
+ * builtins auto-loaded.
+ * @internal
+ */
 export function _resetRegistryForTests(skipAutoInit = false): void {
   gates.length = 0;
   initialized = skipAutoInit;

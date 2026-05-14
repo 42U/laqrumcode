@@ -169,7 +169,7 @@ async function commitConcept(
   if (data.linkHierarchy !== false) {
     const before = edges;
     try {
-      await linkConceptHierarchy(conceptId, data.name, store, embeddings, logTag);
+      await linkConceptHierarchy(conceptId, data.name, store, embeddings, logTag, embedding);
       // linkConceptHierarchy writes edges internally; we don't get a count back,
       // so we approximate by marking "hierarchy attempted" — +1 for observability.
       edges += 1;

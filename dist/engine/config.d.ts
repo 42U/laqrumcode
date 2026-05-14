@@ -47,8 +47,6 @@ export interface KongCodeConfig {
     thresholds: ThresholdConfig;
     paths: PathsConfig;
 }
-/** @deprecated Alias for backwards compatibility with engine modules that reference KongBrainConfig. */
-export type KongBrainConfig = KongCodeConfig;
 /**
  * Parse config from environment variables and optional JSON config,
  * with sensible defaults.

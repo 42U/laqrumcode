@@ -5,24 +5,26 @@
  * based on its own graph data. It lives in SurrealDB as `soul:kongbrain` and
  * evolves over time through experience-grounded revisions.
  *
- * Graduation is a staged process, not a binary gate:
+ * Graduation is a staged process, not a binary gate. There are 8 gates total:
+ * 7 volume thresholds + 1 quality gate (composite ≥ 0.85).
  *
- *   nascent    (0-3/7)  — Too early. Keep building experience.
- *   developing (4/7)    — Some signal. Diagnose weak areas, guide focus.
- *   emerging   (5/7)    — Volume is there. Quality gate becomes the blocker.
- *   maturing   (6/7)    — Almost there. Final thresholds + quality must pass.
- *   ready      (7/7)    — All thresholds met AND quality score ≥ 0.85.
+ *   nascent    (0-4/8)  — Too early. Keep building experience.
+ *   developing (5/8)    — Some signal. Diagnose weak areas, guide focus.
+ *   emerging   (6/8)    — Volume is there. Quality gate becomes the blocker.
+ *   maturing   (7/8)    — Either 6 volume + quality OR 7 volume - quality short.
+ *   ready      (8/8)    — All 7 volume thresholds met AND quality ≥ 0.85.
  *
  * Quality is computed from actual performance signals: retrieval utilization,
  * skill success rates, reflection severity distribution, and tool failure rates.
- * An agent that meets all 7 thresholds but has terrible quality scores will NOT
- * graduate — it needs to improve before self-authoring makes sense.
+ * An agent that meets all 7 volume thresholds but has terrible quality scores
+ * will NOT graduate — it needs to improve before self-authoring makes sense.
  *
  * Ported from kongbrain — takes SurrealStore/EmbeddingService as params.
  */
 
 import type { SurrealStore } from "./surreal.js";
 import { swallow } from "./errors.js";
+import { parseDatetimeMs } from "./observability.js";
 
 // ── Types ──
 
@@ -93,8 +95,12 @@ const THRESHOLDS: GraduationSignals = {
   spanDays: 3,
 };
 
-/** Quality score must be at or above this to graduate even with 7/7 volume. */
+/** Quality score must be at or above this to graduate. This is the 8th gate
+ *  (the only non-volume one). 7 volume + 1 quality = 8 total. */
 const QUALITY_GATE = 0.85;
+
+/** Total number of gates (7 volume + 1 quality). */
+const TOTAL_GATES = Object.keys(THRESHOLDS).length + 1;
 
 // ── Signal Collection ──
 
@@ -119,7 +125,10 @@ async function getGraduationSignals(store: SurrealStore): Promise<GraduationSign
     let spanDays = 0;
     const earliest = (span as { earliest: string }[])[0]?.earliest;
     if (earliest) {
-      spanDays = Math.floor((Date.now() - new Date(earliest).getTime()) / (1000 * 60 * 60 * 24));
+      const ms = parseDatetimeMs(earliest);
+      if (ms != null) {
+        spanDays = Math.floor((Date.now() - ms) / (1000 * 60 * 60 * 24));
+      }
     }
 
     return {
@@ -276,12 +285,29 @@ export function computeQualityScore(q: QualitySignals): number {
 
 // ── Stage Classification ──
 
-function classifyStage(metCount: number, qualityScore: number): MaturityStage {
-  const total = Object.keys(THRESHOLDS).length;
-  if (metCount >= total && qualityScore >= QUALITY_GATE) return "ready";
-  if (metCount >= 6) return "maturing";
-  if (metCount >= 5) return "emerging";
-  if (metCount >= 4) return "developing";
+/**
+ * Compute total gates met, treating quality (composite ≥ 0.85) as the 8th gate.
+ * 7 volume gates + 1 quality gate = 8 total.
+ */
+function computeTotalMet(volumeMetCount: number, qualityScore: number): number {
+  return volumeMetCount + (qualityScore >= QUALITY_GATE ? 1 : 0);
+}
+
+/**
+ * Classify maturity stage based on total gates met (out of 8).
+ *
+ *   ready      — 8/8: all 7 volume thresholds met AND quality ≥ 0.85.
+ *   maturing   — 7/8: either 6 volume + quality OR 7 volume - quality short.
+ *   emerging   — 6/8.
+ *   developing — 5/8.
+ *   nascent    — < 5/8.
+ */
+function classifyStage(volumeMetCount: number, qualityScore: number): MaturityStage {
+  const total = computeTotalMet(volumeMetCount, qualityScore);
+  if (total >= 8) return "ready";
+  if (total >= 7) return "maturing";
+  if (total >= 6) return "emerging";
+  if (total >= 5) return "developing";
   return "nascent";
 }
 
@@ -391,6 +417,11 @@ function getSuggestion(key: keyof GraduationSignals, current: number, threshold:
 
 /**
  * Check graduation readiness with full stage classification and quality analysis.
+ *
+ * The `met` / `unmet` arrays cover all 8 gates: the 7 volume thresholds plus
+ * the 1 quality gate (composite ≥ 0.85). `met.length / 8` is the natural
+ * fraction-met display. `volumeScore` remains volume-only (out of 7) so callers
+ * that want the volume-vs-quality split can still see them separately.
  */
 export async function checkGraduation(store: SurrealStore): Promise<GraduationReport> {
   const signals = await getGraduationSignals(store);
@@ -400,6 +431,7 @@ export async function checkGraduation(store: SurrealStore): Promise<GraduationRe
   const met: string[] = [];
   const unmet: string[] = [];
 
+  // 7 volume gates
   for (const key of Object.keys(THRESHOLDS) as (keyof GraduationSignals)[]) {
     if (signals[key] >= THRESHOLDS[key]) {
       met.push(`${key}: ${signals[key]}/${THRESHOLDS[key]}`);
@@ -408,8 +440,17 @@ export async function checkGraduation(store: SurrealStore): Promise<GraduationRe
     }
   }
 
-  const volumeScore = met.length / Object.keys(THRESHOLDS).length;
-  const stage = classifyStage(met.length, qualityScore);
+  const volumeMetCount = met.length;
+  const volumeScore = volumeMetCount / Object.keys(THRESHOLDS).length;
+
+  // 8th gate: quality (composite ≥ 0.85)
+  if (qualityScore >= QUALITY_GATE) {
+    met.push(`quality: ${qualityScore.toFixed(2)} >= ${QUALITY_GATE}`);
+  } else {
+    unmet.push(`quality: ${qualityScore.toFixed(2)} < ${QUALITY_GATE}`);
+  }
+
+  const stage = classifyStage(volumeMetCount, qualityScore);
   const ready = stage === "ready";
   const diagnostics = buildDiagnostics(signals, quality, qualityScore, stage);
 
@@ -563,9 +604,8 @@ export function formatGraduationReport(report: GraduationReport): string {
   lines.push(stageDesc[report.stage]);
   lines.push("");
 
-  // Volume
-  const thresholdCount = Object.keys(THRESHOLDS).length;
-  lines.push(`**Volume**: ${report.met.length}/${thresholdCount} thresholds met (${(report.volumeScore * 100).toFixed(0)}%)`);
+  // Gates summary — 8 total (7 volume + 1 quality)
+  lines.push(`**Gates**: ${report.met.length}/${TOTAL_GATES} met (volume ${(report.volumeScore * 100).toFixed(0)}%)`);
   if (report.met.length > 0) lines.push(`  Met: ${report.met.join(", ")}`);
   if (report.unmet.length > 0) lines.push(`  Unmet: ${report.unmet.join(", ")}`);
   lines.push("");

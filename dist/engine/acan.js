@@ -21,6 +21,16 @@ let _active = false;
 // can detect a weights file that's been rewritten by a sibling MCP process.
 let _weightsDir = undefined;
 let _loadedMtime = 0;
+// Mutex guarding maybeReloadWeights against concurrent invocations.
+// scoreWithACAN is called once per retrieval; under burst load (multiple
+// turns racing through retrieval, or a stop hook firing while preflight is
+// in flight), two callers could both observe `mtime > _loadedMtime` and
+// both re-enter loadWeights(). With this mutex, the second caller sees an
+// in-flight reload, awaits its completion (in a fire-and-forget chain so
+// scoreWithACAN's sync signature is preserved), and exits without
+// re-reading. Cleared in a try/finally so a thrown error doesn't strand
+// future reloads.
+let _reloading = null;
 const ATTN_DIM = 64;
 const EMBED_DIM = 1024;
 const FEATURE_COUNT = 7;
@@ -73,6 +83,16 @@ function acquireTrainingLock(lockPath) {
     catch { /* raced — lock vanished; fall through */ }
     return null;
 }
+/**
+ * Legacy default. Pre-0.x ACAN weights were written to ~/.kongbrain/acan_weights.json
+ * back when this code lived in the kongbrain plugin. Existing user systems have
+ * ~2.7MB of trained weights at that path that we must not orphan.
+ *
+ * New code paths should pass a `weightsDir` argument (typically
+ * `state.config.paths.cacheDir`, i.e. ~/.kongcode/cache). The legacy default
+ * is kept here for un-passed callers so existing installs keep working until
+ * the one-time forward-migration in maintenance.ts runs.
+ */
 function getKongDir() {
     const dir = join(homedir(), ".kongbrain");
     if (!existsSync(dir))
@@ -163,22 +183,52 @@ export function isACANActive() {
  * Hot-reload weights if the file has been rewritten since we last loaded.
  * Lets sibling MCP processes' retrains take effect here without a restart.
  * Cheap when nothing's changed (one statSync per score call).
+ *
+ * Concurrent invocations: under burst load two scoring calls could both
+ * observe `mtime > _loadedMtime` and both invoke initACAN(). The
+ * `_reloading` Promise mutex serializes them — if a reload is already in
+ * flight, the second caller skips re-reading entirely (the first call's
+ * results will be visible to the next score). The mutex is cleared in a
+ * finally so a transient FS error doesn't strand future reloads.
  */
 function maybeReloadWeights() {
     if (!_weights)
         return;
+    if (_reloading)
+        return; // mutex held — first caller is responsible
     const dir = _weightsDir ?? getKongDir();
     const path = join(dir, WEIGHTS_FILENAME);
+    // Track whether THIS invocation acquired the mutex. The outer catch must
+    // only clear `_reloading` if we set it here — otherwise a transient FS
+    // error from a non-acquiring path would strand a legitimate in-flight
+    // reload owned by an earlier caller.
+    let acquiredReloading = false;
     try {
         if (!existsSync(path))
             return;
         const mtime = statSync(path).mtimeMs;
         if (mtime > _loadedMtime) {
-            initACAN(_weightsDir);
-            log.info(`[acan] hot-reloaded weights (sibling MCP retrained)`);
+            _reloading = (async () => {
+                try {
+                    initACAN(_weightsDir);
+                    log.info(`[acan] hot-reloaded weights (sibling MCP retrained)`);
+                }
+                finally {
+                    _reloading = null;
+                }
+            })();
+            acquiredReloading = true;
+            // Detach: scoreWithACAN's signature stays sync. The current score
+            // call uses the prior weights; subsequent calls pick up the new
+            // weights once the mutex clears.
+            _reloading.catch(() => { });
         }
     }
-    catch { /* non-fatal, keep current weights */ }
+    catch {
+        /* non-fatal, keep current weights */
+        if (acquiredReloading)
+            _reloading = null;
+    }
 }
 // ── Linear algebra ──
 function dot(a, b) {

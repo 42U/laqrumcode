@@ -208,16 +208,107 @@ export function resetAnomalyCache() {
     _anomalyCacheRaw = [];
     _anomalyCacheAt = 0;
 }
+const CACHE_WRITE_WINDOW_MS = 10 * 60_000;
+const _cacheWriteOutcomes = [];
+const DB_AVAILABILITY_WINDOW_MS = 60_000;
+const _dbAvailabilityChecks = [];
+let _lastEmbeddingError = null;
+const EMBEDDING_ERROR_FRESH_MS = 5 * 60_000;
+let _lastHeapUsed = 0;
+/**
+ * Record the outcome of a write attempt under `~/.kongcode/cache/`. Call
+ * sites: bootstrap.ts (auth token, daemon.pid), auto-drain.ts (spending
+ * ledger), any other code path that persists state into the cache dir.
+ * Each call appends an outcome to a 10-minute sliding window.
+ */
+export function recordCacheWriteOutcome(ok) {
+    const now = Date.now();
+    _cacheWriteOutcomes.push({ ts: now, ok });
+    while (_cacheWriteOutcomes.length > 0 && _cacheWriteOutcomes[0].ts < now - CACHE_WRITE_WINDOW_MS) {
+        _cacheWriteOutcomes.shift();
+    }
+}
+export function resetCacheWriteOutcomes() { _cacheWriteOutcomes.length = 0; }
+export function getCacheWriteFailureStats() {
+    const now = Date.now();
+    const recent = _cacheWriteOutcomes.filter(o => o.ts >= now - CACHE_WRITE_WINDOW_MS);
+    const failures = recent.filter(o => !o.ok).length;
+    return { total: recent.length, failures, rate: recent.length > 0 ? failures / recent.length : 0 };
+}
+/**
+ * Record an isAvailable() probe outcome. The detector flips critical only
+ * after 5 consecutive failures within a 60s window — single transient
+ * disconnects should not page the operator. Call sites that already hold
+ * a store reference (orchestrator pre-flight, maintenance loop, hook
+ * handlers) should call this each time they consult availability.
+ */
+export function recordDbAvailability(ok) {
+    const now = Date.now();
+    _dbAvailabilityChecks.push({ ts: now, ok });
+    while (_dbAvailabilityChecks.length > 0 && _dbAvailabilityChecks[0].ts < now - DB_AVAILABILITY_WINDOW_MS) {
+        _dbAvailabilityChecks.shift();
+    }
+}
+export function resetDbAvailability() { _dbAvailabilityChecks.length = 0; }
+/**
+ * Contract for the embedding-service-down detector. Until EmbeddingService
+ * exposes a public `lastError` getter, call sites that catch an embedding
+ * error should forward it here. The detector treats the error as "fresh"
+ * for 5 minutes; if a subsequent embed succeeds, callers should
+ * `clearEmbeddingError()` to drop the flag.
+ */
+export function recordEmbeddingError(err) {
+    const message = err instanceof Error ? err.message : String(err);
+    _lastEmbeddingError = { ts: Date.now(), message };
+}
+export function clearEmbeddingError() { _lastEmbeddingError = null; }
+/**
+ * Memory-pressure breadcrumb for inclusion in meta.health responses.
+ * Returns heap and RSS in MB plus the delta since the last call. Callers
+ * (introspect, health endpoint, anomaly format) get a stable shape without
+ * pulling `process` directly.
+ */
+export function getMemoryBreadcrumb() {
+    const m = process.memoryUsage();
+    const heapUsedMB = Math.round((m.heapUsed / 1024 / 1024) * 10) / 10;
+    const rssMB = Math.round((m.rss / 1024 / 1024) * 10) / 10;
+    const externalMB = Math.round((m.external / 1024 / 1024) * 10) / 10;
+    const heapDeltaMB = _lastHeapUsed === 0 ? 0 : Math.round((heapUsedMB - _lastHeapUsed) * 10) / 10;
+    _lastHeapUsed = heapUsedMB;
+    return { heapUsedMB, rssMB, heapDeltaMB, externalMB };
+}
 export async function detectAnomalies(store, cooldown) {
-    if (!store.isAvailable())
-        return [];
+    // Record availability for the db_unreachable detector before the
+    // early-exit. The detector reads from the rolling window; if we exit
+    // here without recording, the window never updates.
+    const available = store.isAvailable();
+    recordDbAvailability(available);
+    if (!available) {
+        // Run only the db-unreachable detector — it doesn't need DB access.
+        const f = detectDbUnreachable();
+        if (!f)
+            return [];
+        const now = Date.now();
+        const last = cooldown.lastFired.get(f.code) ?? 0;
+        if (now - last < COOLDOWN_MS[f.severity])
+            return [];
+        cooldown.lastFired.set(f.code, now);
+        return [f];
+    }
     const now = Date.now();
     let rawFlags;
     if (now - _anomalyCacheAt < ANOMALY_CACHE_TTL_MS) {
         rawFlags = _anomalyCacheRaw;
     }
     else {
-        const detectors = [
+        // Detectors that do NOT need DB access (run synchronously, wrapped in
+        // Promise so the Promise.allSettled batch is uniform).
+        const syncDetectors = [
+            detectDbUnreachable,
+            detectCacheWriteFailures,
+            detectEmbeddingServiceDown,
+        ];
+        const dbDetectors = [
             detectContextTransformFailures,
             detectEmbeddingGap,
             detectPendingWorkBuildup,
@@ -225,7 +316,10 @@ export async function detectAnomalies(store, cooldown) {
             detectGraduationReady,
             detectGraduationClose,
         ];
-        const results = await Promise.allSettled(detectors.map(d => d(store)));
+        const results = await Promise.allSettled([
+            ...syncDetectors.map(d => Promise.resolve(d())),
+            ...dbDetectors.map(d => d(store)),
+        ]);
         rawFlags = [];
         for (const r of results) {
             if (r.status === "fulfilled" && r.value)
@@ -264,21 +358,103 @@ async function detectEmbeddingGap(store) {
         suggestion: "Trigger embedding backfill via maintenance, or wait for the daemon to catch up",
     };
 }
-async function detectPendingWorkBuildup(store) {
-    const rows = await store.queryFirst(`SELECT count() AS n, math::min(created_at) AS oldest
-     FROM pending_work WHERE status = "pending" GROUP ALL`);
+/**
+ * Helper: parse a value that should be a datetime into epoch ms, or null
+ * if it's not a finite timestamp.
+ *
+ * Defensive against TWO observed SurrealDB return shapes:
+ *
+ *   1. `math::min(datetime)` returns the JS Number `Infinity` (math min
+ *      identity element). `Infinity` is truthy and `new Date(Infinity)`
+ *      is NaN, so the previous code path emitted "NaNh"/"Infinity" in
+ *      messages. We reject non-finite Numbers explicitly.
+ *
+ *   2. Plain `SELECT created_at` returns a SurrealDB `DateTime` class
+ *      instance — `typeof v === "object"` but `v instanceof Date === false`
+ *      and `Object.keys(v).length === 0`. Its `toString()` and
+ *      `toISOString()` both yield the RFC 3339 string. `new Date(v)`
+ *      passes through Symbol.toPrimitive and produces a valid JS Date,
+ *      so the universal path is: try the Date constructor, accept only
+ *      a finite getTime().
+ */
+export function parseDatetimeMs(v) {
+    if (v == null)
+        return null;
+    if (typeof v === "number")
+        return Number.isFinite(v) ? v : null;
+    // Final fallback: pass anything else (string, SurrealDB DateTime,
+    // native Date, Date-coercible object) through the Date constructor.
+    // String() handles the SurrealDB DateTime case where the object
+    // doesn't auto-coerce on `new Date(obj)` in all driver versions.
+    try {
+        let t = new Date(v).getTime();
+        if (!Number.isFinite(t)) {
+            // Try via String() — SurrealDB DateTime's toString() emits RFC 3339.
+            t = new Date(String(v)).getTime();
+        }
+        return Number.isFinite(t) ? t : null;
+    }
+    catch {
+        return null;
+    }
+}
+/** Format a duration in ms as a human-readable age. Returns "unknown" when input is null. */
+function formatAge(ms, unit = "hours") {
+    if (ms == null || !Number.isFinite(ms))
+        return "unknown";
+    if (unit === "hours") {
+        const h = ms / 3_600_000;
+        if (!Number.isFinite(h))
+            return "unknown";
+        return `${h.toFixed(0)}h`;
+    }
+    const d = ms / 86_400_000;
+    if (!Number.isFinite(d))
+        return "unknown";
+    return `${d.toFixed(1)}d`;
+}
+/**
+ * Fetch the oldest `created_at` for pending_work rows matching `extraWhere`.
+ *
+ * Avoids `math::min(created_at)` because SurrealDB returns `Infinity` (the
+ * math identity) for that aggregate over datetime columns — a JSON-null
+ * masquerading as a non-finite Number that poisons downstream date math.
+ * Instead, do an indexed `ORDER BY created_at ASC LIMIT 1`, which returns
+ * a real datetime string the driver decodes correctly.
+ */
+async function queryOldestPending(store, extraWhere) {
+    const rows = await store.queryFirst(`SELECT created_at FROM pending_work
+     WHERE status = "pending"${extraWhere ? " AND " + extraWhere : ""}
+     ORDER BY created_at ASC LIMIT 1`);
     const r = rows[0];
-    if (!r || r.n < 50)
+    if (!r || r.created_at == null)
+        return { oldestMs: null, oldestRaw: null };
+    const oldestMs = parseDatetimeMs(r.created_at);
+    // SurrealDB DateTime objects stringify to RFC 3339; native Date emits ISO.
+    // Use String() so the evidence field always carries the human-readable
+    // form even when our parser couldn't extract epoch ms.
+    return { oldestMs, oldestRaw: String(r.created_at) };
+}
+async function detectPendingWorkBuildup(store) {
+    // Count + oldest are split into two queries because `math::min(datetime)`
+    // is broken in SurrealDB 3.x — see queryOldestPending() comment.
+    const countRows = await store.queryFirst(`SELECT count() AS n FROM pending_work WHERE status = "pending" GROUP ALL`);
+    const c = countRows[0];
+    if (!c || c.n < 50)
         return null;
-    const oldestMs = r.oldest ? new Date(r.oldest).getTime() : Date.now();
-    const ageH = (Date.now() - oldestMs) / 3_600_000;
-    if (ageH < 24)
+    const { oldestMs, oldestRaw } = await queryOldestPending(store, "");
+    const ageMs = oldestMs != null ? Date.now() - oldestMs : null;
+    // Threshold check: skip if we know oldest and it's <24h. If oldestMs is
+    // null (unknown), still surface the alert — 50+ items pending is itself
+    // a problem worth flagging.
+    if (ageMs != null && ageMs / 3_600_000 < 24)
         return null;
+    const ageStr = formatAge(ageMs, "hours");
     return {
         code: "substrate.pending_work_buildup",
         severity: "warn",
-        message: `pending_work queue has ${r.n} items, oldest is ${ageH.toFixed(0)}h old`,
-        evidence: `count=${r.n}, oldest=${r.oldest}`,
+        message: `pending_work queue has ${c.n} items, oldest is ${ageStr} old`,
+        evidence: `count=${c.n}, oldest=${oldestRaw ?? "unknown"}`,
         suggestion: "Spawn a memory-extractor subagent to drain the queue (background, opus model)",
     };
 }
@@ -289,53 +465,86 @@ async function detectPendingWorkAging(store) {
     // giving ~2 days of actionable runway to drain the queue before data
     // loss. Threshold was chosen to be loud enough to motivate action but
     // not so chatty it nags during normal multi-day idle periods.
-    const rows = await store.queryFirst(`SELECT count() AS n, math::min(created_at) AS oldest
-     FROM pending_work
-     WHERE status = "pending"
-       AND created_at < time::now() - 5d
-     GROUP ALL`);
-    const r = rows[0];
-    if (!r || r.n === 0)
+    //
+    // Like detectPendingWorkBuildup, split count + oldest because
+    // `math::min(datetime)` returns Infinity in SurrealDB 3.x.
+    const countRows = await store.queryFirst(`SELECT count() AS n FROM pending_work
+     WHERE status = "pending" AND created_at < time::now() - 5d GROUP ALL`);
+    const c = countRows[0];
+    if (!c || c.n === 0)
         return null;
-    const oldestMs = r.oldest ? new Date(r.oldest).getTime() : Date.now();
-    const ageDays = ((Date.now() - oldestMs) / 86_400_000).toFixed(1);
-    const daysToPurge = Math.max(0, 7 - parseFloat(ageDays)).toFixed(1);
+    const { oldestMs, oldestRaw } = await queryOldestPending(store, "created_at < time::now() - 5d");
+    const ageMs = oldestMs != null ? Date.now() - oldestMs : null;
+    const ageStr = formatAge(ageMs, "days");
+    const ageDaysNum = ageMs != null ? ageMs / 86_400_000 : null;
+    const daysToPurgeStr = ageDaysNum != null && Number.isFinite(ageDaysNum)
+        ? Math.max(0, 7 - ageDaysNum).toFixed(1) + "d"
+        : "unknown";
     return {
         code: "substrate.pending_work_aging",
         severity: "warn",
-        message: `${r.n} pending_work item${r.n === 1 ? "" : "s"} aging — oldest is ${ageDays}d, will purge in ${daysToPurge}d if not processed`,
-        evidence: `count=${r.n}, oldest=${r.oldest}`,
+        message: `${c.n} pending_work item${c.n === 1 ? "" : "s"} aging — oldest is ${ageStr}, will purge in ${daysToPurgeStr} if not processed`,
+        evidence: `count=${c.n}, oldest=${oldestRaw ?? "unknown"}`,
         suggestion: "Drain the queue NOW before the 7-day purge runs. Spawn a memory-extractor subagent (background, opus model) — call fetch_pending_work in a loop and commit_work_results until empty.",
     };
 }
 async function detectGraduationReady(store) {
     // One-shot announcement when both volume AND quality are green.
-    const { checkGraduation } = await import("./soul.js");
+    // Soul graduation is a ONE-TIME event tied to the existence of soul:kongbrain.
+    // After the soul exists graduation has already happened, so this detector
+    // must suppress — otherwise it keeps celebrating an event from months ago.
+    const { checkGraduation, hasSoul } = await import("./soul.js");
+    if (await hasSoul(store))
+        return null; // already graduated; no further "ready" alert
     const report = await checkGraduation(store);
     if (!report.ready)
         return null;
     return {
         code: "gate.graduation_ready",
         severity: "info",
-        message: `Soul graduation criteria met (volume 7/7, quality ${report.qualityScore.toFixed(2)} ≥ 0.85)`,
+        message: `Soul graduation criteria met (${report.met.length}/8 gates, quality ${report.qualityScore.toFixed(2)} >= 0.85)`,
         evidence: `stage=${report.stage}`,
         suggestion: "Soul graduation fires automatically via the pending_work pipeline at session end",
     };
 }
 async function detectGraduationClose(store) {
-    const { checkGraduation } = await import("./soul.js");
+    // Two modes depending on whether soul already exists:
+    //   - Pre-soul: this is a genuine "you're approaching graduation" alert
+    //     (gate.graduation_close, info severity).
+    //   - Post-soul: graduation already happened. Same metric (quality near
+    //     0.85) now means quality is hovering near the floor that originally
+    //     qualified the agent — i.e. a regression watch, not a graduation
+    //     approach. Reframe under a different code so the language stays
+    //     truthful.
+    const { checkGraduation, hasSoul } = await import("./soul.js");
+    const soulExists = await hasSoul(store);
     const report = await checkGraduation(store);
-    if (report.ready)
-        return null; // already covered by graduation_ready
     if (report.qualityScore < 0.80)
+        return null;
+    if (!soulExists) {
+        if (report.ready)
+            return null; // already covered by graduation_ready
+        const gap = (0.85 - report.qualityScore).toFixed(3);
+        return {
+            code: "gate.graduation_close",
+            severity: "info",
+            message: `Quality score ${report.qualityScore.toFixed(2)} is within ${gap} of graduation gate (0.85)`,
+            evidence: `volumeScore=${report.volumeScore.toFixed(2)}, qualityScore=${report.qualityScore.toFixed(2)}`,
+            suggestion: report.diagnostics[0]?.suggestion,
+        };
+    }
+    // Post-graduation: only fire when quality has slipped under the 0.85 gate.
+    // Hovering above 0.85 is normal steady-state for a graduated agent and
+    // doesn't deserve an alert.
+    if (report.qualityScore >= 0.85)
         return null;
     const gap = (0.85 - report.qualityScore).toFixed(3);
     return {
-        code: "gate.graduation_close",
+        code: "gate.maturity_quality_drift",
         severity: "info",
-        message: `Quality score ${report.qualityScore.toFixed(2)} is within ${gap} of graduation gate (0.85)`,
-        evidence: `volumeScore=${report.volumeScore.toFixed(2)}, qualityScore=${report.qualityScore.toFixed(2)}`,
-        suggestion: report.diagnostics[0]?.suggestion,
+        message: `Post-graduation quality score ${report.qualityScore.toFixed(2)} is ${gap} below the 0.85 gate that originally qualified the soul — quality drift watch, not a graduation alert`,
+        evidence: `volumeScore=${report.volumeScore.toFixed(2)}, qualityScore=${report.qualityScore.toFixed(2)}, soul=present`,
+        suggestion: report.diagnostics[0]?.suggestion ?? "Soul already graduated. This is a quality-drift signal: investigate retrieval utilization, tool failure rate, and recent reflection critical-rate.",
     };
 }
 async function detectContextTransformFailures(_store) {
@@ -350,6 +559,74 @@ async function detectContextTransformFailures(_store) {
         message: `graphTransformContext failing ${failures}/${total} calls (${(rate * 100).toFixed(0)}%) in the last 10 minutes — memory context is not being injected`,
         evidence: `failures=${failures}, total=${total}, rate=${rate.toFixed(2)}`,
         suggestion: "Check daemon.log for timeout/DB errors. Common causes: slow SurrealDB queries, broken embeddings, stale daemon. Try restarting the daemon.",
+    };
+}
+// ── New substrate-health detectors (Agent E recommendations) ──
+/**
+ * Fires when disk writes to ~/.kongcode/cache/ are failing. Reads from
+ * the rolling 10-minute counter populated by recordCacheWriteOutcome().
+ * Threshold: 5+ failures in window. Severity escalates to critical when
+ * the failure rate exceeds 50%, since at that point essential state
+ * (auth token, daemon.pid, spending ledger) is not being persisted.
+ */
+function detectCacheWriteFailures() {
+    const { total, failures, rate } = getCacheWriteFailureStats();
+    if (failures < 5)
+        return null;
+    return {
+        code: "substrate.cache_write_failures",
+        severity: rate >= 0.5 ? "critical" : "warn",
+        message: `~/.kongcode/cache/ writes failing: ${failures}/${total} in the last 10 minutes (${(rate * 100).toFixed(0)}%)`,
+        evidence: `failures=${failures}, total=${total}, rate=${rate.toFixed(2)}`,
+        suggestion: "Check disk space (`df -h ~/.kongcode/cache`), inode count, and directory permissions. Auth token, daemon.pid, and spending ledger live here — daemon may be running degraded.",
+    };
+}
+/**
+ * Fires critical after 5 consecutive failed isAvailable() probes within
+ * a 60-second window. Single transient disconnects are tolerated; this
+ * detector is for sustained outages (process gone, network partition,
+ * disk full preventing SurrealKV flush). detectAnomalies() records each
+ * probe inline so the window stays warm even when other detectors are
+ * skipped because the DB is down.
+ */
+function detectDbUnreachable() {
+    if (_dbAvailabilityChecks.length < 5)
+        return null;
+    // Look at the last 5 checks (most recent at end of array).
+    const tail = _dbAvailabilityChecks.slice(-5);
+    const allFailed = tail.every(c => !c.ok);
+    if (!allFailed)
+        return null;
+    const span = tail[tail.length - 1].ts - tail[0].ts;
+    if (span > DB_AVAILABILITY_WINDOW_MS)
+        return null; // checks too spread out
+    return {
+        code: "substrate.db_unreachable",
+        severity: "critical",
+        message: `SurrealDB unreachable: 5 consecutive isAvailable() probes failed within ${Math.round(span / 1000)}s`,
+        evidence: `consecutive_failures=5, span_ms=${span}`,
+        suggestion: "Check the SurrealDB process (`pgrep -af surreal`) and restart it. The daemon runs in degraded mode without DB — no memory writes, no retrieval.",
+    };
+}
+/**
+ * Fires when the embedding service has reported an error within the last
+ * 5 minutes. Contract: call recordEmbeddingError(err) from any embed()
+ * catch site. Severity is warn rather than critical because the daemon
+ * has a circuit breaker that short-circuits without paging on every call.
+ */
+function detectEmbeddingServiceDown() {
+    if (!_lastEmbeddingError)
+        return null;
+    const ageMs = Date.now() - _lastEmbeddingError.ts;
+    if (ageMs > EMBEDDING_ERROR_FRESH_MS)
+        return null;
+    const msg = _lastEmbeddingError.message.slice(0, 160);
+    return {
+        code: "substrate.embedding_service_down",
+        severity: "warn",
+        message: `Embedding service reported an error ${Math.round(ageMs / 1000)}s ago — embeddings are unavailable`,
+        evidence: `last_error="${msg}"`,
+        suggestion: "Check daemon.log for the stack. Common causes: model file missing (~/.kongcode/cache/models/bge-m3-Q4_K_M.gguf), node-llama-cpp init failure, repeated embed timeouts tripping the circuit breaker.",
     };
 }
 // ── Format anomalies as injection block ──

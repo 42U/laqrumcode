@@ -44,8 +44,10 @@ sed -i "s/\"version\": \"[^\"]*\"/\"version\": \"${VERSION}\"/" "$ROOT/package.j
 # 2. .claude-plugin/plugin.json
 sed -i "s/\"version\": \"[^\"]*\"/\"version\": \"${VERSION}\"/" "$ROOT/.claude-plugin/plugin.json"
 
-# 3. DAEMON_VERSION in src/daemon/index.ts
-sed -i "s/const DAEMON_VERSION = \"[^\"]*\"/const DAEMON_VERSION = \"${VERSION}\"/" "$ROOT/src/daemon/index.ts"
+# 3. DAEMON_VERSION in src/daemon/index.ts is now dynamic (reads package.json
+#    at runtime, or __KONGCODE_VERSION__ injected by esbuild --define at bundle
+#    time). No source bump needed; staleness check below skips it for the same
+#    reason.
 
 # 4. CLIENT_VERSION in src/mcp-client/index.ts
 sed -i "s/const CLIENT_VERSION = \"[^\"]*\"/const CLIENT_VERSION = \"${VERSION}\"/" "$ROOT/src/mcp-client/index.ts"
@@ -70,7 +72,7 @@ fi
 STALE=""
 grep -q "\"version\": \"${VERSION}\"" "$ROOT/package.json" || STALE="${STALE}  package.json\n"
 grep -q "\"version\": \"${VERSION}\"" "$ROOT/.claude-plugin/plugin.json" || STALE="${STALE}  plugin.json\n"
-grep -q "DAEMON_VERSION = \"${VERSION}\"" "$ROOT/src/daemon/index.ts" || STALE="${STALE}  DAEMON_VERSION\n"
+# DAEMON_VERSION is dynamic (reads package.json at runtime). No hardcoded literal to check.
 grep -q "CLIENT_VERSION = \"${VERSION}\"" "$ROOT/src/mcp-client/index.ts" || STALE="${STALE}  CLIENT_VERSION\n"
 grep -q "badge/v${VERSION}-stable" "$ROOT/README.md" || STALE="${STALE}  README version badge\n"
 grep -q "## \[${VERSION}\]" "$CHANGELOG" || STALE="${STALE}  CHANGELOG.md\n"
@@ -90,7 +92,7 @@ git -C "$ROOT" tag "v${VERSION}"
 echo ""
 echo "  package.json:          ${VERSION}"
 echo "  plugin.json:           ${VERSION}"
-echo "  DAEMON_VERSION:        ${VERSION}"
+echo "  DAEMON_VERSION:        ${VERSION} (dynamic from package.json)"
 echo "  CLIENT_VERSION:        ${VERSION}"
 echo "  README badge:          v${VERSION}"
 echo "  CHANGELOG:             [${VERSION}] — ${TODAY}"

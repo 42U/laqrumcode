@@ -424,10 +424,6 @@ async function spawnManagedSurreal(binPath, dataDir, port, user, pass, cacheDir)
         chmodSync(dataDir, 0o700);
     }
     catch { }
-    // KONGCODE_DETACH_SURREAL=0 forces the legacy child-tied-to-parent behavior
-    // (mainly for tests + advanced setups that want the old cleanup-on-MCP-exit
-    // semantics). Default: detach so the child outlives the MCP.
-    const detach = process.env.KONGCODE_DETACH_SURREAL !== "0";
     // SurrealDB v3 syntax: `surreal start surrealkv:<absolute-path> --bind host:port`
     // Credentials passed via env vars to keep them out of /proc/<pid>/cmdline.
     const child = spawn(binPath, [
@@ -438,27 +434,18 @@ async function spawnManagedSurreal(binPath, dataDir, port, user, pass, cacheDir)
         "--log",
         "warn",
     ], {
-        detached: detach,
+        detached: true,
         env: { ...process.env, SURREAL_USER: user, SURREAL_PASS: pass },
         // When detached, ignore stdio entirely — leaving pipes open creates a
         // back-channel that prevents the parent from cleanly exiting and
         // disowning the child. With ignore, the child becomes a true daemon.
-        stdio: detach ? "ignore" : ["ignore", "pipe", "pipe"],
+        stdio: "ignore",
     });
-    if (detach) {
-        // Disown: parent's event loop won't wait on this child anymore. Combined
-        // with detached:true, the child survives parent (MCP) death and becomes
-        // an init-reparented orphan. Plugin update / Claude Code restart / MCP
-        // crash all leave SurrealDB running.
-        child.unref();
-    }
-    else {
-        child.stdout?.on("data", (d) => log.debug(`[surreal] ${String(d).trim()}`));
-        child.stderr?.on("data", (d) => log.debug(`[surreal] ${String(d).trim()}`));
-        child.on("exit", (code, signal) => {
-            log.warn(`[surreal] managed child exited code=${code} signal=${signal}`);
-        });
-    }
+    // Disown: parent's event loop won't wait on this child anymore. Combined
+    // with detached:true, the child survives parent (MCP) death and becomes
+    // an init-reparented orphan. Plugin update / Claude Code restart / MCP
+    // crash all leave SurrealDB running.
+    child.unref();
     if (child.pid) {
         await writeSurrealPidFile(cacheDir, child.pid).catch((e) => {
             log.warn(`[bootstrap] failed to write surreal pid file: ${e.message}`);

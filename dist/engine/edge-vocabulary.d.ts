@@ -41,7 +41,6 @@ export declare const CANONICAL_EDGES: {
     readonly supersedes: "A replaces an outdated B in the active knowledge set";
 };
 export type CanonicalEdge = keyof typeof CANONICAL_EDGES;
-export declare const CANONICAL_EDGE_NAMES: readonly CanonicalEdge[];
 /** True if the given edge name is in the canonical vocabulary. */
 export declare function isCanonicalEdge(edge: string): edge is CanonicalEdge;
 /** Return the semantic description of a canonical edge, or a placeholder. */

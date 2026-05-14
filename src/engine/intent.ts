@@ -7,6 +7,7 @@
  */
 
 import type { EmbeddingService } from "./embeddings.js";
+import { cosineSimilarity } from "./graph-context.js";
 
 // --- Intent categories ---
 
@@ -122,17 +123,6 @@ async function ensurePrototypes(embeddings: EmbeddingService): Promise<{ categor
   return centroidCache.get(embeddings)!;
 }
 
-function cosine(a: number[], b: number[]): number {
-  let dot = 0, normA = 0, normB = 0;
-  for (let i = 0; i < a.length; i++) {
-    dot += a[i] * b[i];
-    normA += a[i] * a[i];
-    normB += b[i] * b[i];
-  }
-  const denom = Math.sqrt(normA) * Math.sqrt(normB);
-  return denom > 0 ? dot / denom : 0;
-}
-
 // --- Public API ---
 
 export async function classifyIntent(text: string, embeddings: EmbeddingService): Promise<IntentResult> {
@@ -145,7 +135,7 @@ export async function classifyIntent(text: string, embeddings: EmbeddingService)
   const scores: { category: IntentCategory; score: number }[] = [];
 
   for (const proto of prototypeVecs) {
-    scores.push({ category: proto.category, score: cosine(inputVec, proto.vec) });
+    scores.push({ category: proto.category, score: cosineSimilarity(inputVec, proto.vec) });
   }
 
   scores.sort((a, b) => b.score - a.score);

@@ -48,8 +48,19 @@ DEFINE INDEX IF NOT EXISTS artifact_type_idx ON artifact FIELDS type;
 -- PILLAR 5: Concept (semantic knowledge nodes)
 -- ============================================================
 DEFINE TABLE IF NOT EXISTS concept SCHEMALESS;
--- Recovery: restore content from name if the rename migration ran before revert
-UPDATE concept SET content = name WHERE content = NONE AND name != NONE;
+-- Recovery: restore content from name if the rename migration ran before revert.
+--
+-- This was originally unconditional and ran on every daemon connect, scanning
+-- the whole concept table for an empty-result UPDATE even on clean installs
+-- that never had a `name` column. Gate it via LET + IF/THEN/END (same idiom
+-- used in observability.ts:179 + surreal.ts:1627) so the table-scan UPDATE
+-- only fires when legacy rows actually exist. On clean installs the inner
+-- count returns 0 and the IF block is skipped entirely; on a legacy install
+-- the one-time migration runs once, then no-ops on every subsequent connect.
+LET $legacy_concept_count = (SELECT count() FROM concept WHERE name != NONE GROUP ALL)[0].count ?? 0;
+IF $legacy_concept_count > 0 THEN
+  UPDATE concept SET content = name WHERE content = NONE AND name != NONE;
+END;
 DEFINE FIELD IF NOT EXISTS content ON concept TYPE string;
 DEFINE FIELD IF NOT EXISTS embedding ON concept TYPE option<array<float>>;
 DEFINE FIELD IF NOT EXISTS stability ON concept TYPE float DEFAULT 1.0;
@@ -70,7 +81,7 @@ DEFINE FIELD IF NOT EXISTS role ON turn TYPE string;
 DEFINE FIELD IF NOT EXISTS text ON turn TYPE string;
 -- Migration: ensure embedding is optional (SurrealDB 3.0 HNSW requires this for nullable embeddings)
 REMOVE FIELD IF EXISTS embedding ON turn;
-DEFINE FIELD embedding ON turn TYPE option<array<float>>;
+DEFINE FIELD IF NOT EXISTS embedding ON turn TYPE option<array<float>>;
 DEFINE FIELD IF NOT EXISTS timestamp ON turn TYPE datetime DEFAULT time::now();
 DEFINE FIELD IF NOT EXISTS created_at ON turn TYPE datetime DEFAULT time::now();
 DEFINE FIELD IF NOT EXISTS token_count ON turn TYPE option<int>;
@@ -101,6 +112,11 @@ DEFINE FIELD IF NOT EXISTS total_input_tokens ON session TYPE int DEFAULT 0;
 DEFINE FIELD IF NOT EXISTS total_output_tokens ON session TYPE int DEFAULT 0;
 DEFINE FIELD IF NOT EXISTS ended_at ON session TYPE option<datetime>;
 DEFINE FIELD IF NOT EXISTS cleanup_completed ON session TYPE bool DEFAULT false;
+-- F2 (round-2) added a session-level claim token used by the deferred-cleanup
+-- worker to coordinate single-claimant cleanup across daemon races. Declared
+-- explicitly (not relying on SCHEMALESS) so INFO FOR TABLE session shows it
+-- and introspect/audit queries can rely on a typed column.
+DEFINE FIELD IF NOT EXISTS cleanup_claim_token ON session TYPE option<string>;
 
 -- Long-term memory (episodic → consolidated)
 DEFINE TABLE IF NOT EXISTS memory SCHEMALESS;
@@ -118,6 +134,16 @@ DEFINE FIELD IF NOT EXISTS resolved_at ON memory TYPE option<datetime>;
 DEFINE FIELD IF NOT EXISTS resolved_by ON memory TYPE option<string>;
 DEFINE INDEX IF NOT EXISTS memory_vec_idx ON memory FIELDS embedding HNSW DIMENSION 1024 DIST COSINE;
 DEFINE INDEX IF NOT EXISTS memory_category_idx ON memory FIELDS category;
+-- Status is filtered on every vectorSearch (line 417), getSessionRetrievedMemories
+-- (1786), getDueMemories (1823), getUnresolvedMemories (1257). Without this
+-- index those queries do a full memory scan. Compound (status, category) so
+-- the (status, category="handoff") lookup at getLatestHandoff also benefits.
+DEFINE INDEX IF NOT EXISTS memory_status_idx ON memory FIELDS status;
+-- retrieval_outcome.memory_table is filtered in archiveOldTurns' NOT IN
+-- subquery (surreal.ts:1554, "WHERE memory_table = 'turn'") and in
+-- getSessionRetrievedMemories (surreal.ts:1774). Without this, the
+-- archive pass does a full retrieval_outcome scan every run.
+DEFINE INDEX IF NOT EXISTS ro_memtable_idx ON retrieval_outcome FIELDS memory_table;
 
 -- Maintenance runs — observability for the 4 bootstrap maintenance jobs.
 -- One row per (job, run). Used by time-relative threshold gates so new
@@ -152,7 +178,11 @@ DEFINE TABLE IF NOT EXISTS produced TYPE RELATION IN task OUT artifact;
 --   - concept → artifact (provenance for create_knowledge_gems)
 --   - subagent → task    (parent-task linking from pre-tool-use)
 -- OVERWRITE so live DBs converge on next daemon start; IF NOT EXISTS would no-op.
-DEFINE TABLE OVERWRITE derived_from TYPE RELATION IN concept|subagent OUT task|artifact;
+-- 0.7.70: extended OUT to allow `session` so background daemon extractions
+-- without an attached taskId can still anchor concept provenance to the
+-- session row instead of going un-traced. Pre-0.7.70 this fell through to
+-- a swallow.warn and left the concept derived_from-less.
+DEFINE TABLE OVERWRITE derived_from TYPE RELATION IN concept|subagent OUT task|artifact|session;
 DEFINE TABLE IF NOT EXISTS relevant_to TYPE RELATION IN concept OUT project;
 DEFINE TABLE IF NOT EXISTS used_in TYPE RELATION IN artifact OUT project;
 
@@ -171,7 +201,16 @@ DEFINE TABLE IF NOT EXISTS contradicts TYPE RELATION IN memory OUT memory;
 DEFINE TABLE IF NOT EXISTS describes TYPE RELATION IN memory OUT memory;
 
 -- Concept evolution
-DEFINE TABLE IF NOT EXISTS supersedes TYPE RELATION IN memory OUT concept|memory;
+-- 0.7.x: widened OUT to allow `concept|memory`. supersedes.ts has two relate
+-- paths: concept supersedes (line ~97) and memory supersedes (line ~135). The
+-- memory path was failing on installs whose live `supersedes` table was created
+-- with the older `OUT concept` shape — SurrealDB's coercer rejected
+-- `memory:xxx` against a `record<concept>` OUT slot, producing
+-- "supersedes:relate-memory: Couldn't coerce value for field `out`..." warns
+-- in the daemon log and silently dropping the edge. OVERWRITE so live DBs
+-- converge on next daemon start; IF NOT EXISTS would no-op against the
+-- already-narrow table.
+DEFINE TABLE OVERWRITE supersedes TYPE RELATION IN memory OUT concept|memory;
 
 -- Cross-pillar links
 DEFINE TABLE IF NOT EXISTS about_concept TYPE RELATION IN memory OUT concept;
@@ -275,7 +314,17 @@ DEFINE FIELD IF NOT EXISTS created_at ON compaction_checkpoint TYPE datetime DEF
 -- MEMORY SUBSTRATE: Utility Cache (fast historical utility lookups)
 -- ============================================================
 DEFINE TABLE IF NOT EXISTS memory_utility_cache SCHEMALESS;
-DEFINE FIELD IF NOT EXISTS memory_id ON memory_utility_cache TYPE string;
+-- memory_id is a typed record reference; was previously string. Existing
+-- string-typed installs need scripts/migrate-memory-utility-cache-id.mjs to
+-- retype before this DEFINE takes effect (SurrealDB no-ops re-declarations
+-- that only change type, matching the concept.superseded_by precedent).
+--
+-- The union covers all three tables actually written here: memory (via
+-- retrieval-quality writeback), concept (via context-engine recall paths
+-- that surface concept rows alongside memory rows), and turn (turns are
+-- also scored and cached). The name "memory_id" is historical — the cache
+-- is keyed by any retrieved-record id, not just memory rows.
+DEFINE FIELD IF NOT EXISTS memory_id ON memory_utility_cache TYPE option<record<memory> | record<concept> | record<turn>>;
 DEFINE FIELD IF NOT EXISTS avg_utilization ON memory_utility_cache TYPE float;
 DEFINE FIELD IF NOT EXISTS retrieval_count ON memory_utility_cache TYPE int;
 DEFINE FIELD IF NOT EXISTS last_updated ON memory_utility_cache TYPE datetime DEFAULT time::now();
@@ -360,6 +409,23 @@ DEFINE FIELD OVERWRITE task ON subagent TYPE option<string>;
 DEFINE FIELD IF NOT EXISTS status ON subagent TYPE string DEFAULT "running"; -- running | completed | error
 DEFINE FIELD IF NOT EXISTS incognito_id ON subagent TYPE option<string>;
 DEFINE FIELD IF NOT EXISTS summary ON subagent TYPE option<string>;
+-- correlation_key and run_id are the natural keys hook-handlers upsert on.
+-- The UNIQUE indexes below (subagent_corr_unique, subagent_run_unique) need
+-- these field declarations so SurrealDB stores them with a typed column
+-- rather than inferring per-row. Without the DEFINE FIELDs the indexes
+-- still work but the daemon log fills with coercion warnings on every
+-- subagent row that lacks one of the two fields.
+DEFINE FIELD IF NOT EXISTS correlation_key ON subagent TYPE option<string>;
+-- run_id is a UNIQUE-indexed natural key (see subagent_run_unique below). Multiple
+-- rows with run_id=NONE collide on that UNIQUE in SurrealDB, so callers MUST
+-- always set a value — even a synthetic placeholder. PreToolUse handlers that
+-- don't yet know the real run_id set run_id = correlation_key as a placeholder
+-- (round-2 hook-handler contract). The ASSERT below rejects empty strings up
+-- front so a malformed write fails close to the call site rather than blowing
+-- up the index apply at boot. NONE is still acceptable at the type level for
+-- legacy/intermediate states but the UNIQUE will reject duplicate NONEs.
+DEFINE FIELD IF NOT EXISTS run_id ON subagent TYPE option<string>
+  ASSERT $value = NONE OR $value != "";
 DEFINE FIELD IF NOT EXISTS created_at ON subagent TYPE datetime DEFAULT time::now();
 DEFINE INDEX IF NOT EXISTS sub_parent_idx ON subagent FIELDS parent_session_id;
 
@@ -463,7 +529,25 @@ DEFINE FIELD IF NOT EXISTS surreal_session_id ON pending_work TYPE option<string
 DEFINE FIELD IF NOT EXISTS task_id ON pending_work TYPE option<string>;
 DEFINE FIELD IF NOT EXISTS project_id ON pending_work TYPE option<string>;
 DEFINE FIELD IF NOT EXISTS payload ON pending_work TYPE option<object>;
-DEFINE FIELD IF NOT EXISTS status ON pending_work TYPE string DEFAULT "pending";
+-- OVERWRITE so the ASSERT lands on existing installs whose field was created
+-- before the enum guard. Without the ASSERT, a typo'd status ("pendng",
+-- "processsing") gets stored silently and the work item never gets picked
+-- up by fetch_pending_work — the queue grows zombies. The four-value set
+-- mirrors the lifecycle the daemon actually drives: pending → processing
+-- → (completed | failed). If new statuses get added in code, update both
+-- sides; the ASSERT will reject a CREATE/UPDATE with an unknown value.
+--
+-- UPGRADE CONTRACT: applying this OVERWRITE on a live DB runs the ASSERT
+-- against every existing pending_work row. Pre-0.7.x installs may carry
+-- legacy statuses ("queued", typos, NULL) that fail the ASSERT and prevent
+-- the schema apply — which then prevents the daemon from booting. Operators
+-- upgrading from <0.7.70 MUST run `node scripts/predeploy-dedup.mjs --apply`
+-- first; that script normalizes any out-of-enum status to 'failed' before
+-- this DEFINE FIELD touches the data. Clean installs have no rows so the
+-- ASSERT is a no-op.
+DEFINE FIELD OVERWRITE status ON pending_work TYPE string
+  ASSERT $value IN ['pending', 'processing', 'completed', 'failed']
+  DEFAULT 'pending';
 DEFINE FIELD IF NOT EXISTS priority ON pending_work TYPE int DEFAULT 5;
 DEFINE FIELD IF NOT EXISTS created_at ON pending_work TYPE datetime DEFAULT time::now();
 DEFINE FIELD IF NOT EXISTS completed_at ON pending_work TYPE option<datetime>;
@@ -478,6 +562,118 @@ DEFINE FIELD IF NOT EXISTS embedding ON embedding_cache TYPE array;
 DEFINE FIELD IF NOT EXISTS model_version ON embedding_cache TYPE string;
 DEFINE FIELD IF NOT EXISTS created_at ON embedding_cache TYPE datetime DEFAULT time::now();
 DEFINE INDEX IF NOT EXISTS idx_ec_text_hash ON embedding_cache FIELDS text_hash UNIQUE;
+
+-- ============================================================
+-- DUPLICATE-ROW SEAL: DB-level UNIQUE constraints (Agent 1 of 6)
+-- ============================================================
+-- These UNIQUE indexes are the canonical defense against the duplicate-row
+-- bug class (the original symptom: 620 duplicate `causal_graduate` rows in
+-- pending_work). They enforce idempotency at the DB layer regardless of
+-- what calling code does. If a re-apply fails on UNIQUE creation, existing
+-- duplicate rows are blocking it: dedupe in the live DB first, then re-run.
+--
+-- Idempotency: DEFINE INDEX without IF NOT EXISTS overwrites by default in
+-- SurrealDB, matching the style of the OVERWRITE field declarations above
+-- (lines 154, 354, 359). IF NOT EXISTS is used where pre-existing single-
+-- field indexes use it for consistency.
+
+-- pending_work: compound UNIQUE on (session_id, work_type, status).
+-- Stops duplicate enqueues like the 620 causal_graduate rows.
+--
+-- Tradeoff vs the originally-intended partial UNIQUE (... WHERE status = 'pending'):
+-- the deployed SurrealDB rejects `DEFINE INDEX ... UNIQUE WHERE ...` with a parser
+-- error (probed 2026-05-13 via scripts/probe-surreal-version.mjs:
+-- "Parse error: Unexpected token `WHERE`, expected Eof"). Partial-WHERE indexes
+-- are a SurrealDB 2.x+ feature; the responder on ws://127.0.0.1:8000/rpc does
+-- not accept that syntax, so runSchema() would fail and the daemon wouldn't start.
+--
+-- A compound UNIQUE on (session_id, work_type, status) preserves the dedup
+-- invariant we actually care about: "no two simultaneously-pending duplicates"
+-- still holds because two pending rows would share status='pending' and thus
+-- collide on the compound key. Status transitions (pending → processing →
+-- completed/failed) are UPDATEs, not CREATEs, so they don't violate the index.
+-- The only CREATE paths (deferred-cleanup.ts:71, session-end.ts:74/94/106)
+-- never set status explicitly — they all rely on the DEFAULT "pending" from
+-- line 466, so accidental CREATE-with-status='completed' is not a code path.
+--
+-- One row per (session_id, work_type, completed) is allowed; if a session
+-- re-runs the same work after completion, that re-run still has status='pending'
+-- on insert, which is again unique vs the completed row. Net result: same
+-- protection against the 620-duplicate-causal_graduate class of bug, without
+-- the partial-WHERE-index syntax dependency.
+DEFINE INDEX IF NOT EXISTS pw_session_worktype_status_unique ON pending_work
+  FIELDS session_id, work_type, status UNIQUE;
+DEFINE INDEX IF NOT EXISTS pw_session_idx ON pending_work FIELDS session_id;
+DEFINE INDEX IF NOT EXISTS pw_worktype_idx ON pending_work FIELDS work_type;
+
+-- subagent: correlation_key and run_id must be globally unique. These are
+-- the natural keys hook-handlers should be upserting on.
+--
+-- CALLER CONTRACT (round-2): every CREATE on subagent MUST set both
+-- correlation_key AND run_id, even synthetic ones. SurrealDB collapses
+-- multiple NONE values into a single UNIQUE-violation bucket, so a second
+-- PreToolUse CREATE that leaves run_id unset would collide with the first.
+-- The pre-tool-use handler sets run_id = correlation_key as a placeholder
+-- and SubagentStop overwrites it with the real run_id. If you add a new
+-- caller that creates subagent rows, follow the same pattern.
+DEFINE INDEX IF NOT EXISTS subagent_corr_unique ON subagent FIELDS correlation_key UNIQUE;
+DEFINE INDEX IF NOT EXISTS subagent_run_unique ON subagent FIELDS run_id UNIQUE;
+
+-- retrieval_outcome: one row per (session, turn, memory) retrieval event.
+DEFINE INDEX IF NOT EXISTS retoutc_unique ON retrieval_outcome
+  FIELDS session_id, turn_id, memory_id UNIQUE;
+
+-- turn_score: one composite score per (session, turn).
+DEFINE INDEX IF NOT EXISTS turnscore_unique ON turn_score
+  FIELDS session_id, turn_id UNIQUE;
+
+-- orchestrator_metrics: one row per (session, turn_index).
+DEFINE INDEX IF NOT EXISTS orchm_unique ON orchestrator_metrics
+  FIELDS session_id, turn_index UNIQUE;
+
+-- identity_chunk: one chunk per (source, version, index).
+DEFINE INDEX IF NOT EXISTS identity_chunk_unique ON identity_chunk
+  FIELDS source, identity_version, chunk_index UNIQUE;
+
+-- maturity_stage: one row per stage name (transitions are tracked, not
+-- duplicated).
+DEFINE INDEX IF NOT EXISTS maturity_stage_unique ON maturity_stage FIELDS stage UNIQUE;
+
+-- causal_chain: one chain per (trigger, outcome, type) triple.
+DEFINE INDEX IF NOT EXISTS causal_chain_unique ON causal_chain
+  FIELDS trigger_memory, outcome_memory, chain_type UNIQUE;
+
+-- session: hot-path WHERE indexes for kc_session_id lookups and the
+-- cleanup_completed scan run by session-end maintenance.
+DEFINE INDEX IF NOT EXISTS session_kc_idx ON session FIELDS kc_session_id;
+DEFINE INDEX IF NOT EXISTS session_cleanup_idx ON session FIELDS cleanup_completed;
+
+-- ============================================================
+-- MISSING FIELD TYPE DECLARATIONS (SCHEMALESS → typed option<>)
+-- ============================================================
+-- These fields were being written by daemon code but had no DEFINE FIELD,
+-- so SurrealDB stored them with mixed/inferred types. Declaring them as
+-- option<datetime>/option<string> normalizes storage and lets queries use
+-- typed predicates.
+DEFINE FIELD IF NOT EXISTS ended_at ON subagent TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS outcome ON subagent TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS error ON subagent TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS reason ON subagent TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS kc_session_id ON session TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS superseded_at ON concept TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS superseded_by ON concept TYPE option<record<memory>>;
+
+-- ============================================================
+-- ARTIFACT DEDUP SEAL (defense in depth)
+-- ============================================================
+-- PostToolUse re-fires (duplicate-row bug class) could produce duplicate
+-- artifact rows for the same canonical file path. Code-side dedup in
+-- store.createArtifact() is the primary defense; this UNIQUE index is
+-- the DB-level seal. WARNING: if duplicate artifact rows already exist
+-- in a live DB, this index creation will be REJECTED on daemon restart.
+-- Manually dedupe existing artifacts (or add an entry to the predeploy
+-- dedup script) BEFORE relying on this index for new deployments.
+DEFINE INDEX IF NOT EXISTS artifact_path_unique ON artifact FIELDS path UNIQUE;
 
 -- ============================================================
 -- MIGRATIONS (must run after table definitions)

@@ -13,7 +13,7 @@ export function createBeforePromptBuildHandler(state) {
         // Reset per-turn counters
         session.resetTurn();
         try {
-            const result = await preflight(event.prompt, session, state.embeddings);
+            const result = await preflight(event.prompt, session, state.embeddings, 42000, state.store);
             // Store config on session for graph-context to read
             session.currentConfig = result.config;
             // Return system prompt addition with thinking level override

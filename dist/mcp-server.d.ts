@@ -10,5 +10,4 @@
  *
  * Spawned by Claude Code via .mcp.json (stdio transport).
  */
-import { GlobalPluginState } from "./engine/state.js";
-export declare function getGlobalState(): GlobalPluginState | null;
+export {};

@@ -1,8 +1,26 @@
-import { Surreal } from "surrealdb";
+import { Surreal, RecordId } from "surrealdb";
+import { randomUUID } from "node:crypto";
 import type { SurrealConfig } from "./config.js";
-import { swallow } from "./errors.js";
+import { swallow, isUniqueViolation, safeId, RECORD_ID_RE } from "./errors.js";
 import { log } from "./log.js";
 import { loadSchema } from "./schema-loader.js";
+import { parseDatetimeMs } from "./observability.js";
+
+/** SurrealDB transaction-conflict detector. Used to differentiate expected
+ *  contention (silent retry/swallow) from real errors that should surface
+ *  via swallow.warn. Structured-field check first (err.kind/err.name) before
+ *  the message regex so the driver's typed errors are recognized without
+ *  string parsing. Regex covers "tx", "transaction", "conflict", "lock",
+ *  plus SurrealDB-specific retry shapes: versionstamp (KV-version mismatch),
+ *  rpcerror, busy, retryable. */
+function isTransactionConflict(e: unknown): boolean {
+  if (!e || typeof e !== "object") return false;
+  const o = e as { kind?: unknown; name?: unknown; message?: unknown };
+  if (typeof o.kind === "string" && /tx|conflict|retry|busy/i.test(o.kind)) return true;
+  if (typeof o.name === "string" && /tx|conflict|retry|busy|rpcerror/i.test(o.name)) return true;
+  if (typeof o.message !== "string") return false;
+  return /tx|transaction|conflict|lock|versionstamp|rpcerror|busy|retryable/i.test(o.message);
+}
 
 /** Record with a vector similarity score from SurrealDB search */
 export interface VectorSearchResult {
@@ -59,12 +77,19 @@ export interface ConceptProvenance {
 }
 
 
-const RECORD_ID_RE = /^[a-zA-Z_][a-zA-Z0-9_]*:[a-zA-Z0-9_\-]+$/;
-
 function assertRecordId(id: string): void {
   if (!RECORD_ID_RE.test(id)) {
     throw new Error(`Invalid record ID format: ${id.slice(0, 40)}`);
   }
+}
+
+/** Parse a `"table:key"` string into a SurrealDB RecordId for binding into
+ *  parameters of typed `record<...>` fields. Throws if the input is not a
+ *  well-formed record id. */
+function toRecordId(id: string): RecordId {
+  assertRecordId(id);
+  const colon = id.indexOf(":");
+  return new RecordId(id.slice(0, colon), id.slice(colon + 1));
 }
 
 /** Whitelist of valid SurrealDB edge table names — prevents SQL injection via edge interpolation. */
@@ -130,8 +155,8 @@ function patchOrderByFields(sql: string): string {
 }
 
 /**
- * SurrealDB store — wraps all database operations for the KongBrain plugin.
- * Replaces the module-level singleton pattern from standalone KongBrain.
+ * SurrealDB store — wraps all database operations for the KongCode plugin.
+ * Replaces the module-level singleton pattern from standalone KongCode.
  */
 export class SurrealStore {
   private db: Surreal;
@@ -182,19 +207,27 @@ export class SurrealStore {
           try { await this.db?.close(); } catch { /* drain stale socket */ }
           this.db = new Surreal();
           const CONNECT_TIMEOUT_MS = 5_000;
-          await Promise.race([
-            this.db.connect(this.config.url, {
-              namespace: this.config.ns,
-              database: this.config.db,
-              authentication: { username: this.config.user, password: this.config.pass },
-            }),
-            new Promise<never>((_, reject) =>
-              setTimeout(
-                () => reject(new Error(`SurrealDB connect timed out after ${CONNECT_TIMEOUT_MS}ms`)),
-                CONNECT_TIMEOUT_MS,
-              ),
-            ),
-          ]);
+          let connectTimer: ReturnType<typeof setTimeout> | undefined;
+          try {
+            await Promise.race([
+              this.db.connect(this.config.url, {
+                namespace: this.config.ns,
+                database: this.config.db,
+                authentication: { username: this.config.user, password: this.config.pass },
+              }),
+              new Promise<never>((_, reject) => {
+                connectTimer = setTimeout(
+                  () => reject(new Error(`SurrealDB connect timed out after ${CONNECT_TIMEOUT_MS}ms`)),
+                  CONNECT_TIMEOUT_MS,
+                );
+              }),
+            ]);
+          } finally {
+            // Clear on every exit path. The prior code leaked a pending
+            // Timeout when connect() resolved fast; the daemon process would
+            // be kept alive for CONNECT_TIMEOUT_MS after each connect attempt.
+            if (connectTimer !== undefined) clearTimeout(connectTimer);
+          }
           log.warn("SurrealDB reconnected successfully.");
           return;
         } catch (e) {
@@ -216,10 +249,6 @@ export class SurrealStore {
   private async runSchema(): Promise<void> {
     const schema = loadSchema();
     await this.db.query(schema);
-  }
-
-  getConnection(): Surreal {
-    return this.db;
   }
 
   isConnected(): boolean {
@@ -408,7 +437,8 @@ export class SurrealStore {
       `SELECT id, content AS text, stability AS importance, access_count AS accessCount,
               created_at AS timestamp, 'concept' AS table,
               vector::similarity::cosine(embedding, $vec) AS score${emb}
-       FROM concept WHERE embedding != NONE AND array::len(embedding) > 0${projectFilter}
+       FROM concept WHERE embedding != NONE AND array::len(embedding) > 0
+         AND superseded_at IS NONE${projectFilter}
        ORDER BY score DESC LIMIT ${lim.concept}`,
       `SELECT id, text, importance, access_count AS accessCount,
               created_at AS timestamp, session_id AS sessionId, category, 'memory' AS table,
@@ -432,19 +462,28 @@ export class SurrealStore {
        ORDER BY score DESC LIMIT ${lim.identity}`,
     ];
 
-    let batchResults: any[][];
+    let batchResults: unknown[][];
     try {
       const bindings: Record<string, unknown> = { vec, sid: sessionId };
       if (projectId) bindings.pid = projectId;
-      batchResults = await this.queryBatch<any>(stmts, bindings);
+      batchResults = await this.queryBatch<unknown>(stmts, bindings);
     } catch (e) {
       swallow.warn("surreal:vectorSearch:batch", e);
       return [];
     }
-    const [
-      sessionTurns = [], crossTurns = [], archiveTurns = [],
-      concepts = [], memories = [], artifacts = [], monologues = [], identityChunks = [],
-    ] = batchResults as VectorSearchResult[][];
+    // Destructure with explicit per-bucket type assertion. The batch shape is
+    // a positional tuple of VectorSearchResult arrays (one per statement); the
+    // SurrealDB response is `unknown[][]` and each bucket carries the same
+    // row shape from the SELECT — assert per bucket rather than blanket-cast
+    // the outer array so a future statement-order change can't silently mis-type.
+    const sessionTurns = (batchResults[0] ?? []) as VectorSearchResult[];
+    const crossTurns = (batchResults[1] ?? []) as VectorSearchResult[];
+    const archiveTurns = (batchResults[2] ?? []) as VectorSearchResult[];
+    const concepts = (batchResults[3] ?? []) as VectorSearchResult[];
+    const memories = (batchResults[4] ?? []) as VectorSearchResult[];
+    const artifacts = (batchResults[5] ?? []) as VectorSearchResult[];
+    const monologues = (batchResults[6] ?? []) as VectorSearchResult[];
+    const identityChunks = (batchResults[7] ?? []) as VectorSearchResult[];
     return [
       ...sessionTurns,
       ...crossTurns,
@@ -482,11 +521,35 @@ export class SurrealStore {
   async getSessionTurnsRich(
     sessionId: string,
     limit = 20,
-  ): Promise<{ role: string; text: string; tool_name?: string }[]> {
-    return this.queryFirst<{ role: string; text: string; tool_name?: string }>(
-      `SELECT role, text, tool_name, timestamp FROM turn WHERE session_id = $sid ORDER BY timestamp ASC LIMIT $lim`,
+  ): Promise<{ turnId: string; role: string; text: string; tool_name?: string; tool_result?: string; file_paths?: string[] }[]> {
+    // `id` MUST be in the projection. Downstream callers (writeExtractionResults
+    // → linkToRelevantConcepts) gate on `turnId` truthiness to write
+    // mentions(turn→concept) edges. Drop it and the filter rejects every row
+    // → daemon extraction silently never writes turn-mentions, even though
+    // both transcript text and turn rows exist. We map the SurrealDB `id`
+    // field to `turnId` here so the rest of the codebase sees the existing
+    // TurnData.turnId shape unchanged. R5 regression fix: R4 added the
+    // tool_name/tool_result/file_paths columns to this SELECT but dropped
+    // `id` from the projection silently.
+    const rows = await this.queryFirst<{ id: string; role: string; text: string; tool_name?: string; tool_result?: string; file_paths?: string[] }>(
+      `SELECT id, role, text, tool_name, tool_result, file_paths, timestamp FROM turn WHERE session_id = $sid ORDER BY timestamp ASC LIMIT $lim`,
       { sid: sessionId, lim: limit },
     );
+    // safeId + post-filter: SurrealDB occasionally returns rows where `id`
+    // is undefined/null (driver edge case mid-migration, or a projection that
+    // accidentally drops the field upstream). `String(undefined)` yields
+    // "undefined" — a truthy string that passes the downstream
+    // `if (turnId)` gates and then explodes when linkToRelevantConcepts tries
+    // to RELATE turn:undefined→concept. safeId returns "" on nullish, and
+    // we drop empty-id rows here so callers see a clean list.
+    return rows.map(r => ({
+      turnId: safeId(r.id),
+      role: r.role,
+      text: r.text,
+      ...(r.tool_name !== undefined ? { tool_name: r.tool_name } : {}),
+      ...(r.tool_result !== undefined ? { tool_result: r.tool_result } : {}),
+      ...(r.file_paths !== undefined ? { file_paths: r.file_paths } : {}),
+    })).filter(r => r.turnId);
   }
 
   // ── Relation helpers ───────────────────────────────────────────────────
@@ -599,30 +662,6 @@ export class SurrealStore {
     );
   }
 
-  /** @deprecated since 0.7.12 — split into bumpSessionTurn + addSessionTokens.
-   *  Kept as a backward-compat shim for any external caller; new code should
-   *  call the split methods directly. Will be removed in 0.8.x. */
-  async updateSessionStats(
-    sessionId: string,
-    inputTokens: number,
-    outputTokens: number,
-  ): Promise<void> {
-    await this.bumpSessionTurn(sessionId);
-    await this.addSessionTokens(sessionId, inputTokens, outputTokens);
-  }
-
-  async endSession(sessionId: string, summary?: string): Promise<void> {
-    assertRecordId(sessionId);
-    if (summary) {
-      await this.queryExec(
-        `UPDATE ${sessionId} SET ended_at = time::now(), summary = $summary`,
-        { summary },
-      );
-    } else {
-      await this.queryExec(`UPDATE ${sessionId} SET ended_at = time::now()`);
-    }
-  }
-
   async markSessionActive(sessionId: string): Promise<void> {
     assertRecordId(sessionId);
     await this.queryExec(
@@ -637,6 +676,101 @@ export class SurrealStore {
     );
   }
 
+  /**
+   * Atomically claim a session for cleanup. Only one worker wins per session.
+   *
+   * Sets cleanup_completed = true and ended_at = time::now() in a single
+   * conditional UPDATE. Returns true when this caller won the claim (a row
+   * was matched and updated), false when another worker already claimed it
+   * (or the record does not exist).
+   *
+   * Callers MUST roll back via releaseSessionClaim() if the follow-up work
+   * (e.g. CREATEing pending_work rows) fails, otherwise the session will
+   * never be retried by deferred cleanup. On successful cleanup completion,
+   * callers SHOULD call clearSessionClaim() so the cleanup_claim_token does
+   * not linger on the row (it accumulates otherwise).
+   *
+   * Retry idempotency: queryFirst() wraps every call in withRetry(), which
+   * retries on connection error. The WHERE clause accepts either "row not
+   * yet claimed" OR "row already claimed by us (token matches)". So if the
+   * first attempt landed but the response was lost and withRetry re-runs,
+   * the second branch fires, RETURN BEFORE is non-empty, and we correctly
+   * report won=true on the retry.
+   *
+   * The cleanup_claim_token field is schemaless — schema rev still pending
+   * (Agent F3 owns the schema patch), but SCHEMALESS accepts the field
+   * without a definition, so the runtime path can land ahead of schema.
+   */
+  async claimSessionForCleanup(sessionId: string): Promise<boolean> {
+    assertRecordId(sessionId);
+    const myToken = randomUUID();
+    // Single conditional UPDATE that's idempotent on retry. The WHERE clause
+    // accepts either "row not yet claimed" (cleanup_completed != true) OR
+    // "row already claimed by us" (cleanup_claim_token == myToken). On retry
+    // after a lost response, the second branch fires and we still observe
+    // RETURN BEFORE non-empty — so we correctly report won=true.
+    //
+    // Distinguishing the two branches:
+    //  - Won on this attempt: the BEFORE row has cleanup_completed != true.
+    //  - Already won on a prior attempt: the BEFORE row has
+    //    cleanup_claim_token == myToken (and cleanup_completed == true).
+    // Either way the caller should treat us as the winner.
+    //
+    // myToken is parameter-bound (not interpolated) so the SurrealQL parser
+    // doesn't have to handle the UUID's hyphens. The session record id is
+    // assertRecordId-validated above, so direct interpolation is safe.
+    const sql = `UPDATE ${sessionId}
+       SET cleanup_completed = true, ended_at = time::now(),
+           cleanup_claim_token = $myToken
+       WHERE cleanup_completed != true OR cleanup_claim_token = $myToken
+       RETURN BEFORE`;
+    const rows = await this.queryFirst<{
+      cleanup_completed?: boolean | null;
+      cleanup_claim_token?: string | null;
+    }>(sql, { myToken });
+    if (rows.length === 0) {
+      // No row matched the predicate — either record missing, or someone
+      // else's token is on the row already. Loser path.
+      return false;
+    }
+    const before = rows[0];
+    // Either we just won (cleanup_completed != true in BEFORE) or we already
+    // won on a prior attempt (token matches ours). Both are winner paths.
+    if (before.cleanup_completed === true && before.cleanup_claim_token !== myToken) {
+      // Defensive: predicate should preclude this, but if a future schema
+      // change rewrites cleanup_completed semantics, fall back to false.
+      return false;
+    }
+    return true;
+  }
+
+  /**
+   * Roll back a prior claimSessionForCleanup() when the follow-up work failed.
+   * Resets cleanup_completed = false and clears ended_at so deferredCleanup
+   * picks the session up again on next boot. Also clears the claim token so
+   * a fresh claim attempt starts from a clean slate.
+   */
+  async releaseSessionClaim(sessionId: string): Promise<void> {
+    assertRecordId(sessionId);
+    await this.queryExec(
+      `UPDATE ${sessionId} SET cleanup_completed = false, ended_at = NONE,
+       cleanup_claim_token = NONE`,
+    );
+  }
+
+  /**
+   * Clear the cleanup_claim_token after successful cleanup completion. Leaves
+   * cleanup_completed = true so the session stays "done"; only the token is
+   * reset so it does not accumulate across re-runs on the same record. Safe
+   * to call multiple times (idempotent on the NONE write).
+   */
+  async clearSessionClaim(sessionId: string): Promise<void> {
+    assertRecordId(sessionId);
+    await this.queryExec(
+      `UPDATE ${sessionId} SET cleanup_claim_token = NONE`,
+    );
+  }
+
   async getOrphanedSessions(limit = 20): Promise<{ id: string; started_at: string; kc_session_id: string | null }[]> {
     return this.queryFirst<{ id: string; started_at: string; kc_session_id: string | null }>(
       `SELECT id, started_at, kc_session_id FROM session
@@ -645,46 +779,6 @@ export class SurrealStore {
        ORDER BY started_at DESC LIMIT $lim`,
       { lim: limit },
     );
-  }
-
-  /** One-shot: for sessions created before 0.5.5 that lack kc_session_id,
-   * walk their `part_of` turn edges and copy the kc id from any turn row.
-   * Idempotent — only updates rows where kc_session_id is currently NONE.
-   * Bounded per call so a backlog of hundreds chips down across SessionStarts. */
-  async backfillOrphanKcSessionIds(limit = 50): Promise<number> {
-    const missing = await this.queryFirst<{ id: string }>(
-      `SELECT id FROM session
-       WHERE kc_session_id = NONE
-         AND cleanup_completed != true
-       LIMIT $lim`,
-      { lim: limit },
-    );
-    if (missing.length === 0) return 0;
-
-    let backfilled = 0;
-    for (const s of missing) {
-      try {
-        assertRecordId(s.id);
-        const turn = await this.queryFirst<{ session_id: string }>(
-          `SELECT session_id FROM turn
-           WHERE id IN (SELECT VALUE in FROM part_of WHERE out = $sid)
-             AND session_id != NONE AND session_id != ""
-           LIMIT 1`,
-          { sid: s.id },
-        );
-        const kcSid = turn[0]?.session_id;
-        if (typeof kcSid === "string" && kcSid.length > 0) {
-          await this.queryExec(
-            `UPDATE ${s.id} SET kc_session_id = $kc`,
-            { kc: kcSid },
-          );
-          backfilled++;
-        }
-      } catch (e) {
-        // Best-effort per row; swallow continues
-      }
-    }
-    return backfilled;
   }
 
   async countTurnsForSession(kcSessionId: string): Promise<number> {
@@ -788,6 +882,7 @@ export class SurrealStore {
                 vector::similarity::cosine(embedding, $vec) AS score
          FROM concept
          WHERE embedding != NONE AND array::len(embedding) > 0
+           AND superseded_at IS NONE
            AND tags CONTAINSANY $tags
          ORDER BY score DESC
          LIMIT $limit`,
@@ -834,30 +929,47 @@ export class SurrealStore {
         stmts.push(`${selectFields} FROM ${id}<-(${reverseEdgeList})<-? LIMIT ${REVERSE_LIMIT}`);
       }
 
-      let queryResults: any[][];
+      // GraphExpand rows are heterogeneous (turn / concept / memory / artifact /
+       // monologue) projected to a shared {id, text|content|description,
+       // importance, accessCount, timestamp, table, score} shape. Type as
+       // unknown[][] at the wire and narrow per-row at the read site.
+      type ExpandedRow = {
+        id?: unknown;
+        text?: unknown;
+        content?: unknown;
+        description?: unknown;
+        importance?: unknown;
+        stability?: unknown;
+        accessCount?: unknown;
+        timestamp?: unknown;
+        table?: unknown;
+        score?: unknown;
+      };
+      let queryResults: unknown[][];
       try {
-        queryResults = await this.queryBatch<any>(stmts, bindings);
+        queryResults = await this.queryBatch<unknown>(stmts, bindings);
       } catch (e) {
         swallow.warn("surreal:graphExpand:batch", e);
         break;
       }
       const nextFrontier: { id: string; score: number }[] = [];
 
-      for (const rows of queryResults) {
+      for (const rawRows of queryResults) {
+        const rows = rawRows as ExpandedRow[];
         for (const row of rows) {
           if (row.id == null) continue;
           const nodeId = String(row.id);
           if (seen.has(nodeId)) continue;
           seen.add(nodeId);
 
-          const text = row.text ?? row.content ?? row.description ?? null;
+          const text = (row.text ?? row.content ?? row.description ?? null) as string | null;
           if (text) {
-            const score = row.score ?? 0;
+            const score = typeof row.score === "number" ? row.score : 0;
             allNeighbors.push({
               text,
-              importance: row.importance ?? row.stability,
-              accessCount: row.accessCount,
-              timestamp: row.timestamp,
+              importance: (row.importance ?? row.stability) as number | undefined,
+              accessCount: row.accessCount as number | undefined,
+              timestamp: row.timestamp as string | undefined,
               table: String(row.table ?? "unknown"),
               id: nodeId,
               score,
@@ -905,12 +1017,58 @@ export class SurrealStore {
   ): Promise<string> {
     if (!content?.trim()) return "";
     content = content.trim();
-    const rows = await this.queryFirst<{ id: string }>(
-      `SELECT id FROM concept WHERE string::lowercase(content) = string::lowercase($content) LIMIT 1`,
-      { content },
-    );
-    if (rows.length > 0) {
-      const id = String(rows[0].id);
+    // Two-stage dedup. Stage 1 (fast, sub-linear): KNN pre-filter on the
+    // `concept_vec_idx` HNSW index (schema.surql:62) — top-10 nearest
+    // candidates by embedding cosine, plus exact-similarity match for
+    // ">0.92 means same concept, even if labels differ slightly".
+    // Stage 2 (precise, in-process): scan those 10 candidates for an exact
+    // lowercase-equal content match. This replaces the prior
+    // `WHERE string::lowercase(content) = string::lowercase($content)`
+    // table scan, which was O(N) over all concept rows on every upsert
+    // (4.7k rows in production at the time of the fix).
+    //
+    // Fallback path: when the caller did not supply an embedding (degraded
+    // env / no embeddings service), keep the lowercase-equality scan so
+    // dedup remains correct even though it costs a full table scan in
+    // that branch. The hot path is the KNN one.
+    let existingId: string | null = null;
+    if (embedding?.length) {
+      const candidates = await this.queryFirst<{ id: string; content: string; score: number }>(
+        `SELECT id, content, vector::similarity::cosine(embedding, $vec) AS score
+         FROM concept
+         WHERE embedding != NONE AND array::len(embedding) > 0
+           AND superseded_at IS NONE
+         ORDER BY score DESC
+         LIMIT 10`,
+        { vec: embedding },
+      );
+      const target = content.toLowerCase();
+      // High-similarity dedup branch: even if labels disagree, cosine >0.92
+      // on the new content's embedding vs an existing concept's embedding
+      // means they describe the same thing. Mirrors createMemory's dedup.
+      // We check this AFTER the exact-label scan so an exact match wins,
+      // but BEFORE creating a new row.
+      let highSimId: string | null = null;
+      for (const c of candidates) {
+        const cContent = (c.content ?? "").toLowerCase();
+        if (cContent === target) {
+          existingId = String(c.id);
+          break;
+        }
+        if (highSimId === null && typeof c.score === "number" && c.score > 0.92) {
+          highSimId = String(c.id);
+        }
+      }
+      if (!existingId && highSimId) existingId = highSimId;
+    } else {
+      const rows = await this.queryFirst<{ id: string }>(
+        `SELECT id FROM concept WHERE string::lowercase(content) = string::lowercase($content) AND superseded_at IS NONE LIMIT 1`,
+        { content },
+      );
+      if (rows.length > 0) existingId = String(rows[0].id);
+    }
+    if (existingId) {
+      const id = existingId;
       assertRecordId(id);
       if (embedding?.length) {
         await this.queryExec(
@@ -934,11 +1092,52 @@ export class SurrealStore {
     if (emb) record.embedding = emb;
     if (provenance) record.provenance = provenance;
     if (projectId) record.project_id = projectId;
-    const created = await this.queryFirst<{ id: string }>(
-      `CREATE concept CONTENT $record RETURN id`,
-      { record },
-    );
-    return String(created[0]?.id ?? "");
+    // M5 race surfacer: SELECT-then-CREATE has a TOCTOU window. Two concurrent
+    // upserts can both observe the SELECT-miss above and race into CREATE.
+    // The schema-level UNIQUE on lowercased content (out of scope here —
+    // needs a migration) is the durable fix. Until then, catch any unique-
+    // violation from the CREATE, log it via swallow.warn so we can measure
+    // how often it actually fires in production, and re-SELECT to return the
+    // sibling-created row's id. This keeps the API contract (returns an id)
+    // intact instead of throwing.
+    try {
+      const created = await this.queryFirst<{ id: string }>(
+        `CREATE concept CONTENT $record RETURN id`,
+        { record },
+      );
+      return String(created[0]?.id ?? "");
+    } catch (createErr) {
+      if (isUniqueViolation(createErr)) {
+        swallow.warn("upsertConcept:dedupRace", createErr);
+        // Stage A: lowercase-exact rematch. Cheap, covers the common case
+        // where two callers wrote the same content string concurrently.
+        const existing = await this.queryFirst<{ id: string }>(
+          `SELECT id FROM concept WHERE string::lowercase(content) = string::lowercase($content) AND superseded_at IS NONE LIMIT 1`,
+          { content },
+        ).catch(e => { swallow.warn("upsertConcept:selectAfterRace", e); return [] as { id: string }[]; });
+        if (existing[0]?.id) return String(existing[0].id);
+        // Stage B (R7 F1): when the race winner deduped via KNN cosine
+        // (>0.92 sim, different content text — synonym/paraphrase), the
+        // lowercase rematch above won't find it. Replay the same KNN
+        // similarity match the initial dedup pass would have done so the
+        // caller still receives the correct id instead of the empty string.
+        if (embedding?.length) {
+          const knn = await this.queryFirst<{ id: string; score: number }>(
+            `SELECT id, vector::similarity::cosine(embedding, $vec) AS score
+             FROM concept
+             WHERE embedding != NONE AND array::len(embedding) > 0
+               AND superseded_at IS NONE
+             ORDER BY score DESC
+             LIMIT 1`,
+            { vec: embedding },
+          ).catch(e => { swallow.warn("upsertConcept:knnAfterRace", e); return [] as { id: string; score: number }[]; });
+          if (knn[0] && typeof knn[0].score === "number" && knn[0].score > 0.92 && knn[0].id) {
+            return String(knn[0].id);
+          }
+        }
+      }
+      throw createErr;
+    }
   }
 
   async createArtifact(
@@ -948,14 +1147,73 @@ export class SurrealStore {
     embedding: number[] | null,
     projectId?: string,
   ): Promise<string> {
+    // Dedup by `path`: PostToolUse re-fires (duplicate-row bug class)
+    // would otherwise produce duplicate artifact rows for the same file.
+    // The schema has no session_id on artifact (artifacts are global by
+    // path, not session-scoped), and content_hash is optional/unpopulated
+    // by current callers — so path alone is the correct identity key.
+    //
+    // Strategy: try the CREATE, and on a UNIQUE-index rejection from the
+    // artifact_path_unique constraint, re-SELECT to return the existing
+    // row's id. This eliminates the prior SELECT-then-CREATE TOCTOU window
+    // (where a sibling could CREATE between our SELECT-miss and our CREATE)
+    // and removes the silent `.catch(() => [])` that previously masked a
+    // SELECT failure and let a duplicate CREATE land.
     const record: Record<string, unknown> = { path, type, description };
     if (embedding?.length) record.embedding = embedding;
     if (projectId) record.project_id = projectId;
-    const rows = await this.queryFirst<{ id: string }>(
-      `CREATE artifact CONTENT $record RETURN id`,
-      { record },
-    );
-    return String(rows[0]?.id ?? "");
+    try {
+      const rows = await this.queryFirst<{ id: string }>(
+        `CREATE artifact CONTENT $record RETURN id`,
+        { record },
+      );
+      return String(rows[0]?.id ?? "");
+    } catch (createErr) {
+      if (path && isUniqueViolation(createErr)) {
+        // Sibling already wrote the row — fetch its id and return.
+        const existing = await this.queryFirst<{ id: string }>(
+          `SELECT id FROM artifact WHERE path = $path LIMIT 1`,
+          { path },
+        ).catch(e => { swallow.warn("createArtifact:selectAfterUnique", e); return [] as { id: string }[]; });
+        if (existing[0]?.id) return String(existing[0].id);
+        // TOCTOU close-out: the sibling row was deleted between our CREATE
+        // rejection and our SELECT, so the path is no longer occupied. Retry
+        // CREATE once — succeeds in the normal case, only re-fails if a third
+        // racer slipped in. The double-disappearing-row case is so unlikely we
+        // wrap it as a distinct error rather than infinite-looping.
+        try {
+          const retried = await this.queryFirst<{ id: string }>(
+            `CREATE artifact CONTENT $record RETURN id`,
+            { record },
+          );
+          return String(retried[0]?.id ?? "");
+        } catch (retryErr) {
+          if (isUniqueViolation(retryErr)) {
+            const existingAgain = await this.queryFirst<{ id: string }>(
+              `SELECT id FROM artifact WHERE path = $path LIMIT 1`,
+              { path },
+            ).catch(() => [] as { id: string }[]);
+            if (existingAgain[0]?.id) return String(existingAgain[0].id);
+            // isUniqueViolation accepts non-Error inputs (plain-object errors
+            // from raw RPC layers), so retryErr may not be an Error instance.
+            // Cast unconditionally would produce `cause=undefined` and a
+            // useless wrapper. Build a faithful message + chain instead.
+            const retryMsg = retryErr instanceof Error
+              ? retryErr.message
+              : String(retryErr);
+            const retryCause: Error = retryErr instanceof Error
+              ? retryErr
+              : new Error(String(retryErr));
+            throw new Error(
+              `createArtifact: UNIQUE conflict with disappearing row (cause=${retryMsg})`,
+              { cause: retryCause },
+            );
+          }
+          throw retryErr;
+        }
+      }
+      throw createErr;
+    }
   }
 
   async createMemory(
@@ -1087,17 +1345,6 @@ export class SurrealStore {
     await this.queryExec(
       `UPDATE ${id} SET active = false, updated_at = time::now()`,
     );
-  }
-
-  async deactivateSessionMemories(sessionId: string): Promise<void> {
-    try {
-      await this.queryExec(
-        `UPDATE core_memory SET active = false, updated_at = time::now() WHERE session_id = $sid AND tier = 1`,
-        { sid: sessionId },
-      );
-    } catch (e) {
-      swallow.warn("surreal:deactivateSessionMemories", e);
-    }
   }
 
   // ── Wakeup & lifecycle queries ─────────────────────────────────────────
@@ -1249,6 +1496,9 @@ export class SurrealStore {
 
   async updateUtilityCache(memoryId: string, utilization: number): Promise<void> {
     try {
+      // memory_id is typed `option<record<memory>>` (was `string` pre-migration).
+      // Bind as a RecordId so SurrealDB stores it as a Thing, not as a string.
+      const mid = toRecordId(memoryId);
       await this.queryExec(
         `UPSERT memory_utility_cache SET
           memory_id = $mid,
@@ -1259,7 +1509,7 @@ export class SurrealStore {
           END,
           last_updated = time::now()
          WHERE memory_id = $mid`,
-        { mid: memoryId, util: utilization },
+        { mid, util: utilization },
       );
     } catch (e) {
       swallow.warn("surreal:updateUtilityCache", e);
@@ -1270,12 +1520,14 @@ export class SurrealStore {
     const result = new Map<string, number>();
     if (ids.length === 0) return result;
     try {
+      const recIds = ids.map(id => { try { return toRecordId(id); } catch { return null; } }).filter((x): x is RecordId => x !== null);
+      if (recIds.length === 0) return result;
       const rows = await this.queryFirst<{
-        memory_id: string;
+        memory_id: { tb: string; id: string } | string;
         avg_utilization: number;
       }>(
         `SELECT memory_id, avg_utilization FROM memory_utility_cache WHERE memory_id IN $ids`,
-        { ids },
+        { ids: recIds },
       );
       for (const row of rows) {
         if (row.avg_utilization != null) result.set(String(row.memory_id), row.avg_utilization);
@@ -1290,13 +1542,15 @@ export class SurrealStore {
     const result = new Map<string, UtilityCacheEntry>();
     if (ids.length === 0) return result;
     try {
+      const recIds = ids.map(id => { try { return toRecordId(id); } catch { return null; } }).filter((x): x is RecordId => x !== null);
+      if (recIds.length === 0) return result;
       const rows = await this.queryFirst<{
-        memory_id: string;
+        memory_id: { tb: string; id: string } | string;
         avg_utilization: number;
         retrieval_count: number;
       }>(
         `SELECT memory_id, avg_utilization, retrieval_count FROM memory_utility_cache WHERE memory_id IN $ids`,
-        { ids },
+        { ids: recIds },
       );
       for (const row of rows) {
         if (row.avg_utilization != null) {
@@ -1337,7 +1591,13 @@ export class SurrealStore {
         { job },
       );
       if (rows.length === 0) return true; // baseline
-      const lastRanAt = Date.parse(rows[0].ran_at);
+      // parseDatetimeMs (NaN-safe) over Date.parse: SurrealDB DateTime values
+      // that come back as objects (newer driver versions) yield NaN through
+      // Date.parse, which then makes ageDays = NaN and `>=` false, silently
+      // skipping all maintenance runs. parseDatetimeMs returns null in that
+      // case and we treat unknown age as "stale" (run it) rather than fresh.
+      const lastRanAt = parseDatetimeMs(rows[0].ran_at);
+      if (lastRanAt == null) return true; // unknown age — re-run
       const ageDays = (Date.now() - lastRanAt) / (1000 * 60 * 60 * 24);
       if (ageDays >= maxDaysSince) return true;
       return currentCount > countFloor;
@@ -1372,19 +1632,28 @@ export class SurrealStore {
       // Single round-trip to reduce transaction conflict window.
       // Structured findings (correction/decision/preference) have a higher
       // decay floor matching their type defaults so they don't erode to noise.
+      // memory_id is now record<memory> (was string with `meta::tb(id):meta::id(id)`
+      // coercion). The record-ref join is a direct equality check.
       await this.queryExec(`
         UPDATE memory SET importance = math::max([importance * 0.95, 5.0])
           WHERE importance > 5.0 AND category IN ["correction", "decision", "preference", "fact"];
         UPDATE memory SET importance = math::max([importance * 0.95, 2.0])
           WHERE importance > 2.0 AND category NOT IN ["correction", "decision", "preference", "fact"];
-        UPDATE memory SET importance = math::max([importance, 3 + ((
-          SELECT VALUE avg_utilization FROM memory_utility_cache WHERE memory_id = string::concat(meta::tb(id), ":", meta::id(id)) LIMIT 1
-        )[0] ?? 0) * 4]) WHERE importance < 7;
+        UPDATE memory SET importance = math::max([importance, 3 + (math::min([math::max([(
+          SELECT VALUE avg_utilization FROM memory_utility_cache WHERE memory_id = $parent.id LIMIT 1
+        )[0] ?? 0, 0]), 1]) * 4)]) WHERE importance < 7;
       `);
       await this.recordMaintenanceRun("runMemoryMaintenance", 0, Date.now() - started);
     } catch (e) {
-      // Transaction conflicts expected when daemon writes concurrently — silent
-      swallow("surreal:runMemoryMaintenance", e);
+      // Transaction conflicts expected when daemon writes concurrently — silent.
+      // Anything else (syntax error, missing field, NaN poison from
+      // parseDatetimeMs upstream) is a real bug and must surface via
+      // swallow.warn so we don't lose visibility on broken maintenance.
+      if (isTransactionConflict(e)) {
+        swallow("surreal:runMemoryMaintenance", e);
+      } else {
+        swallow.warn("surreal:runMemoryMaintenance", e);
+      }
     }
   }
 
@@ -1614,7 +1883,20 @@ export class SurrealStore {
       for (const mem of unembedded) {
         if (seen.has(String(mem.id))) continue;
         try {
-          const emb = await embedFn(mem.text);
+          // 0.7.70: BGE-M3 has an 8192-token context window. Long memory texts
+          // (e.g. transcript-style entries that slipped through) throw
+          // "Input is longer than the context size" and we lose the whole
+          // backfill pass. Truncate at 6000 chars (safely below ~7800 tokens
+          // worst case for English) and tag the warn so it's distinguishable
+          // from embed errors.
+          const safeText = mem.text.length > 6000 ? mem.text.slice(0, 6000) : mem.text;
+          if (safeText.length < mem.text.length) {
+            swallow.warn(
+              "surreal:consolidate-backfill:truncated",
+              new Error(`memory ${String(mem.id)} text len=${mem.text.length} truncated to 6000 chars before embed`),
+            );
+          }
+          const emb = await embedFn(safeText);
           if (!emb) continue;
           await this.queryExec(
             `UPDATE ${String(mem.id)} SET embedding = $emb`,

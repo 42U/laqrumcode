@@ -9,9 +9,7 @@
  */
 
 import type { SessionState } from "./state.js";
-import type { SurrealStore } from "./surreal.js";
-import { swallow } from "./errors.js";
-import { assertRecordId } from "./surreal.js";
+import { clamp01 } from "./math.js";
 
 // --- Types ---
 
@@ -111,15 +109,15 @@ export function getSuppressedNodeIds(session: SessionState): ReadonlySet<string>
   return getState(session).suppressedNodeIds;
 }
 
-/** Fire-and-forget LLM call. Stores directives, writes grades to DB. */
-export async function runCognitiveCheck(
-  params: CognitiveCheckInput,
-  session: SessionState,
-  store: SurrealStore,
-): Promise<void> {
-  // LLM call logic removed — cognitive checks are now handled by
-  // the subagent-driven pending_work pipeline (commit_work_results tool).
-}
+/**
+ * Cognitive check is now handled by the subagent-driven pending_work pipeline
+ * (commit_work_results tool). The in-line runCognitiveCheck() function was
+ * left as an empty no-op shim through the 0.4.x ports; this comment is the
+ * gravestone. Pending-work scheduling lives in the daemon/MCP layer — search
+ * for `cognitive_check` work_type and `commit_work_results`. The hook in
+ * context-engine.ts (afterTurn) was removed because the no-op shim was
+ * misleading: it suggested in-line cognitive checks were still firing.
+ */
 
 // --- Response parsing ---
 
@@ -163,7 +161,7 @@ export function parseCheckResponse(text: string): CognitiveCheckResult | null {
         id: String(g.id),
         relevant: Boolean(g.relevant),
         reason: String(g.reason ?? "").slice(0, 150),
-        score: Math.max(0, Math.min(1, Number(g.score) || 0)),
+        score: clamp01(Number(g.score) || 0),
         learned: g.learned === true,
         resolved: g.resolved === true,
       });
@@ -190,36 +188,8 @@ export function parseCheckResponse(text: string): CognitiveCheckResult | null {
   return { directives, grades, sessionContinuity, preferences };
 }
 
-// --- Grade application ---
-
-async function applyRetrievalGrades(
-  grades: RetrievalGrade[],
-  sessionId: string,
-  store: SurrealStore,
-): Promise<void> {
-  for (const grade of grades) {
-    try {
-      // Find the most recent retrieval outcome for this memory+session
-      const row = await store.queryFirst<{ id: string }>(
-        `SELECT id, created_at FROM retrieval_outcome
-          WHERE memory_id = $id AND session_id = $sid
-          ORDER BY created_at DESC LIMIT 1`,
-        { id: grade.id, sid: sessionId },
-      );
-      if (row?.[0]?.id) {
-        const rid = String(row[0].id);
-        assertRecordId(rid);
-        // Direct interpolation safe: assertRecordId validates format above
-        await store.queryExec(
-          `UPDATE ${rid} SET llm_relevance = $score, llm_relevant = $relevant, llm_reason = $reason`,
-          { score: grade.score, relevant: grade.relevant, reason: grade.reason },
-        );
-      }
-      // Feed relevance score into the utility cache — drives WMR provenUtility scoring
-      await store.updateUtilityCache(grade.id, grade.score).catch(e =>
-        swallow.warn("cognitive-check:utilityCache", e));
-    } catch (e) {
-      swallow.warn("cognitive-check:applyGrade", e);
-    }
-  }
-}
+// applyRetrievalGrades() was removed when the in-line cognitive-check LLM
+// call was retired. Grade application now happens inside the pending_work
+// pipeline's commit_work_results handler, which has its own UPDATE-on-
+// retrieval_outcome path. Removing this stub eliminated the only consumer
+// of CognitiveCheckInput.* — see pending-work.ts for the live equivalent.

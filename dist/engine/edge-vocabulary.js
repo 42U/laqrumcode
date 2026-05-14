@@ -45,7 +45,7 @@ export const CANONICAL_EDGES = {
     cites: "A references B as a source",
     supersedes: "A replaces an outdated B in the active knowledge set",
 };
-export const CANONICAL_EDGE_NAMES = Object.keys(CANONICAL_EDGES);
+const CANONICAL_EDGE_NAMES = Object.keys(CANONICAL_EDGES);
 const _CANONICAL_SET = new Set(CANONICAL_EDGE_NAMES);
 /** True if the given edge name is in the canonical vocabulary. */
 export function isCanonicalEdge(edge) {

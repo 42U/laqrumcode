@@ -15,6 +15,7 @@
  * dispatched concurrently via Promise. Daemon-internal state (SurrealStore,
  * EmbeddingService) handles its own concurrency.
  */
+import { type Socket } from "node:net";
 import { type IpcMethod, type ClientInfo } from "../shared/ipc-types.js";
 /** Per-connection context passed to handlers — identity for the socket that
  *  made the call, plus a hook to register/update client identity from inside
@@ -23,8 +24,6 @@ export interface HandlerContext {
     /** Register or update the calling socket's client identity. Called by
      *  meta.handshake when the client sends clientInfo in its params. */
     registerIdentity(info: ClientInfo): void;
-    /** Identity already registered for this socket, or null. Read-only. */
-    getIdentity(): ClientInfo | null;
 }
 /** Handler signature — every IPC method registers one of these. The dispatcher
  *  calls it with the parsed `params` object (already validated as JSON-RPC
@@ -68,8 +67,9 @@ export declare class DaemonServer {
     /** Per-attached-socket identity registry. Value is the ClientInfo the
      *  client sent in its meta.handshake, or null if the client hasn't
      *  identified itself yet (transient state during handshake) or is a
-     *  pre-0.7.9 client that doesn't pass clientInfo. Set membership doubles
-     *  as the active-clients count. */
+     *  pre-0.7.9 client that doesn't pass clientInfo (@deprecated fallback —
+     *  retain for backward compat but no longer expected in practice). Set
+     *  membership doubles as the active-clients count. */
     private clients;
     private rpcsServedTotal;
     private rpcsInFlight;
@@ -77,6 +77,17 @@ export declare class DaemonServer {
     private pendingSupersede;
     private idleTimer;
     private idleSince;
+    /** Periodic phantom-client reaper. Agent E flagged that pruneDeadClients
+     *  previously ran ONLY from read paths (getStats, armIdleTimer, etc.) — so
+     *  on an idle daemon with no reads firing, a phantom map entry can persist
+     *  indefinitely and block armIdleTimer's clients.size==0 check. This
+     *  interval guarantees the prune fires regardless of inbound traffic. */
+    private pruneTimer;
+    /** How often to sweep phantom clients off the map. 60s is a reasonable
+     *  trade-off: long enough to be free on a fully idle daemon, short enough
+     *  that a stuck phantom doesn't keep the daemon alive for many minutes
+     *  past the last real disconnect. */
+    private static readonly PRUNE_INTERVAL_MS;
     constructor(opts: DaemonServerOpts);
     /** Register a handler for an IPC method. The dispatcher rejects calls to
      *  methods that aren't both in IPC_METHODS (compile-time) AND registered
@@ -87,6 +98,12 @@ export declare class DaemonServer {
      *  daemon already running on the same path — caller should detect via
      *  the spawn lock + PID file probe before calling listen()). */
     listen(): Promise<void>;
+    /** Start the periodic phantom-client reaper. Idempotent — replaces any
+     *  existing timer. Called from listen() and safe to call again from tests
+     *  if they want to reset the cadence. */
+    private startPruneTimer;
+    /** Stop the periodic phantom-client reaper. Safe to call repeatedly. */
+    private stopPruneTimer;
     /** Start (or restart) the idle reaper. No-op if idleTimeoutMs is unset/0
      *  or a timer is already armed. */
     private armIdleTimer;
@@ -130,6 +147,29 @@ export declare class DaemonServer {
      *  null if TCP isn't enabled. Tests use tcpPort=0 to dodge win32 CI
      *  ephemeral-port permission flakes. */
     getTcpPort(): number | null;
+    /**
+     * Test-only: verify the periodic prune timer is wired up after listen().
+     * Production callers should never read this — pruneDeadClients runs from
+     * the interval, from getStats, and from armIdleTimer; the timer handle
+     * itself is an implementation detail.
+     * @internal
+     */
+    _testHasPruneTimer(): boolean;
+    /**
+     * Test-only: synchronously fire one round of prune logic identical to
+     * what the periodic timer does (prune + maybe-arm-idle). Lets tests
+     * exercise the same code path as the interval without waiting 60s.
+     * @internal
+     */
+    _testRunPrune(): number;
+    /**
+     * Test-only: inject a phantom client entry. Used to simulate the
+     * Map-entry-without-close-event edge case (Agent E gap #2) where Node's
+     * 'close' handler never fires for a destroyed peer. Production code
+     * never calls this — the registration happens organically in onConnection.
+     * @internal
+     */
+    _testInjectPhantomClient(): Socket;
     /** Mark daemon for supersede: it will exit when the last attached client
      *  disconnects. Idempotent. Safe to call from a handler thread. */
     markPendingSupersede(): void;

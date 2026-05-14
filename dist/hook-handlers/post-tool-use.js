@@ -68,13 +68,18 @@ export async function handlePostToolUse(state, payload) {
     const isError = !!payload.error
         || (typeof toolResponse === "object" && toolResponse !== null
             && toolResponse.is_error === true);
-    recordToolOutcome(!isError);
+    recordToolOutcome(session.sessionId, !isError);
     // Count tool calls for this turn — consumed by handleStop to feed
     // postflight()'s orchestrator_metrics write. Reset at preflight time.
     session._turnToolCalls += 1;
-    // Track file artifacts from Write/Edit tools
+    // Track file artifacts from Write/Edit tools.
+    // Look up args by tool_use_id (matching the PreToolUse write key) so
+    // parallel Write calls don't read each other's args.
     if ((toolName === "Write" || toolName === "Edit") && store.isAvailable()) {
-        const toolInput = session.pendingToolArgs.get(toolName);
+        const toolUseId = String(payload.tool_use_id ?? "");
+        const toolInput = toolUseId
+            ? session.pendingToolArgs.get(toolUseId)
+            : undefined;
         const filePath = toolInput?.file_path;
         if (filePath) {
             try {
@@ -91,10 +96,13 @@ export async function handlePostToolUse(state, payload) {
                 });
             }
             catch (e) {
-                swallow("postToolUse:artifact", e);
+                // Upgrade from silent swallow to warn so commitKnowledge failures
+                // surface in the log instead of silently dropping artifacts.
+                swallow.warn("postToolUse:artifact", e);
             }
         }
-        session.pendingToolArgs.delete(toolName);
+        if (toolUseId)
+            session.pendingToolArgs.delete(toolUseId);
     }
     return {};
 }

@@ -16,7 +16,7 @@
  * EmbeddingService) handles its own concurrency.
  */
 
-import { createServer, type Server, type Socket } from "node:net";
+import { createServer, Socket as NetSocket, type Server, type Socket } from "node:net";
 import { unlinkSync, existsSync, chmodSync } from "node:fs";
 import {
   PROTOCOL_VERSION,
@@ -33,8 +33,6 @@ export interface HandlerContext {
   /** Register or update the calling socket's client identity. Called by
    *  meta.handshake when the client sends clientInfo in its params. */
   registerIdentity(info: ClientInfo): void;
-  /** Identity already registered for this socket, or null. Read-only. */
-  getIdentity(): ClientInfo | null;
 }
 
 /** Handler signature — every IPC method registers one of these. The dispatcher
@@ -89,8 +87,9 @@ export class DaemonServer {
   /** Per-attached-socket identity registry. Value is the ClientInfo the
    *  client sent in its meta.handshake, or null if the client hasn't
    *  identified itself yet (transient state during handshake) or is a
-   *  pre-0.7.9 client that doesn't pass clientInfo. Set membership doubles
-   *  as the active-clients count. */
+   *  pre-0.7.9 client that doesn't pass clientInfo (@deprecated fallback —
+   *  retain for backward compat but no longer expected in practice). Set
+   *  membership doubles as the active-clients count. */
   private clients = new Map<Socket, ClientInfo | null>();
   private rpcsServedTotal = 0;
   private rpcsInFlight = 0;
@@ -98,6 +97,17 @@ export class DaemonServer {
   private pendingSupersede = false;
   private idleTimer: NodeJS.Timeout | null = null;
   private idleSince: number | null = null;
+  /** Periodic phantom-client reaper. Agent E flagged that pruneDeadClients
+   *  previously ran ONLY from read paths (getStats, armIdleTimer, etc.) — so
+   *  on an idle daemon with no reads firing, a phantom map entry can persist
+   *  indefinitely and block armIdleTimer's clients.size==0 check. This
+   *  interval guarantees the prune fires regardless of inbound traffic. */
+  private pruneTimer: NodeJS.Timeout | null = null;
+  /** How often to sweep phantom clients off the map. 60s is a reasonable
+   *  trade-off: long enough to be free on a fully idle daemon, short enough
+   *  that a stuck phantom doesn't keep the daemon alive for many minutes
+   *  past the last real disconnect. */
+  private static readonly PRUNE_INTERVAL_MS = 60_000;
 
   constructor(private readonly opts: DaemonServerOpts) {}
 
@@ -155,6 +165,38 @@ export class DaemonServer {
     // handshaking, leaving an orphaned daemon nobody will ever talk to.
     // First connect cancels the timer.
     this.armIdleTimer();
+    // Start the periodic phantom-client prune. Without this, an idle daemon
+    // that never sees a read may carry a stuck Map entry for a destroyed
+    // socket forever — armIdleTimer's clients.size==0 gate never trips,
+    // and the daemon holds BGE-M3 + SurrealDB process in RAM indefinitely.
+    this.startPruneTimer();
+  }
+
+  /** Start the periodic phantom-client reaper. Idempotent — replaces any
+   *  existing timer. Called from listen() and safe to call again from tests
+   *  if they want to reset the cadence. */
+  private startPruneTimer(): void {
+    if (this.pruneTimer) clearInterval(this.pruneTimer);
+    this.pruneTimer = setInterval(() => {
+      const pruned = this.pruneDeadClients();
+      // If pruning just dropped the daemon to zero attached clients (e.g. the
+      // close event never fired for the last real client), kick the idle
+      // reaper so the daemon doesn't sit holding memory for nobody. Only
+      // re-arm if no idle timer is currently active.
+      if (pruned > 0 && this.clients.size === 0) this.armIdleTimer();
+    }, DaemonServer.PRUNE_INTERVAL_MS);
+    // Don't let the prune cadence keep the event loop alive on its own.
+    // Without unref, the daemon couldn't exit cleanly on its natural idle
+    // reap path because Node would keep running the loop just for this timer.
+    this.pruneTimer.unref?.();
+  }
+
+  /** Stop the periodic phantom-client reaper. Safe to call repeatedly. */
+  private stopPruneTimer(): void {
+    if (this.pruneTimer) {
+      clearInterval(this.pruneTimer);
+      this.pruneTimer = null;
+    }
   }
 
   /** Start (or restart) the idle reaper. No-op if idleTimeoutMs is unset/0
@@ -225,6 +267,7 @@ export class DaemonServer {
    *  saving any pending state before this is called. */
   async close(): Promise<void> {
     this.disarmIdleTimer();
+    this.stopPruneTimer();
     for (const sock of this.clients.keys()) {
       try { sock.end(); } catch {}
     }
@@ -278,6 +321,48 @@ export class DaemonServer {
     const addr = this.tcpServer.address();
     if (addr && typeof addr === "object") return addr.port;
     return this.opts.tcpPort;
+  }
+
+  /**
+   * Test-only: verify the periodic prune timer is wired up after listen().
+   * Production callers should never read this — pruneDeadClients runs from
+   * the interval, from getStats, and from armIdleTimer; the timer handle
+   * itself is an implementation detail.
+   * @internal
+   */
+  _testHasPruneTimer(): boolean {
+    return this.pruneTimer !== null;
+  }
+
+  /**
+   * Test-only: synchronously fire one round of prune logic identical to
+   * what the periodic timer does (prune + maybe-arm-idle). Lets tests
+   * exercise the same code path as the interval without waiting 60s.
+   * @internal
+   */
+  _testRunPrune(): number {
+    const pruned = this.pruneDeadClients();
+    if (pruned > 0 && this.clients.size === 0) this.armIdleTimer();
+    return pruned;
+  }
+
+  /**
+   * Test-only: inject a phantom client entry. Used to simulate the
+   * Map-entry-without-close-event edge case (Agent E gap #2) where Node's
+   * 'close' handler never fires for a destroyed peer. Production code
+   * never calls this — the registration happens organically in onConnection.
+   * @internal
+   */
+  _testInjectPhantomClient(): Socket {
+    // Create a real Socket and destroy it immediately. The pruneDeadClients
+    // check looks at sock.destroyed || !sock.writable so a freshly-destroyed
+    // socket qualifies as a phantom even though it never went through
+    // onConnection. This matches what Agent E flagged: a Map entry whose
+    // close event never reaches our handler.
+    const phantom = new NetSocket();
+    phantom.destroy();
+    this.clients.set(phantom, null);
+    return phantom;
   }
 
   /** Mark daemon for supersede: it will exit when the last attached client
@@ -419,7 +504,6 @@ export class DaemonServer {
         this.clients.set(sock, stamped);
         this.opts.log.info(`[daemon] client connected: pid=${stamped.pid} v${stamped.version} session=${stamped.sessionId}`);
       },
-      getIdentity: () => this.clients.get(sock) ?? null,
     };
     try {
       const result = await handler(req.params, ctx);

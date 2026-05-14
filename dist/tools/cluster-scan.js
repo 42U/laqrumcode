@@ -14,7 +14,8 @@
  * Wraps the existing vectorSearch primitive; does no new retrieval, just
  * re-shapes the output.
  */
-import { swallow } from "../engine/errors.js";
+import { swallow, safeId } from "../engine/errors.js";
+import { clamp } from "../engine/math.js";
 import { stripStructuralTags } from "../engine/sanitize.js";
 async function fetchNeighborConcepts(state, resultIds) {
     const neighborMap = new Map();
@@ -119,7 +120,7 @@ function clusterByOverlap(items) {
 }
 export async function handleClusterScan(state, session, args) {
     const query = String(args.query ?? "").trim();
-    const limit = Math.min(15, Math.max(5, Number(args.limit) || 10));
+    const limit = clamp(Number(args.limit) || 10, 5, 15);
     if (!query) {
         return { content: [{ type: "text", text: "Error: `query` is required." }] };
     }
@@ -141,12 +142,15 @@ export async function handleClusterScan(state, session, args) {
         memory: limit,
         artifact: Math.ceil(limit / 2),
     }).catch(() => []);
-    const items = searchResults.slice(0, limit * 2).map((r) => ({
-        id: String(r.id),
+    const items = searchResults
+        .slice(0, limit * 2)
+        .map((r) => ({
+        id: safeId(r.id),
         text: stripStructuralTags(String(r.text ?? "").slice(0, 200)),
         table: String(r.table ?? ""),
         score: Number(r.score ?? 0),
-    }));
+    }))
+        .filter((r) => r.id);
     if (items.length === 0) {
         return {
             content: [{

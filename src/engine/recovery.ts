@@ -17,7 +17,8 @@
  */
 
 import type { SurrealStore } from "./surreal.js";
-import { swallow } from "./errors.js";
+import { swallow, RECORD_ID_RE } from "./errors.js";
+import { cosineSimilarity } from "./graph-context.js";
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -54,24 +55,12 @@ export interface FullRecoveryResult {
 
 const CENTROID_THRESHOLD = 0.5;
 
-function cosineSim(a: number[], b: number[]): number {
-  if (a.length !== b.length || a.length === 0) return 0;
-  let dot = 0, na = 0, nb = 0;
-  for (let i = 0; i < a.length; i++) {
-    dot += a[i] * b[i];
-    na += a[i] * a[i];
-    nb += b[i] * b[i];
-  }
-  return na > 0 && nb > 0 ? dot / (Math.sqrt(na) * Math.sqrt(nb)) : 0;
-}
-
 async function backfillTable(
   store: SurrealStore,
   selectSql: string,
 ): Promise<{ found: number; fixed: number }> {
   const rows = await store.queryFirst<{ id: string; project_id: string }>(selectSql);
   let fixed = 0;
-  const RECORD_ID_RE = /^[a-zA-Z_][a-zA-Z0-9_]*:[a-zA-Z0-9_\-]+$/;
   for (const row of rows) {
     if (!row.project_id) continue;
     const id = String(row.id);
@@ -82,7 +71,11 @@ async function backfillTable(
         { pid: row.project_id },
       );
       fixed++;
-    } catch { /* skip */ }
+    } catch (e) {
+      // Surface row-level failures — full silence here meant a recovery
+      // sweep could "find 100 / fix 0" and produce no clue why.
+      swallow.warn("recovery:backfillTable", e);
+    }
   }
   return { found: rows.length, fixed };
 }
@@ -129,7 +122,7 @@ export function findBestProjectMatch(
   let bestPid = "";
   let bestSim = 0;
   for (const [pid, centroid] of centroids) {
-    const sim = cosineSim(embedding, centroid);
+    const sim = cosineSimilarity(embedding, centroid);
     if (sim > bestSim) { bestSim = sim; bestPid = pid; }
   }
   if (bestSim >= threshold && bestPid) {
@@ -232,7 +225,7 @@ export async function recoverProjectIdRows(
                 { pid: match.projectId },
               );
               centroidAssigned++;
-            } catch { /* skip */ }
+            } catch (e) { swallow.warn("recovery:centroidAssign", e); }
           }
         }
       }
@@ -253,9 +246,9 @@ export async function recoverProjectIdRows(
         try {
           await store.queryExec(`UPDATE ${rid} SET scope = 'global'`);
           globalsTagged++;
-        } catch { /* skip */ }
+        } catch (e) { swallow.warn("recovery:globalTag", e); }
       }
-    } catch { /* skip table */ }
+    } catch (e) { swallow.warn("recovery:globalsTableScan", e); }
   }
 
   return {
@@ -298,7 +291,10 @@ export async function recoverDaemonOrphans(
     try {
       await store.relate(String(o.id), "derived_from", String(artifacts[0].id));
       gemEdgesCreated++;
-    } catch { relateFailed++; }
+    } catch (e) {
+      swallow.warn("recovery:gemRelate", e);
+      relateFailed++;
+    }
   }
 
   // ── Path 2 + 3: daemon-source orphans (resolve or synthesize) ──
@@ -348,7 +344,10 @@ export async function recoverDaemonOrphans(
       await store.relate(String(o.id), "derived_from", String(taskId));
       if (isSynthesized) daemonEdgesSynthesized++;
       else daemonEdgesResolved++;
-    } catch { relateFailed++; }
+    } catch (e) {
+      swallow.warn("recovery:daemonRelate", e);
+      relateFailed++;
+    }
   }
 
   return {

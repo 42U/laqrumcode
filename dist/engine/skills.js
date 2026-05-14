@@ -8,7 +8,7 @@
  *
  * Ported from kongbrain — takes SurrealStore/EmbeddingService as params.
  */
-import { swallow } from "./errors.js";
+import { swallow, safeId } from "./errors.js";
 import { assertRecordId } from "./surreal.js";
 // --- Supersession ---
 /**
@@ -28,7 +28,13 @@ export async function supersedeOldSkills(newSkillId, newEmb, store) {
             if ((row.score ?? 0) >= 0.82) {
                 try {
                     assertRecordId(String(row.id));
-                    await store.queryExec(`UPDATE ${row.id} SET active = false, superseded_by = $newId`, { newId: newSkillId });
+                    assertRecordId(newSkillId);
+                    // skill.superseded_by is `option<record<skill>>` — SurrealDB's
+                    // type coercer rejects bare strings against record-typed fields,
+                    // so use type::record($val) to parse the string id back into a
+                    // Thing on the server side. Same pattern as supersedes.ts for
+                    // concept.superseded_by after the 2026-05-13 retype migration.
+                    await store.queryExec(`UPDATE ${row.id} SET active = false, superseded_by = type::record($newId)`, { newId: newSkillId });
                 }
                 catch (e) {
                     swallow("skills:supersede", e);
@@ -59,7 +65,7 @@ export async function findRelevantSkills(queryVec, limit = 3, store) {
         return rows
             .filter((r) => (r.score ?? 0) > 0.4)
             .map((r) => ({
-            id: String(r.id),
+            id: safeId(r.id),
             name: r.name ?? "",
             description: r.description ?? "",
             preconditions: r.preconditions,
@@ -71,7 +77,8 @@ export async function findRelevantSkills(queryVec, limit = 3, store) {
             confidence: Number(r.confidence ?? 1.0),
             active: r.active !== false,
             score: r.score,
-        }));
+        }))
+            .filter((r) => r.id);
     }
     catch (e) {
         swallow.warn("skills:find", e);

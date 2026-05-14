@@ -96,6 +96,105 @@ describe("recoverProjectIdRows — return shape contract", () => {
       globalsTagged: 0,
     });
   });
+
+  it("issues UPDATE for each backfillable row and increments fixed counter", async () => {
+    // Mock the SELECT-returning-rows path for the FIRST table only (tasks).
+    // The remaining selects return [] so we can isolate the assertion.
+    let selectCallIndex = 0;
+    const queryFirst = vi.fn().mockImplementation(async (sql: string) => {
+      selectCallIndex++;
+      // First call is the tasks select — return two rows with project_id set.
+      if (selectCallIndex === 1 && sql.includes("FROM task WHERE project_id IS NONE")) {
+        return [
+          { id: "task:abc123", project_id: "project:foo" },
+          { id: "task:xyz789", project_id: "project:bar" },
+        ];
+      }
+      return [];
+    });
+    const queryExec = vi.fn().mockResolvedValue(undefined);
+    const store = { queryFirst, queryExec } as unknown as SurrealStore;
+
+    const result = await recoverProjectIdRows(store);
+    expect(result.tasks.found).toBe(2);
+    expect(result.tasks.fixed).toBe(2);
+    // Both rows should have triggered an UPDATE with their project_id.
+    const updates = queryExec.mock.calls.filter(c => String(c[0]).startsWith("UPDATE task:"));
+    expect(updates.length).toBe(2);
+    expect(updates[0][1]).toMatchObject({ pid: "project:foo" });
+    expect(updates[1][1]).toMatchObject({ pid: "project:bar" });
+  });
+
+  it("rejects malformed record ids (regex guard) — found but NOT fixed", async () => {
+    // Rows whose id doesn't match the RECORD_ID_RE pattern should be counted
+    // as 'found' but skipped from UPDATE. This is the injection guard.
+    const queryFirst = vi.fn().mockImplementation(async (sql: string) => {
+      if (sql.includes("FROM task WHERE project_id IS NONE")) {
+        return [
+          { id: "task:abc123", project_id: "project:safe" },
+          { id: "task:bad-id; DROP TABLE task--", project_id: "project:unsafe" },
+          { id: "garbage no-colon", project_id: "project:unsafe2" },
+          { id: "", project_id: "project:unsafe3" },
+        ];
+      }
+      return [];
+    });
+    const queryExec = vi.fn().mockResolvedValue(undefined);
+    const store = { queryFirst, queryExec } as unknown as SurrealStore;
+
+    const result = await recoverProjectIdRows(store);
+    expect(result.tasks.found).toBe(4);
+    // Only the well-formed id should have produced an UPDATE.
+    const updates = queryExec.mock.calls.filter(c => String(c[0]).startsWith("UPDATE task:"));
+    expect(updates.length).toBe(1);
+    expect(result.tasks.fixed).toBe(1);
+  });
+
+  it("UPDATE failure is swallowed — fixed counter does NOT increment but found does", async () => {
+    const queryFirst = vi.fn().mockImplementation(async (sql: string) => {
+      if (sql.includes("FROM task WHERE project_id IS NONE")) {
+        return [
+          { id: "task:abc123", project_id: "project:foo" },
+          { id: "task:def456", project_id: "project:bar" },
+        ];
+      }
+      return [];
+    });
+    let exCount = 0;
+    const queryExec = vi.fn().mockImplementation(async () => {
+      exCount++;
+      if (exCount === 1) throw new Error("network blip");
+      return undefined;
+    });
+    const store = { queryFirst, queryExec } as unknown as SurrealStore;
+
+    const result = await recoverProjectIdRows(store);
+    expect(result.tasks.found).toBe(2);
+    // First UPDATE threw → fixed counter only reflects the second success.
+    expect(result.tasks.fixed).toBe(1);
+  });
+
+  it("tags scope='global' for rows that have no project_id and no embedding-based match", async () => {
+    // Simulate: tasks/sessions/concepts/memories/reflections/skillsViaTask/skillsViaSession all empty (returns []),
+    // centroid computation returns nothing (no projects), then the globals-fallback
+    // pass finds orphan memory rows and tags them with scope='global'.
+    let callIdx = 0;
+    const queryFirst = vi.fn().mockImplementation(async (sql: string) => {
+      callIdx++;
+      // The globals-tag fallback queries 'FROM type::table($t) WHERE project_id IS NONE AND (scope IS NONE OR scope != 'global')'.
+      if (sql.includes("WHERE project_id IS NONE AND (scope IS NONE OR scope != 'global')")) {
+        return [{ id: "memory:abc" }, { id: "memory:def" }];
+      }
+      return [];
+    });
+    const queryExec = vi.fn().mockResolvedValue(undefined);
+    const store = { queryFirst, queryExec } as unknown as SurrealStore;
+
+    const result = await recoverProjectIdRows(store);
+    expect(result.globalsTagged).toBeGreaterThanOrEqual(2);
+    const globalsUpdates = queryExec.mock.calls.filter(c => String(c[0]).includes("scope = 'global'"));
+    expect(globalsUpdates.length).toBeGreaterThanOrEqual(2);
+  });
 });
 
 describe("recoverDaemonOrphans — return shape contract", () => {

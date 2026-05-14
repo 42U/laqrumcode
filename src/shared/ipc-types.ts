@@ -72,17 +72,6 @@ export const enum IpcErrorCode {
  *  to per-method types is a stretch goal. */
 export type IpcPayload = Record<string, unknown>;
 
-/** Standard response shape — mirrors the MCP tool response envelope so the
- *  client can pass it through with minimal translation. */
-export interface IpcResponse {
-  content?: Array<{ type: "text"; text: string }>;
-  /** Set by hook handlers — passes through to Claude Code's hook output. */
-  hookSpecificOutput?: {
-    hookEventName: string;
-    additionalContext?: string;
-  };
-}
-
 // ── Method namespace ──────────────────────────────────────────────────────
 
 /** Every registered IPC method. Used by the daemon's dispatcher and the
@@ -153,14 +142,6 @@ export interface ClientInfo {
   attachedAt?: number;
 }
 
-export interface MetaHandshakeRequest {
-  /** Optional — pre-0.7.9 clients don't send this and stay anonymous. Daemon
-   *  records this against the socket so meta.health can return a per-client
-   *  registry, not just an opaque count. Used by orphan detection: instead
-   *  of "is activeClients === 1", we can ask "are there any OTHER clients". */
-  clientInfo?: ClientInfo;
-}
-
 export interface MetaHandshakeResponse {
   daemonVersion: string;       // e.g. "0.7.0" — kongcode package version
   protocolVersion: number;     // PROTOCOL_VERSION
@@ -188,10 +169,11 @@ export interface MetaHealthResponse {
     rpcsInFlight: number;
     /** Per-client identity (0.7.9+ daemons). One entry per attached socket
      *  that completed handshake with clientInfo. Anonymous sockets (pre-0.7.9
-     *  clients that didn't send identity) are still counted in activeClients
-     *  but absent from this list. Used by orphan-recycle to distinguish
-     *  "I'm the only attached client" from "I'm the only attached client
-     *  with identity, but there could be anonymous siblings". */
+     *  clients that didn't send identity — @deprecated fallback, retained for
+     *  backward compat) are still counted in activeClients but absent from
+     *  this list. Used by orphan-recycle to distinguish "I'm the only attached
+     *  client" from "I'm the only attached client with identity, but there
+     *  could be anonymous siblings". */
     clients?: ClientInfo[];
     /** Reranker subsystem status (0.7.22+). True when bge-reranker-v2-m3
      *  cross-encoder is loaded and recall pipeline runs the rerank stage.
@@ -200,24 +182,6 @@ export interface MetaHealthResponse {
      *  retrieve-then-rerank pipeline is actually live. */
     rerankerActive?: boolean;
   };
-}
-
-export interface MetaRequestSupersedeRequest {
-  /** Caller's version (e.g. "0.7.7"). Daemon only accepts the supersede
-   *  flag when callerVersion is strictly newer than its own DAEMON_VERSION. */
-  clientVersion: string;
-}
-
-export interface MetaRequestSupersedeResponse {
-  /** True if the daemon accepted the supersede request and will exit when
-   *  the last client disconnects. False if it rejected (e.g. caller version
-   *  is older than or equal to daemon version). */
-  accepted: boolean;
-  /** Daemon's own version, for the client's logging. */
-  daemonVersion: string;
-  /** Number of attached clients at the time of request — caller can use
-   *  this to decide whether to wait or just continue. */
-  attachedClients: number;
 }
 
 /** Tool / hook calls — both share the same envelope at the wire level. The

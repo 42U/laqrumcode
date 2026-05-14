@@ -72,10 +72,6 @@ function setBootstrapPhase(p: BootstrapPhase, err?: Error): void {
   if (p === "failed" && err) bootstrapError = err;
 }
 
-export function getGlobalState(): GlobalPluginState | null {
-  return globalState;
-}
-
 // ── MCP Tool definitions ──────────────────────────────────────────────────────
 
 const TOOLS = [
@@ -320,33 +316,48 @@ async function handleToolCall(
 
   const session = getSession();
 
-  switch (name) {
-    case "recall":
-      return handleRecall(globalState, session, args);
-    case "core_memory":
-      return handleCoreMemory(globalState, session, args);
-    case "introspect":
-      return handleIntrospect(globalState, session, args);
-    case "fetch_pending_work":
-      return handleFetchPendingWork(globalState, session, args);
-    case "commit_work_results":
-      return handleCommitWorkResults(globalState, session, args);
-    case "create_knowledge_gems":
-      return handleCreateKnowledgeGems(globalState, session, args);
-    case "memory_health":
-      return handleMemoryHealth(globalState, session, args);
-    case "link_hierarchy":
-      return handleLinkHierarchy(globalState, session, args);
-    case "supersede":
-      return handleSupersede(globalState, session, args);
-    case "record_finding":
-      return handleRecordFinding(globalState, session, args);
-    case "cluster_scan":
-      return handleClusterScan(globalState, session, args);
-    case "what_is_missing":
-      return handleWhatIsMissing(globalState, session, args);
-    default:
-      return { content: [{ type: "text", text: `Unknown tool: ${name}` }] };
+  // Outer try/catch wraps the entire dispatch so handler exceptions surface
+  // as tool-result content (which the model can interpret + recover from)
+  // instead of bubbling up as raw JSON-RPC errors that confuse the client.
+  // Pre-existing bug: any thrown error from a tool handler would otherwise
+  // be relayed as a transport-level failure with no usable diagnostic.
+  try {
+    switch (name) {
+      case "recall":
+        return await handleRecall(globalState, session, args);
+      case "core_memory":
+        return await handleCoreMemory(globalState, session, args);
+      case "introspect":
+        return await handleIntrospect(globalState, session, args);
+      case "fetch_pending_work":
+        return await handleFetchPendingWork(globalState, session, args);
+      case "commit_work_results":
+        return await handleCommitWorkResults(globalState, session, args);
+      case "create_knowledge_gems":
+        return await handleCreateKnowledgeGems(globalState, session, args);
+      case "memory_health":
+        return await handleMemoryHealth(globalState, session, args);
+      case "link_hierarchy":
+        return await handleLinkHierarchy(globalState, session, args);
+      case "supersede":
+        return await handleSupersede(globalState, session, args);
+      case "record_finding":
+        return await handleRecordFinding(globalState, session, args);
+      case "cluster_scan":
+        return await handleClusterScan(globalState, session, args);
+      case "what_is_missing":
+        return await handleWhatIsMissing(globalState, session, args);
+      default:
+        return { content: [{ type: "text", text: `Unknown tool: ${name}` }] };
+    }
+  } catch (err) {
+    log.error("toolCall failed", { name, err });
+    return {
+      content: [{
+        type: "text",
+        text: `Tool ${name} failed: ${err instanceof Error ? err.message : String(err)}`,
+      }],
+    };
   }
 }
 

@@ -14,9 +14,11 @@
  */
 
 import type { SurrealStore, VectorSearchResult } from "./surreal.js";
+import type { GlobalPluginState } from "./state.js";
 import { swallow } from "./errors.js";
 import { crossEncoderScorePairs } from "./graph-context.js";
 import { recordSkillOutcome } from "./skills.js";
+import { parseDatetimeMs } from "./observability.js";
 
 export type RetrievedItem = VectorSearchResult & {
   finalScore?: number;
@@ -46,22 +48,46 @@ interface QualitySignals {
   recency: number;
 }
 
-// Per-turn state — module-level since only one turn is active at a time.
-// 0.7.27: indexMap holds the [#N] → memory_id map built at injection time
-// so Stop can parse the assistant response for [#1], [#2], etc. and write
-// `cited=true` to matching retrieval_outcome rows.
-let _pendingRetrieval: {
-  sessionId: string;
+// Per-session staging map. Earlier versions used a single module-level slot,
+// which silently corrupted multi-session daemon runs: a stageRetrieval from
+// session A would be overwritten by a concurrent stageRetrieval from session
+// B, and the subsequent recordToolOutcome / evaluateRetrieval calls (also
+// keyed by session) would read the wrong entry. The 0.7.27 indexMap survives
+// here — every entry still carries a [#N] → memory_id map so Stop can parse
+// `[#1]`, `[#2]`, etc. citations out of the assistant response.
+interface PendingRetrieval {
   items: RetrievedItem[];
   toolResults: { success: boolean }[];
   queryEmbedding?: number[];
   indexMap?: Map<number, string>; // 1-based index → memory_id
   skillIds?: string[];
   skillStageTime?: number;
-} | null = null;
+  /** Set by evaluateRetrieval while it's mid-flight. recordToolOutcome still
+   *  appends tool results during this window so a late Stop-tool outcome
+   *  isn't dropped on the floor, but stageRetrieval treats the entry as
+   *  evictable: the next staged retrieval replaces it. The entry is fully
+   *  deleted by evaluateRetrieval's finally block. */
+  evaluating?: boolean;
+}
 
-export function getStagedItems(): RetrievedItem[] {
-  return _pendingRetrieval?.items ? [..._pendingRetrieval.items] : [];
+const _pendingRetrievalBySession = new Map<string, PendingRetrieval>();
+
+/** Register a session-removal cleanup so removed sessions purge their entry.
+ *  Call once at daemon boot with the GlobalPluginState — re-registration is
+ *  safe (no-op via WeakSet guard). Modeled on core-memory.ts's pattern so a
+ *  hot-reload doesn't strand stale callbacks. */
+const _registeredStates = new WeakSet<GlobalPluginState>();
+export function registerRetrievalQualityCleanup(state: GlobalPluginState): void {
+  if (_registeredStates.has(state)) return;
+  _registeredStates.add(state);
+  state.onSessionRemoved((sessionId) => {
+    _pendingRetrievalBySession.delete(sessionId);
+  });
+}
+
+export function getStagedItems(sessionId: string): RetrievedItem[] {
+  const entry = _pendingRetrievalBySession.get(sessionId);
+  return entry?.items ? [...entry.items] : [];
 }
 
 export function stageRetrieval(
@@ -70,25 +96,31 @@ export function stageRetrieval(
   queryEmbedding?: number[],
   indexMap?: Map<number, string>,
 ): void {
-  _pendingRetrieval = {
-    sessionId,
+  // A staged-while-evaluating window is normal: evaluator marks the entry
+  // `evaluating` and leaves it in the map so a late recordToolOutcome still
+  // lands. Overwriting here is correct — the next turn's retrieval replaces
+  // the previous turn's staged record. The evaluator's finally checks
+  // identity before deleting, so it won't clobber this fresh entry.
+  _pendingRetrievalBySession.set(sessionId, {
     items,
     toolResults: [],
     queryEmbedding,
     indexMap,
-  };
+  });
 }
 
-export function recordToolOutcome(success: boolean): void {
-  if (_pendingRetrieval) {
-    _pendingRetrieval.toolResults.push({ success });
+export function recordToolOutcome(sessionId: string, success: boolean): void {
+  const entry = _pendingRetrievalBySession.get(sessionId);
+  if (entry) {
+    entry.toolResults.push({ success });
   }
 }
 
-export function stageSkills(skillIds: string[]): void {
-  if (_pendingRetrieval && skillIds.length > 0) {
-    _pendingRetrieval.skillIds = skillIds;
-    _pendingRetrieval.skillStageTime = Date.now();
+export function stageSkills(sessionId: string, skillIds: string[]): void {
+  const entry = _pendingRetrievalBySession.get(sessionId);
+  if (entry && skillIds.length > 0) {
+    entry.skillIds = skillIds;
+    entry.skillStageTime = Date.now();
   }
 }
 
@@ -96,17 +128,45 @@ export function stageSkills(skillIds: string[]): void {
  * Evaluate retrieval quality after assistant response.
  */
 export async function evaluateRetrieval(
+  sessionId: string,
   responseTurnId: string,
   responseText: string,
   store: SurrealStore,
 ): Promise<void> {
-  if (!_pendingRetrieval || (_pendingRetrieval.items.length === 0 && !_pendingRetrieval.skillIds?.length)) {
-    _pendingRetrieval = null;
+  // Mark the entry as evaluating but leave it in the map so a late
+  // recordToolOutcome (Stop hook arriving after this evaluator starts) still
+  // appends to the same toolResults array we'll read below. The prior code
+  // deleted synchronously before any await, which dropped any tool outcomes
+  // produced during the evaluate window — those turns landed with
+  // tool_success=null even though Claude had successfully executed tools.
+  // We delete in the finally to guarantee cleanup whether evaluate succeeds,
+  // throws, or short-circuits.
+  const pending = _pendingRetrievalBySession.get(sessionId);
+  if (!pending || (pending.items.length === 0 && !pending.skillIds?.length)) {
+    _pendingRetrievalBySession.delete(sessionId);
     return;
   }
+  pending.evaluating = true;
 
-  const { sessionId, items, toolResults, queryEmbedding, indexMap, skillIds, skillStageTime } = _pendingRetrieval;
-  _pendingRetrieval = null;
+  try {
+    return await evaluateRetrievalInner(sessionId, responseTurnId, responseText, store, pending);
+  } finally {
+    // Only delete if this evaluator still owns the entry. A racing
+    // stageRetrieval can replace it with a fresh entry mid-evaluate, in
+    // which case we must not clobber the new staging.
+    const current = _pendingRetrievalBySession.get(sessionId);
+    if (current === pending) _pendingRetrievalBySession.delete(sessionId);
+  }
+}
+
+async function evaluateRetrievalInner(
+  sessionId: string,
+  responseTurnId: string,
+  responseText: string,
+  store: SurrealStore,
+  pending: PendingRetrieval,
+): Promise<void> {
+  const { items, toolResults, queryEmbedding, indexMap, skillIds, skillStageTime } = pending;
 
   // Skill outcome runs unconditionally — the retrieval-quality filters below
   // apply to memory/concept scoring only, not to skill reinforcement.
@@ -204,7 +264,19 @@ export async function evaluateRetrieval(
           record.citation_method = "none";
         }
       }
-      await store.queryExec(`CREATE retrieval_outcome CONTENT $data`, { data: record });
+      // Pre-check on (session_id, turn_id, memory_id) — the UNIQUE index
+      // tuple — and skip if a row already exists. Re-evaluating the same turn
+      // (rare but possible on retry) or a concurrent loop hit must not insert
+      // a duplicate. The UNIQUE index is the hard backstop.
+      const existing = await store.queryFirst<{ id: string }>(
+        `SELECT id FROM retrieval_outcome
+           WHERE session_id = $sid AND turn_id = $tid AND memory_id = $mid
+           LIMIT 1`,
+        { sid: sessionId, tid: responseTurnId, mid: idStr },
+      );
+      if (existing.length === 0) {
+        await store.queryExec(`CREATE retrieval_outcome CONTENT $data`, { data: record });
+      }
       store.updateUtilityCache(idStr, signals.utilization)
         .catch(e => swallow.warn("retrieval-quality:utilityCache", e));
     } catch (e) {
@@ -224,10 +296,26 @@ export async function evaluateRetrieval(
     ? Math.max(...knowledgeCeScores)
     : null;
 
-  store.queryExec(
-    `CREATE turn_score CONTENT $data`,
-    { data: { session_id: sessionId, turn_id: responseTurnId, context_util: contextUtil } },
-  ).catch(e => swallow("retrieval-quality:turnScore", e));
+  // Pre-check on (session_id, turn_id) — the UNIQUE index tuple — and skip
+  // if a row already exists. Same retry/concurrent-loop concern as
+  // retrieval_outcome above. The UNIQUE index is the hard backstop.
+  (async () => {
+    try {
+      const existing = await store.queryFirst<{ id: string }>(
+        `SELECT id FROM turn_score
+           WHERE session_id = $sid AND turn_id = $tid LIMIT 1`,
+        { sid: sessionId, tid: responseTurnId },
+      );
+      if (existing.length === 0) {
+        await store.queryExec(
+          `CREATE turn_score CONTENT $data`,
+          { data: { session_id: sessionId, turn_id: responseTurnId, context_util: contextUtil } },
+        );
+      }
+    } catch (e) {
+      swallow("retrieval-quality:turnScore", e);
+    }
+  })();
 }
 
 /** 0.7.27: count how many high-salience items the assistant ignored last
@@ -310,8 +398,12 @@ export function computeSignals(
 
   let recency = 0.5;
   if (item.timestamp) {
-    const ageHours = (Date.now() - new Date(item.timestamp).getTime()) / 3_600_000;
-    recency = Math.exp(-ageHours / 168);
+    const ms = parseDatetimeMs(item.timestamp);
+    if (ms != null) {
+      const ageHours = (Date.now() - ms) / 3_600_000;
+      recency = Math.exp(-ageHours / 168);
+    }
+    // ms == null: leave recency at safe default 0.5
   }
 
   return { utilization, toolSuccess, contextTokens, wasNeighbor: item.fromNeighbor ?? false, recency };
@@ -453,7 +545,12 @@ export async function getRecentUtilizationAvg(
       `SELECT math::mean(utilization) AS avg FROM (SELECT utilization, created_at FROM retrieval_outcome WHERE session_id = $sid ORDER BY created_at DESC LIMIT $lim)`,
       { sid: sessionId, lim: windowSize },
     );
-    return rows[0]?.avg ?? null;
+    // Guard against NaN: math::mean over an empty window returns NaN in
+    // SurrealDB, which would propagate through orchestrator.ts:266
+    // (`orch.cachedUtilAvg !== null` accepts NaN, then poisons tokenBudget
+    // math). Coerce non-finite values to null so callers see "no signal".
+    const avg = rows[0]?.avg ?? null;
+    return Number.isFinite(avg) ? avg : null;
   } catch {
     return null;
   }

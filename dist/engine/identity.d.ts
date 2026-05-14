@@ -8,6 +8,15 @@ import type { EmbeddingService } from "./embeddings.js";
  */
 export declare const IDENTITY_VERSION = "0.4.1";
 export declare function seedIdentity(store: SurrealStore, embeddings: EmbeddingService): Promise<number>;
+/**
+ * Version tag for user-identity chunks. The compound UNIQUE on identity_chunk
+ * is (source, identity_version, chunk_index) — without an explicit version
+ * here, all chunks would write identity_version = NONE and any DELETE failure
+ * upstream leaves stale NONE-versioned rows occupying chunk_index 0..N-1,
+ * causing the CREATEs below to collide on the UNIQUE constraint.
+ * Bump when user-identity chunk semantics change so old rows can be migrated.
+ */
+export declare const USER_IDENTITY_VERSION = "user-v1";
 export declare function hasUserIdentity(store: SurrealStore): Promise<boolean>;
 export declare function findWakeupFile(cwd: string): string | null;
 export declare function readWakeupFile(path: string): string;

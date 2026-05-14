@@ -10,7 +10,10 @@
  * of the daemon. Useful when the user is intentionally tuning configs.
  */
 export declare function isProtectedConfigFile(filePath: string): boolean;
-/** Test-only: clear bypass cache and let a new env take effect. */
+/**
+ * Test-only: clear bypass cache and let a new env take effect.
+ * @internal
+ */
 export declare function _resetConfigProtectionCacheForTests(): void;
 /** Exported for tests + the Tier-0 directive text. */
 export declare function listProtectedBasenames(): string[];

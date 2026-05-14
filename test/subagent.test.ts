@@ -58,19 +58,23 @@ describe("handleSubagentStop", () => {
 
   it("falls back to DB lookup when no tool_use_id stash match", async () => {
     const session = mockSession();
-    // No stash entry — the fallback query should fire.
+    // tool_use_id is present in the payload but NOT in the stash — the
+    // exact-match correlation_key fallback should fire. (Recency-based
+    // fallback was retired: a re-fired SubagentStop on a session with
+    // multiple live subagents would close the wrong row.)
     const state = mockState(session, [{ id: "subagent:s2" }]);
 
     await handleSubagentStop(state, {
       session_id: session.sessionId,
+      tool_use_id: "tool-use-stranded",
       agent_type: "Plan",
       outcome: "completed",
     });
 
-    // Fallback query ran (filters by agent_type since it was provided).
+    // Fallback query ran — exact match on correlation_key.
     expect(state.store.queryFirst).toHaveBeenCalledWith(
       expect.stringContaining("FROM subagent"),
-      expect.objectContaining({ sid: session.sessionId, at: "Plan" }),
+      expect.objectContaining({ cid: "tool-use-stranded" }),
     );
     // Then the UPDATE on the row it found.
     expect(state.store.queryExec).toHaveBeenCalledWith(

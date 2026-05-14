@@ -84,6 +84,10 @@ export class IpcClient {
         : createConnection({ host: this.opts.tcpHost ?? "127.0.0.1", port: this.opts.tcpPort ?? 0 });
       const onError = (err: Error) => {
         sock.removeListener("connect", onConnect);
+        // Destroy the failed socket so it doesn't linger in Node's internal
+        // registry holding a file descriptor — left attached, repeated
+        // connect failures accumulate until ENFILE eventually fires.
+        try { sock.destroy(); } catch {}
         reject(err);
       };
       const onConnect = () => {
@@ -166,6 +170,17 @@ export class IpcClient {
 
   private onData(chunk: Buffer): void {
     this.buffer += chunk.toString("utf8");
+    // Mirror the server-side 8MB cap. A malformed or runaway daemon sending
+    // an endless line without newline would otherwise grow client buffer
+    // without bound, exhausting RAM in the long-lived MCP client process.
+    if (this.buffer.length > 8 * 1024 * 1024) {
+      this.log.warn("[ipc-client] daemon buffer exceeded 8 MB without newline, resetting connection");
+      this.buffer = "";
+      if (this.socket) {
+        try { this.socket.destroy(); } catch {}
+      }
+      return;
+    }
     let nl: number;
     while ((nl = this.buffer.indexOf("\n")) !== -1) {
       const line = this.buffer.slice(0, nl).trim();

@@ -250,9 +250,9 @@ describe("handlePostToolUse — recordToolOutcome wiring", () => {
       tool_name: "Bash",
       tool_response: "ok",
     });
-    expect(getStagedItems().length).toBe(1); // still staged until evaluateRetrieval
-    // Drain the singleton without writing (store is unavailable in stub)
-    await evaluateRetrieval("turn:test", "response text", { isAvailable: () => false } as unknown as Parameters<typeof evaluateRetrieval>[2]);
+    expect(getStagedItems("sess-3").length).toBe(1); // still staged until evaluateRetrieval
+    // Drain the per-session entry without writing (store is unavailable in stub)
+    await evaluateRetrieval("sess-3", "turn:test", "response text", { isAvailable: () => false } as unknown as Parameters<typeof evaluateRetrieval>[3]);
   });
 
   it("detects failure from top-level payload.error", async () => {

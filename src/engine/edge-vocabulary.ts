@@ -53,7 +53,7 @@ export const CANONICAL_EDGES = {
 
 export type CanonicalEdge = keyof typeof CANONICAL_EDGES;
 
-export const CANONICAL_EDGE_NAMES: readonly CanonicalEdge[] =
+const CANONICAL_EDGE_NAMES: readonly CanonicalEdge[] =
   Object.keys(CANONICAL_EDGES) as CanonicalEdge[];
 
 const _CANONICAL_SET = new Set<string>(CANONICAL_EDGE_NAMES);

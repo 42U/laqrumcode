@@ -24,7 +24,8 @@ interface PendingItem {
   project_id?: string;
 }
 
-const RECORD_ID_RE = /^pending_work:[a-zA-Z0-9_]+$/;
+/** Local-narrow record-id regex: only accept ids in the `pending_work` table. */
+const pendingWorkIdRe = /^pending_work:[a-zA-Z0-9_]+$/;
 
 export async function drainHeuristic(state: GlobalPluginState): Promise<number> {
   const { store, embeddings } = state;
@@ -38,7 +39,7 @@ export async function drainHeuristic(state: GlobalPluginState): Promise<number> 
     );
 
     for (const item of items) {
-      if (!RECORD_ID_RE.test(item.id)) continue;
+      if (!pendingWorkIdRe.test(item.id)) continue;
       try {
         const ok = await processItem(item, state);
         if (ok) {

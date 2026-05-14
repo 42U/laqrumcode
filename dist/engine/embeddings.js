@@ -126,15 +126,14 @@ export class EmbeddingService {
             this.cache.set(text, l2);
             return l2;
         }
+        let timer;
         try {
-            let timer;
             const result = await Promise.race([
                 this.ctx.getEmbeddingFor(text),
                 new Promise((_, reject) => {
                     timer = setTimeout(() => reject(new Error(`embed() timed out after ${this.embedTimeoutMs}ms`)), this.embedTimeoutMs);
                 }),
             ]);
-            clearTimeout(timer);
             this.consecutiveTimeouts = 0;
             const vec = Array.from(result.vector);
             if (this.cache.size >= this.maxCacheSize) {
@@ -147,10 +146,23 @@ export class EmbeddingService {
         catch (err) {
             if (err instanceof Error && err.message.includes("timed out")) {
                 this.consecutiveTimeouts++;
+                // Preserve the stack trace so post-mortem grep against the daemon
+                // log shows which call path tripped the breaker — the prior
+                // single-line message discarded `err.stack` entirely and made
+                // "circuit breaker open" reports impossible to root-cause.
                 log.error(`[embeddings] timeout #${this.consecutiveTimeouts}/${this.maxConsecutiveTimeouts}` +
-                    (this.consecutiveTimeouts >= this.maxConsecutiveTimeouts ? " — CIRCUIT BREAKER OPEN" : ""));
+                    (this.consecutiveTimeouts >= this.maxConsecutiveTimeouts ? " — CIRCUIT BREAKER OPEN" : "") +
+                    ` err=${err.stack ?? err.message}`);
             }
             throw err;
+        }
+        finally {
+            // Clear the timer on every exit path (success, embedder error, or
+            // timeout itself). The prior code only cleared on success — a fast
+            // embedder error left a pending Timeout that kept the process alive
+            // for `embedTimeoutMs` after each failed embed.
+            if (timer !== undefined)
+                clearTimeout(timer);
         }
     }
     async embedBatch(texts) {
@@ -160,10 +172,6 @@ export class EmbeddingService {
     }
     isAvailable() {
         return this.ready;
-    }
-    resetCircuitBreaker() {
-        this.consecutiveTimeouts = 0;
-        log.warn("[embeddings] circuit breaker manually reset");
     }
     async dispose() {
         try {
@@ -175,5 +183,66 @@ export class EmbeddingService {
         catch (e) {
             swallow("embeddings:dispose", e);
         }
+    }
+}
+/**
+ * Runtime probe for the embedding service — distinguishes "down" (init failed
+ * or never ran), "degraded" (live but returns empty / errors on a one-token
+ * embed), and "ok" (live and returning real vectors). Used by introspect and
+ * memory-health to surface the actual init failure when `isAvailable=false`
+ * rather than just reporting the flag.
+ *
+ * The shape is intentionally minimal — callers map this into their richer
+ * report shapes locally so the two consumers can keep their own field names.
+ */
+export async function probeEmbeddingService(embeddings) {
+    const e = embeddings;
+    if (!e || typeof e.isAvailable !== "function") {
+        return { status: "down", message: "embedding service not present" };
+    }
+    if (!e.isAvailable()) {
+        const diag = typeof e.getDiagnostics === "function" ? e.getDiagnostics() : null;
+        if (diag?.initError) {
+            const firstLine = String(diag.initError.message ?? "").split("\n")[0].slice(0, 200);
+            return { status: "down", message: `initialize() threw: ${firstLine}` };
+        }
+        if (diag?.initStartedAt != null && diag.initFinishedAt == null) {
+            const ageS = Math.floor((Date.now() - diag.initStartedAt) / 1000);
+            return {
+                status: "down",
+                message: `initialize() in progress (${ageS}s elapsed; native build may be running)`,
+            };
+        }
+        if (diag?.initStartedAt == null) {
+            return {
+                status: "down",
+                message: "initialize() never called (boot path may have skipped embedding init)",
+            };
+        }
+        return { status: "down", message: "isAvailable=false (no diagnostics captured)" };
+    }
+    let probeTimer;
+    try {
+        const probe = e.embed("ping").then(v => v?.length ?? 0);
+        const len = await Promise.race([
+            probe,
+            new Promise((_, rej) => {
+                probeTimer = setTimeout(() => rej(new Error("probe timeout")), 1500);
+            }),
+        ]);
+        if (typeof len === "number" && len > 0) {
+            return { status: "ok", message: `BGE-M3 responsive, ${len}-dim` };
+        }
+        return { status: "degraded", message: "embed returned empty vector" };
+    }
+    catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return { status: "degraded", message: `embed probe failed: ${msg.slice(0, 120)}` };
+    }
+    finally {
+        // Clear on every exit path so a fast-resolving embed doesn't leave a
+        // 1.5s pending Timeout keeping the caller alive.
+        if (probeTimer !== undefined)
+            clearTimeout(probeTimer);
     }
 }

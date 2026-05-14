@@ -11,38 +11,15 @@
  * text-based skill — same data, structured output.
  */
 import { swallow } from "../engine/errors.js";
+import { probeEmbeddingService } from "../engine/embeddings.js";
 async function probeEmbeddings(embeddings) {
-    const e = embeddings;
-    if (!e || typeof e.isAvailable !== "function") {
-        return { status: "down", detail: "embedding service not present" };
-    }
-    if (!e.isAvailable()) {
-        const diag = typeof e.getDiagnostics === "function" ? e.getDiagnostics() : null;
-        if (diag?.initError) {
-            return { status: "down", detail: `initialize() threw: ${String(diag.initError.message ?? "").split("\n")[0].slice(0, 200)}` };
-        }
-        if (diag?.initStartedAt != null && diag.initFinishedAt == null) {
-            const ageS = Math.floor((Date.now() - diag.initStartedAt) / 1000);
-            return { status: "down", detail: `initialize() in progress (${ageS}s elapsed; native build may be running)` };
-        }
-        if (diag?.initStartedAt == null) {
-            return { status: "down", detail: "initialize() never called" };
-        }
-        return { status: "down", detail: "isAvailable=false (no diagnostics)" };
-    }
-    try {
-        const probe = e.embed("ping").then(v => v?.length ?? 0);
-        const len = await Promise.race([
-            probe,
-            new Promise((_, rej) => setTimeout(() => rej(new Error("probe timeout")), 1500)),
-        ]);
-        if (typeof len === "number" && len > 0)
-            return { status: "ok" };
-        return { status: "degraded", detail: "empty vector" };
-    }
-    catch (err) {
-        return { status: "degraded", detail: err instanceof Error ? err.message.slice(0, 120) : "probe failed" };
-    }
+    const probed = await probeEmbeddingService(embeddings);
+    // memory-health omits the detail field on the "ok" path. Mapping `message`
+    // → `detail` here preserves that convention so the JSON output shape stays
+    // backwards-compatible with existing memory_health consumers.
+    if (probed.status === "ok")
+        return { status: "ok" };
+    return { status: probed.status, detail: probed.message };
 }
 async function countRow(state, sql, defaultVal = 0) {
     try {

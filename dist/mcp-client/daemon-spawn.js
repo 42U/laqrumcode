@@ -16,7 +16,7 @@ import { existsSync, openSync, closeSync, writeSync, readFileSync, unlinkSync } 
 import { mkdir } from "node:fs/promises";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { homedir } from "node:os";
+import { homedir, platform } from "node:os";
 import { IpcClient } from "./ipc-client.js";
 const DEFAULT_HOME = homedir();
 /** Try to acquire an exclusive file lock to prevent concurrent daemon spawns.
@@ -63,6 +63,64 @@ function isPidAlive(pid) {
     }
     catch (e) {
         return e.code === "EPERM";
+    }
+}
+/** Read the daemon.pid file and return either the parsed JSON marker or a
+ *  synthesized one for legacy bare-PID files. Returns null if unparseable. */
+function readDaemonPidMarker(pidFile) {
+    let raw;
+    try {
+        raw = readFileSync(pidFile, "utf-8").trim();
+    }
+    catch {
+        return null;
+    }
+    if (!raw)
+        return null;
+    try {
+        const parsed = JSON.parse(raw);
+        if (parsed && parsed.marker === "kongcode-daemon" && Number.isFinite(parsed.pid)) {
+            return {
+                marker: "kongcode-daemon",
+                pid: parsed.pid,
+                startedAt: Number.isFinite(parsed.startedAt) ? parsed.startedAt : 0,
+                daemonVersion: typeof parsed.daemonVersion === "string" ? parsed.daemonVersion : "?",
+            };
+        }
+        return null;
+    }
+    catch {
+        // Legacy bare-PID format.
+        const n = Number(raw);
+        if (Number.isFinite(n) && n > 0) {
+            return { marker: "kongcode-daemon", pid: n, startedAt: 0, daemonVersion: "?" };
+        }
+        return null;
+    }
+}
+/** Same /proc/<pid>/cmdline check as the daemon itself uses — distinguishes
+ *  a real daemon from a recycled PID. Returns null on non-Linux (can't
+ *  verify; callers should treat as 'maybe valid'). */
+function daemonCmdlineMatches(pid) {
+    if (platform() !== "linux")
+        return null;
+    try {
+        const raw = readFileSync(`/proc/${pid}/cmdline`, "utf8");
+        if (!raw)
+            return false;
+        const joined = raw.replace(/\0/g, " ").toLowerCase();
+        if (!joined.includes("node"))
+            return false;
+        if (joined.includes("kongcode-daemon"))
+            return true;
+        if (joined.includes("daemon/index.js") || joined.includes("daemon/index.cjs"))
+            return true;
+        if (joined.includes("kongcode") && joined.includes("daemon"))
+            return true;
+        return false;
+    }
+    catch {
+        return false;
     }
 }
 async function pingSocket(socketPath, timeoutMs = 1500) {
@@ -118,17 +176,32 @@ export async function ensureDaemon(opts = {}) {
     if (existsSync(socketPath) && (await pingSocket(socketPath))) {
         return { socketPath, spawned: false };
     }
-    // PID file probe — if pid alive but socket dead, daemon is wedged. Log
-    // and fall through to spawn (the wedged daemon will be GC'd by the OS
-    // when its socket-less process eventually exits).
+    // PID file probe with identity verification. If a live kongcode daemon
+    // owns the singleton lock but isn't serving its socket yet (still
+    // bootstrapping, or transient stall), wait for it instead of spawning a
+    // second daemon. A second daemon would double-run startDrainScheduler
+    // and double-process pending_work — exactly the duplicate-row class of
+    // bug this fix targets. Only spawn if the lock is unowned OR the holder
+    // is dead OR the PID was recycled by a non-daemon process.
     if (existsSync(pidFile)) {
-        try {
-            const pid = Number(readFileSync(pidFile, "utf-8").trim());
-            if (isPidAlive(pid)) {
-                log.warn(`[daemon-spawn] daemon pid=${pid} alive but socket dead — proceeding to spawn fresh`);
+        const marker = readDaemonPidMarker(pidFile);
+        if (marker && isPidAlive(marker.pid)) {
+            const cmdline = daemonCmdlineMatches(marker.pid);
+            // cmdline === false → recycled PID, fall through to spawn.
+            // cmdline === true → confirmed daemon, wait for its socket.
+            // cmdline === null → non-Linux, can't verify; conservative: wait too.
+            if (cmdline !== false) {
+                log.info(`[daemon-spawn] live kongcode daemon detected at pid=${marker.pid} v${marker.daemonVersion} — waiting for socket instead of spawning`);
+                const deadline = Date.now() + readyTimeoutMs;
+                const ok = await pollSocketReady(socketPath, deadline, log);
+                if (ok)
+                    return { socketPath, spawned: false };
+                log.warn(`[daemon-spawn] daemon pid=${marker.pid} alive but socket never became ready — proceeding to spawn fresh`);
+            }
+            else {
+                log.warn(`[daemon-spawn] daemon.pid claims pid=${marker.pid} but cmdline doesn't match kongcode daemon (recycled PID) — proceeding to spawn fresh`);
             }
         }
-        catch { }
     }
     // Acquire spawn lock; if held by another client racing us, wait for them
     // to finish (poll socket up to readyTimeoutMs).

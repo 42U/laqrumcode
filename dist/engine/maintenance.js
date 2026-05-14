@@ -16,9 +16,51 @@
  */
 import { checkACANReadiness } from "./acan.js";
 import { swallow } from "./errors.js";
+import { copyFileSync, existsSync, mkdirSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+import { log } from "./log.js";
+/**
+ * One-time forward-migration of ACAN weights.
+ *
+ * Pre-config-threading default for ACAN weights was ~/.kongbrain/acan_weights.json
+ * (from when the code lived in the kongbrain plugin). Now we thread
+ * state.config.paths.cacheDir into checkACANReadiness, so weights live under
+ * ~/.kongcode/cache/. Existing user installs have 2.7MB of trained weights
+ * at the legacy path that would otherwise be orphaned.
+ *
+ * If the legacy file exists AND the new cacheDir file does NOT, copy the
+ * legacy weights forward. Idempotent: subsequent runs see the destination
+ * file and skip. NEVER deletes the source — the legacy file stays as a
+ * fallback for any code path that hasn't been threaded yet (and as a
+ * sanity-recovery point).
+ */
+function migrateLegacyACANWeights(cacheDir) {
+    try {
+        const legacyPath = join(homedir(), ".kongbrain", "acan_weights.json");
+        const newPath = join(cacheDir, "acan_weights.json");
+        if (!existsSync(legacyPath))
+            return; // nothing to migrate
+        if (existsSync(newPath))
+            return; // already migrated, idempotent skip
+        if (!existsSync(cacheDir))
+            mkdirSync(cacheDir, { recursive: true });
+        copyFileSync(legacyPath, newPath);
+        log.info(`[maintenance] migrated ACAN weights forward: ${legacyPath} -> ${newPath} (legacy file preserved)`);
+    }
+    catch (e) {
+        swallow.warn("maintenance:migrateLegacyACAN", e);
+    }
+}
 export function runBootstrapMaintenance(state) {
     const { store, embeddings, config } = state;
     const deferMs = Number(process.env.KONGCODE_MAINTENANCE_DEFER_MS) || 30_000;
+    // One-time forward-migration of ACAN weights from ~/.kongbrain/ to cacheDir.
+    // Cheap (one stat + zero or one copy), idempotent, runs early so the deferred
+    // checkACANReadiness call below picks up the migrated weights.
+    // Guarded against partial test mocks that omit config.paths.
+    const cacheDir = config.paths?.cacheDir ?? join(homedir(), ".kongcode", "cache");
+    migrateLegacyACANWeights(cacheDir);
     // Group 1: cheap DB queries — safe to run immediately in parallel
     Promise.all([
         store.runMemoryMaintenance(),
@@ -42,7 +84,7 @@ export function runBootstrapMaintenance(state) {
             swallow.warn("maintenance:consolidate", e);
         }
         try {
-            await checkACANReadiness(store, config.thresholds.acanTrainingThreshold);
+            await checkACANReadiness(store, config.thresholds.acanTrainingThreshold, cacheDir);
         }
         catch (e) {
             swallow.warn("maintenance:acan", e);

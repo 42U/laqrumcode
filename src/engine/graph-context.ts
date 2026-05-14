@@ -2,8 +2,7 @@
  * Graph-based context transformation for KongCode.
  *
  * Core retrieval pipeline: vector search → graph expand → WMR/ACAN scoring
- * → dedup → budget trim → format. All retrieval logic is identical to KongBrain;
- * only the integration layer (imports, output format) differs.
+ * → dedup → budget trim → format.
  */
 
 import type {
@@ -21,6 +20,7 @@ import { getCachedContext, setCachedContext, recordPrefetchHit, recordPrefetchMi
 import { stageRetrieval, stageSkills, getHistoricalUtilityBatch, getLastTurnGroundingTrace } from "./retrieval-quality.js";
 import { isACANActive, scoreWithACAN, type ACANCandidate } from "./acan.js";
 import { swallow } from "./errors.js";
+import { clamp } from "./math.js";
 import { log } from "./log.js";
 import type { LlamaRankingContext } from "node-llama-cpp";
 import type { ResourceProfile } from "./resource-tier.js";
@@ -163,8 +163,7 @@ export function applyDistributionBands<T extends { finalScore?: number; band?: S
  *  was leaking irrelevant graph-neighbor concepts into context (e.g., a
  *  4-week-old heartbeat-system concept from a different project surfacing
  *  in unrelated turns) because tail items never saw the cross-encoder yet
- *  arrived in the injection anyway. Set KONGCODE_RERANKER_KEEP_TAIL=true
- *  to opt back into the old behavior. */
+ *  arrived in the injection anyway. */
 async function rerankResults<T extends { id: string; text?: string; finalScore: number; crossScore?: number; band?: SalienceBand }>(
   deduped: T[],
   queryText: string,
@@ -201,19 +200,10 @@ async function rerankResults<T extends { id: string; text?: string; finalScore: 
     // Drop hard-noise (cross-encoder strongly disagrees) before re-sorting.
     const survivors = candidates.filter((c) => (c.crossScore ?? 0) >= BAND_DROP_BELOW);
     survivors.sort((a, b) => b.finalScore - a.finalScore);
-    const keepTail = process.env.KONGCODE_RERANKER_KEEP_TAIL === "true";
-    if (!keepTail) {
-      // 0.7.43 default: drop unreranked tail entirely. Tail items bypassed
-      // the cross-encoder by definition; shipping them as 'background'
-      // injects noise the user can't account for.
-      return survivors;
-    }
-    const rerankedSet = new Set(survivors.map((r) => r.id));
-    const tail = deduped.filter((r) => !rerankedSet.has(r.id) && !candidates.some(c => c.id === r.id));
-    for (const t of tail) {
-      if (t.band === undefined) t.band = "background";
-    }
-    return [...survivors, ...tail];
+    // Drop unreranked tail entirely. Tail items bypassed the cross-encoder by
+    // definition; shipping them as 'background' injects noise the user can't
+    // account for.
+    return survivors;
   } catch (e) {
     swallow.warn("graph-context:rerankResults failed — using WMR scores", e);
     return deduped;
@@ -249,12 +239,6 @@ function isAssistant(msg: AgentMessage): msg is AssistantMessage {
 }
 function isToolResult(msg: AgentMessage): msg is ToolResultMessage {
   return (msg as ToolResultMessage).role === "toolResult";
-}
-function msgRole(msg: AgentMessage): string {
-  if (isUser(msg)) return msg.role;
-  if (isAssistant(msg)) return msg.role;
-  if (isToolResult(msg)) return msg.role;
-  return "unknown";
 }
 function msgContentBlocks(msg: AgentMessage): ContentBlock[] {
   if (isUser(msg)) {
@@ -425,9 +409,31 @@ function msgCharLen(msg: AgentMessage): number {
   return len;
 }
 
+/** Robust epoch-ms parser. Mirrors observability.ts's parseDatetimeMs:
+ *  rejects null/undefined, accepts already-numeric ms, and otherwise feeds
+ *  the value through `new Date()` (with a String() fallback for SurrealDB
+ *  DateTime objects whose `toString()` emits RFC 3339 but which don't
+ *  auto-coerce on `new Date(obj)` across driver versions). Returns null on
+ *  any value that produces a non-finite time, so downstream math::pow /
+ *  division never has to defend against NaN. */
+function parseDatetimeMs(v: unknown): number | null {
+  if (v == null) return null;
+  if (typeof v === "number") return Number.isFinite(v) ? v : null;
+  try {
+    let t = new Date(v as any).getTime();
+    if (!Number.isFinite(t)) t = new Date(String(v)).getTime();
+    return Number.isFinite(t) ? t : null;
+  } catch {
+    return null;
+  }
+}
+
 function recencyScore(timestamp: string | undefined): number {
   if (!timestamp) return 0.3;
-  const hoursElapsed = (Date.now() - new Date(timestamp).getTime()) / (1000 * 60 * 60);
+  const ms = parseDatetimeMs(timestamp);
+  if (ms == null) return 0.3;
+  const hoursElapsed = (Date.now() - ms) / (1000 * 60 * 60);
+  if (!Number.isFinite(hoursElapsed)) return 0.3;
   if (hoursElapsed <= RECENCY_BOUNDARY_HOURS) {
     return Math.pow(RECENCY_DECAY_FAST, hoursElapsed);
   }
@@ -436,7 +442,11 @@ function recencyScore(timestamp: string | undefined): number {
 }
 
 export function formatRelativeTime(ts: string): string {
-  const ms = Date.now() - new Date(ts).getTime();
+  const parsed = parseDatetimeMs(ts);
+  // If unparseable, surface "unknown" rather than poisoning the UI with NaN
+  // strings. Callers were trusting this to always produce a useful label.
+  if (parsed == null) return "unknown";
+  const ms = Date.now() - parsed;
   const mins = Math.floor(ms / 60000);
   if (mins < 1) return "just now";
   if (mins < 60) return `${mins}m ago`;
@@ -931,9 +941,11 @@ async function formatContextMessage(
     const dueMemories = await store.getDueMemories(3);
     if (dueMemories.length > 0) {
       const memLines = dueMemories.map((m: any) => {
-        const ageMs = Date.now() - new Date(m.created_at).getTime();
-        const ageDays = Math.floor(ageMs / 86400000);
-        const ageStr = ageDays === 0 ? "today" : ageDays === 1 ? "yesterday" : `${ageDays} days ago`;
+        const createdMs = parseDatetimeMs(m.created_at);
+        const ageMs = createdMs != null ? Date.now() - createdMs : null;
+        const ageDays = ageMs != null ? Math.floor(ageMs / 86400000) : null;
+        const ageStr = ageDays == null ? "unknown"
+          : ageDays === 0 ? "today" : ageDays === 1 ? "yesterday" : `${ageDays} days ago`;
         return `  - [${m.id}] (${ageStr}, surfaced ${m.surface_count}x): ${m.text}`;
       }).join("\n");
       sections.push(
@@ -997,8 +1009,8 @@ async function formatContextMessage(
       const sa = a.finalScore ?? 0;
       const sb = b.finalScore ?? 0;
       if (sb !== sa) return sb - sa;
-      const ta = a.timestamp ? new Date(a.timestamp).getTime() : 0;
-      const tb = b.timestamp ? new Date(b.timestamp).getTime() : 0;
+      const ta = a.timestamp ? parseDatetimeMs(a.timestamp) ?? 0 : 0;
+      const tb = b.timestamp ? parseDatetimeMs(b.timestamp) ?? 0 : 0;
       return tb - ta;
     });
     const label = LABELS[key] ?? key;
@@ -1089,7 +1101,7 @@ function getRecentTurns(
   const toolBudgetChars = toolTokens * CHARS_PER_TOKEN;
   // Per-tool-result char cap (claw-code: DEFAULT_MAX_RESULT_SIZE_CHARS = 50,000)
   // Scale with context window but floor at 20k, cap at 50k
-  const TOOL_RESULT_MAX = Math.min(50_000, Math.max(20_000, Math.round(contextWindow * 0.10)));
+  const TOOL_RESULT_MAX = clamp(Math.round(contextWindow * 0.10), 20_000, 50_000);
 
   // ── Phase 1: Transform error messages into compact annotations ──
   const clean = messages.map((m) => {
@@ -1345,13 +1357,14 @@ export async function graphTransformContext(
   } catch { /* non-critical — tier0 will still appear in user message */ }
 
   // Never throw — return raw messages on any failure
+  let transformTimer: ReturnType<typeof setTimeout> | undefined;
   try {
     const TRANSFORM_TIMEOUT_MS = 15_000;
     const result = await Promise.race([
       graphTransformInner(messages, session, store, embeddings, contextWindow, budgets, signal, tier0ForSys),
-      new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error("graphTransformContext timed out")), TRANSFORM_TIMEOUT_MS),
-      ),
+      new Promise<never>((_, reject) => {
+        transformTimer = setTimeout(() => reject(new Error("graphTransformContext timed out")), TRANSFORM_TIMEOUT_MS);
+      }),
     ]);
     recordTransformOutcome(true);
     result.systemPromptSection = systemPromptSection;
@@ -1374,6 +1387,11 @@ export async function graphTransformContext(
       },
       systemPromptSection,
     };
+  } finally {
+    // Clear so a fast-resolving graphTransformInner doesn't leave a 15s
+    // pending Timeout per transform call — the daemon handles every user
+    // prompt through this path, so the leak compounds quickly.
+    if (transformTimer !== undefined) clearTimeout(transformTimer);
   }
 }
 
@@ -1400,12 +1418,6 @@ async function graphTransformInner(
       reductionPct: fullHistoryTokens > 0 ? (Math.max(0, fullHistoryTokens - sentTokens) / fullHistoryTokens) * 100 : 0,
       graphNodes, neighborNodes, recentTurns: recentTurnCount, mode, prefetchHit,
     };
-  }
-
-  function makeResult(
-    msgs: AgentMessage[], stats: ContextStats, sysSection?: string,
-  ): GraphTransformResult {
-    return { messages: msgs, stats, systemPromptSection: sysSection };
   }
 
   // Derive retrieval config from session's current adaptive config
@@ -1478,7 +1490,7 @@ async function graphTransformInner(
     turn: 25, identity: 10, concept: 35, memory: 20, artifact: 10,
   };
   // Scale search limits with context window — larger windows can use more results
-  const cwScale = Math.max(0.5, Math.min(2.0, contextWindow / 200_000));
+  const cwScale = clamp(contextWindow / 200_000, 0.5, 2.0);
   const vectorSearchLimits = {
     turn: Math.round((baseLimits.turn ?? 25) * cwScale),
     identity: baseLimits.identity,  // always load full identity
@@ -1493,8 +1505,9 @@ async function graphTransformInner(
     const queryVec = await buildContextualQueryVec(queryText, messages, embeddings, session);
     session.lastQueryVec = queryVec; // Stash for redundant recall detection
 
-    // Prefetch cache check
-    const cached = getCachedContext(queryVec);
+    // Prefetch cache check — scope to (sessionId, projectId) so session B
+    // never receives session A's project-filtered hits.
+    const cached = getCachedContext(queryVec, session.sessionId, session.projectId || undefined);
     if (cached && cached.results.length > 0) {
       recordPrefetchHit();
       const suppressed = getSuppressedNodeIds(session);
@@ -1524,7 +1537,7 @@ async function graphTransformInner(
     }
 
         const skillCtx = cached.skills.length > 0 ? formatSkillContext(cached.skills) : "";
-        if (cached.skills.length > 0) stageSkills(cached.skills.map(s => s.id));
+        if (cached.skills.length > 0) stageSkills(session.sessionId, cached.skills.map(s => s.id));
         const reflCtx = cached.reflections.length > 0 ? formatReflectionContext(cached.reflections) : "";
 
         const injectedContext = await formatContextMessage(contextNodes, store, session, skillCtx + reflCtx, tier0, tier1);
@@ -1556,7 +1569,7 @@ async function graphTransformInner(
     const recentCutoffMs = Date.now() - 5_000;
     const vectorResults = vectorResultsRaw.filter((r) => {
       if (r.table !== "turn") return true;
-      const ts = typeof r.timestamp === "string" ? Date.parse(r.timestamp) : 0;
+      const ts = parseDatetimeMs(r.timestamp) ?? 0;
       return ts > 0 && ts < recentCutoffMs;
     });
     // Merge: dedupe tag results against vector results, then combine
@@ -1658,13 +1671,13 @@ async function graphTransformInner(
     let skillContext = "";
     if (skillsFound.length > 0) {
       skillContext = formatSkillContext(skillsFound);
-      stageSkills(skillsFound.map(s => s.id));
+      stageSkills(session.sessionId, skillsFound.map(s => s.id));
     }
     let reflectionContext = "";
     if (reflectionsFound.length > 0) reflectionContext = formatReflectionContext(reflectionsFound);
 
     // Write full pipeline results back to prefetch cache for subsequent similar queries
-    setCachedContext(queryVec, contextNodes, skillsFound, reflectionsFound);
+    setCachedContext(queryVec, contextNodes, skillsFound, reflectionsFound, session.sessionId, session.projectId || undefined);
 
     const injectedContext = await formatContextMessage(contextNodes, store, session, skillContext + reflectionContext, tier0, tier1);
     const recentTurns = getRecentTurns(messages, budgets.conversation, budgets.toolHistory, contextWindow, session);

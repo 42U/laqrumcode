@@ -89,8 +89,6 @@ export const ExtractionResultSchema = Type.Object({
   rules_compliance: Type.Optional(Type.Number({ minimum: 0, maximum: 1 })),
 });
 
-export type ExtractionResult = Static<typeof ExtractionResultSchema>;
-
 export interface ValidationResult {
   data: Record<string, unknown>;
   errors: string[];

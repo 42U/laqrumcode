@@ -3,6 +3,9 @@ import { assertRecordId } from "./surreal.js";
 import { linkConceptHierarchy, linkToRelevantConcepts } from "./concept-links.js";
 import { supersedeOldSkills } from "./skills.js";
 import { stripStructuralTags } from "./sanitize.js";
+import { clamp01 } from "./math.js";
+/** Local-narrow record-id regex: only accept ids in the `memory:` table. */
+const memoryIdRe = /^memory:[a-zA-Z0-9_]+$/;
 function sanitizeExtraction(obj) {
     if (obj == null || typeof obj !== "object")
         return;
@@ -163,12 +166,18 @@ export async function writeExtractionResults(result, sessionId, store, embedding
                         await store.relate(conceptId, "derived_from", taskId)
                             .catch(e => swallow("daemon:concept:derived_from", e));
                     }
+                    else if (sessionId) {
+                        // 0.7.70: when no task is in scope (e.g. coalesced extraction
+                        // queued before a task was attached), fall back to the session
+                        // for provenance. Better some traceability than none — keeps
+                        // concepts out of the "orphan" bucket in introspect. The session
+                        // row is always knowable here since we created it upstream.
+                        await store.relate(conceptId, "derived_from", sessionId)
+                            .catch(e => swallow("daemon:concept:derived_from_session", e));
+                    }
                     else {
-                        // 0.7.38: surface the silent gap. Without taskId the concept
-                        // gets no derived_from edge and shows up as a daemon-source
-                        // orphan in introspect. Pre-fix sessions had this firing
-                        // invisibly; logging it makes the next occurrence actionable.
-                        swallow.warn("daemon:concept:derived_from_skipped", new Error(`taskId empty when extracting concept "${c.name}" — concept will lack derived_from edge`));
+                        // Both task and session missing — truly orphan, log loudly.
+                        swallow.warn("daemon:concept:derived_from_skipped", new Error(`taskId and sessionId both empty when extracting concept "${c.name}" — concept will lack derived_from edge`));
                     }
                     if (projectId) {
                         await store.relate(conceptId, "relevant_to", projectId)
@@ -204,7 +213,7 @@ export async function writeExtractionResults(result, sessionId, store, embedding
             outcomeText: String(c.outcomeText).slice(0, 200),
             chainType: (["debug", "refactor", "feature", "fix"].includes(c.chainType) ? c.chainType : "fix"),
             success: Boolean(c.success),
-            confidence: Math.max(0, Math.min(1, Number(c.confidence) || 0.5)),
+            confidence: clamp01(Number(c.confidence) || 0.5),
             description: String(c.description ?? "").slice(0, 150),
         }));
         if (validated.length > 0) {
@@ -234,10 +243,9 @@ export async function writeExtractionResults(result, sessionId, store, embedding
     }
     // 3. Resolved memories
     if (Array.isArray(result.resolved) && result.resolved.length > 0) {
-        const RECORD_ID_RE = /^memory:[a-zA-Z0-9_]+$/;
         writeOps.push((async () => {
             for (const memId of result.resolved.slice(0, 20)) {
-                if (typeof memId !== "string" || !RECORD_ID_RE.test(memId))
+                if (typeof memId !== "string" || !memoryIdRe.test(memId))
                     continue;
                 assertRecordId(memId);
                 counts.resolved++;

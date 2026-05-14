@@ -4,7 +4,8 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { preflight } from "../src/engine/orchestrator.js";
+import { preflight, postflight } from "../src/engine/orchestrator.js";
+import type { PreflightResult } from "../src/engine/orchestrator.js";
 import { SessionState } from "../src/engine/state.js";
 import { writeHandoffFileSync, readAndDeleteHandoffFile } from "../src/engine/handoff-file.js";
 import { upsertAndLinkConcepts } from "../src/engine/concept-extract.js";
@@ -271,5 +272,98 @@ describe("soul quality Infinity guard (fix #16)", () => {
     expect(Number.isFinite(score)).toBe(true);
     expect(score).not.toBeNaN();
     expect(score).toBe(0);
+  });
+});
+
+// ── Round 9: postflight() idempotent on Stop-hook re-fire ────────────────────
+//
+// Claude Code can re-deliver Stop hook events for the same turn. The
+// orchestrator_metrics UNIQUE index `orchm_unique` (session_id, turn_index)
+// rejects the duplicate CREATE, which trips swallow.warn and pollutes the
+// "metrics pipeline degraded" channel. postflight() now SELECT-checks before
+// the CREATE and no-ops on re-fire.
+
+describe("postflight orchestrator_metrics idempotency (Round 9)", () => {
+  function mockStore() {
+    const queryFirst = vi.fn<(sql: string, params?: any) => Promise<any[]>>(
+      async () => [],
+    );
+    const queryExec = vi.fn<(sql: string, params?: any) => Promise<void>>(
+      async () => {},
+    );
+    const store = {
+      isAvailable: () => true,
+      queryFirst,
+      queryExec,
+    } as any;
+    return { store, queryFirst, queryExec };
+  }
+
+  function mockPreflightResult(): PreflightResult {
+    return {
+      intent: { category: "question", confidence: 0.9, signals: [] } as any,
+      complexity: { level: "simple", score: 0.1, signals: [] } as any,
+      config: {
+        thinkingLevel: "medium",
+        toolLimit: 15,
+        tokenBudget: 6000,
+        retrievalShare: 0.15,
+        vectorSearchLimits: { turn: 25, identity: 10, concept: 20, memory: 20, artifact: 10 },
+      },
+      preflightMs: 1.0,
+      fastPath: false,
+    };
+  }
+
+  it("first call writes a row; second call no-ops without UNIQUE-collision error", async () => {
+    const session = new SessionState("session-pf-1", "key-pf-1");
+    const { store, queryFirst, queryExec } = mockStore();
+    const result = mockPreflightResult();
+
+    // First call: SELECT returns empty → CREATE fires.
+    queryFirst.mockResolvedValueOnce([]);
+    await postflight("hello", result, 1, 100, 200, 500, session, store);
+
+    expect(queryFirst).toHaveBeenCalledTimes(1);
+    expect(queryFirst.mock.calls[0][0]).toMatch(/SELECT id FROM orchestrator_metrics/);
+    expect(queryExec).toHaveBeenCalledTimes(1);
+    expect(queryExec.mock.calls[0][0]).toMatch(/CREATE orchestrator_metrics/);
+
+    // Second call (re-fire): SELECT returns existing row → CREATE skipped.
+    queryFirst.mockResolvedValueOnce([{ id: "orchestrator_metrics:xyz" }]);
+    await postflight("hello", result, 1, 100, 200, 500, session, store);
+
+    // SELECT ran again, but CREATE did NOT.
+    expect(queryFirst).toHaveBeenCalledTimes(2);
+    expect(queryExec).toHaveBeenCalledTimes(1); // still 1
+  });
+
+  it("SELECT probe uses (session_id, turn_index) bindings", async () => {
+    const session = new SessionState("session-pf-2", "key-pf-2");
+    const { store, queryFirst } = mockStore();
+    const result = mockPreflightResult();
+
+    queryFirst.mockResolvedValueOnce([]);
+    await postflight("hi", result, 0, 0, 0, 0, session, store);
+
+    const [, bindings] = queryFirst.mock.calls[0];
+    expect(bindings).toMatchObject({
+      session_id: "session-pf-2",
+      turn_index: expect.any(Number),
+    });
+  });
+
+  it("does nothing when store is unavailable", async () => {
+    const session = new SessionState("session-pf-3", "key-pf-3");
+    const store = {
+      isAvailable: () => false,
+      queryFirst: vi.fn(),
+      queryExec: vi.fn(),
+    } as any;
+    const result = mockPreflightResult();
+
+    await postflight("hi", result, 0, 0, 0, 0, session, store);
+    expect(store.queryFirst).not.toHaveBeenCalled();
+    expect(store.queryExec).not.toHaveBeenCalled();
   });
 });

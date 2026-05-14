@@ -56,3 +56,5 @@ SELECT id, work_type, status FROM pending_work WHERE status != 'completed' LIMIT
 UPDATE pending_work SET status = 'completed', completed_at = time::now() WHERE status IN ['pending', 'failed'] AND work_type = 'soul_generate';
 SELECT id, work_type, status FROM pending_work WHERE status NOT IN ['completed'] LIMIT 10;
 SELECT count() as total FROM pending_work WHERE status NOT IN ['completed'] GROUP ALL;
+SELECT count() FROM concept WHERE superseded_at IS NOT NONE GROUP ALL;
+SELECT id, content, superseded_at FROM concept WHERE superseded_at IS NOT NONE ORDER BY superseded_at DESC LIMIT 5;

@@ -1,4 +1,4 @@
-import type { KongBrainConfig } from "./config.js";
+import type { KongCodeConfig } from "./config.js";
 import type { SurrealStore } from "./surreal.js";
 import type { EmbeddingService } from "./embeddings.js";
 import type { AdaptiveConfig } from "./orchestrator.js";
@@ -42,9 +42,6 @@ export class SessionState {
   _pendingInputTokens = 0;
   _pendingOutputTokens = 0;
   _statsFlushCounter = 0;
-
-  // Cleanup tracking
-  cleanedUp = false;
 
   // Current adaptive config (set by orchestrator preflight each turn)
   currentConfig: AdaptiveConfig | null = null;
@@ -152,9 +149,30 @@ export class SessionState {
 
 // --- Global plugin state (shared across all sessions) ---
 
+/**
+ * Callback signature for session-removal hooks.
+ *
+ * Fired synchronously from {@link GlobalPluginState.removeSession} and from
+ * {@link GlobalPluginState.reapStaleSessions} right after the session is
+ * deleted from the in-memory map. Receives both the Claude Code-issued
+ * `sessionId` (which is reused across SessionEnd→SessionStart for resumes
+ * of the same conversation, so any string-keyed module-scoped map keyed by
+ * it MUST clear on this callback) and the Surreal record id
+ * `surrealSessionId` (which is unique per session row in the DB and may be
+ * the empty string if the session was removed before bootstrap completed).
+ *
+ * Callbacks must not throw — errors are caught and logged but cannot block
+ * the removal. Callbacks must be cheap and synchronous; the registry runs
+ * inline on the hot SessionEnd path.
+ */
+export type SessionRemovedCallback = (
+  sessionId: string,
+  surrealSessionId: string,
+) => void;
+
 /** Singleton shared state: config, SurrealDB store, embedding service, and session map. */
 export class GlobalPluginState {
-  readonly config: KongBrainConfig;
+  readonly config: KongCodeConfig;
   readonly store: SurrealStore;
   readonly embeddings: EmbeddingService;
   workspaceDir?: string;
@@ -172,8 +190,27 @@ export class GlobalPluginState {
   // processes, no firing on idle MCPs.
   lastRollupDay = "";
 
+  /**
+   * Registry of cleanup callbacks invoked by {@link removeSession} and
+   * {@link reapStaleSessions}. Modules that own session-keyed state living
+   * OUTSIDE the {@link SessionState} instance (e.g. module-scoped
+   * `Map<sessionId, ...>` such as `tier0WritesPerSession` in
+   * `engine/tools/core-memory.ts`) MUST register a callback via
+   * {@link onSessionRemoved} so their map entry is cleared when the
+   * session ends. Otherwise the entry leaks across SessionEnd→SessionStart
+   * for the same `sessionId` (Claude Code reuses ids on resume) and
+   * bleeds counters/state into a session that thinks it's fresh.
+   *
+   * State that lives directly on the {@link SessionState} instance
+   * (`pendingToolArgs`, `_activeSubagents`, `_pendingPreflight`,
+   * `_pendingInputTokens`, `_pushDetected`, etc.) does NOT need a
+   * callback — deleting the map entry drops the only strong reference, so
+   * GC reclaims those maps with the instance.
+   */
+  private readonly sessionRemovedCallbacks = new Set<SessionRemovedCallback>();
+
   constructor(
-    config: KongBrainConfig,
+    config: KongCodeConfig,
     store: SurrealStore,
     embeddings: EmbeddingService,
   ) {
@@ -198,14 +235,47 @@ export class GlobalPluginState {
     return this.sessions.get(sessionKey);
   }
 
-  /** Remove a session from the map (after dispose/cleanup). */
-  removeSession(sessionKey: string): void {
-    this.sessions.delete(sessionKey);
+  /**
+   * Register a callback to run when a session is removed (via SessionEnd
+   * or stale-session reaping). Use this from modules that own
+   * session-keyed state living outside the {@link SessionState} instance,
+   * so the entry is cleared on session-end and doesn't bleed into the
+   * next session with the same id.
+   *
+   * Returns a disposer that unregisters the callback. Callers that
+   * register once at module load typically discard the disposer; tests
+   * should call it to avoid cross-test contamination.
+   *
+   * Example (from `engine/tools/core-memory.ts` — NOT yet wired):
+   * ```ts
+   * state.onSessionRemoved((sessionId) => {
+   *   tier0WritesPerSession.delete(sessionId);
+   * });
+   * ```
+   */
+  onSessionRemoved(callback: SessionRemovedCallback): () => void {
+    this.sessionRemovedCallbacks.add(callback);
+    return () => {
+      this.sessionRemovedCallbacks.delete(callback);
+    };
   }
 
-  /** Return all active sessions (for exit handlers). */
-  allSessions(): SessionState[] {
-    return [...this.sessions.values()];
+  /**
+   * Remove a session from the map and fire every registered
+   * {@link onSessionRemoved} callback so module-scoped session-keyed state
+   * gets cleared too. In-memory state hanging off the SessionState
+   * instance (subagent map, pendingToolArgs, _pendingPreflight, etc.)
+   * is freed when the map entry drops its last strong reference; module-
+   * scoped maps keyed by sessionId string must be cleared via callback.
+   *
+   * Callback errors are caught and never block removal — a single buggy
+   * callback shouldn't strand other modules in a half-cleaned state.
+   */
+  removeSession(sessionKey: string): void {
+    const session = this.sessions.get(sessionKey);
+    this.sessions.delete(sessionKey);
+    if (!session) return;
+    this.fireSessionRemovedCallbacks(session.sessionId, session.surrealSessionId);
   }
 
   /** Reap sessions that have been idle for longer than maxAgeMs. */
@@ -215,10 +285,28 @@ export class GlobalPluginState {
     for (const [key, session] of this.sessions) {
       if (now - session.turnStartMs > maxAgeMs) {
         this.sessions.delete(key);
+        this.fireSessionRemovedCallbacks(session.sessionId, session.surrealSessionId);
         reaped++;
       }
     }
     return reaped;
+  }
+
+  /**
+   * Invoke every registered session-removed callback. Errors are swallowed
+   * after a console.error so a bad callback can't strand the cleanup or
+   * abort an end-of-session flush. Intentionally synchronous — the hot
+   * SessionEnd path can't afford an extra microtask per callback.
+   */
+  private fireSessionRemovedCallbacks(sessionId: string, surrealSessionId: string): void {
+    for (const callback of this.sessionRemovedCallbacks) {
+      try {
+        callback(sessionId, surrealSessionId);
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.error("[state] onSessionRemoved callback threw:", err);
+      }
+    }
   }
 
   /** Shut down all shared resources. */

@@ -1,7 +1,7 @@
 /**
  * Workspace Migration — ingest OpenClaw's workspace files into SurrealDB.
  *
- * When a user switches from the default context engine to KongBrain, their
+ * When a user switches from the default context engine to KongCode, their
  * workspace may contain .md files, skill definitions, session transcripts,
  * and memory logs created by OpenClaw. This module:
  *

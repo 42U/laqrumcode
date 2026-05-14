@@ -130,15 +130,30 @@ export async function handleSessionStart(
       .catch(e => { swallow("sessionStart:wakeup", e); return null; });
   }
 
-  // If wakeup is fast, include it in the session start response
+  // If wakeup is fast, include it in the session start response.
+  //
+  // Promise.race timer cleanup: mirrors the embeddings.ts:159-195 pattern.
+  // Without clearTimeout on the timeout handle, the underlying Timer stays
+  // armed for the full 5s even after the wakeup promise resolves first —
+  // keeping the Node event loop alive that long past actual completion. On
+  // a short-lived hook process (the daemon will eventually exit between
+  // sessions) that's a meaningful lifetime extension. capture handle,
+  // clearTimeout in `.finally()` on every exit path (race win, race loss,
+  // wakeup throw).
   let wakeupText: string | null = null;
   if (session._wakeupPromise) {
+    let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       wakeupText = await Promise.race([
         session._wakeupPromise,
-        new Promise<null>(resolve => setTimeout(() => resolve(null), 5000)),
+        new Promise<null>(resolve => {
+          timer = setTimeout(() => resolve(null), 5000);
+        }),
       ]);
     } catch { /* wakeup will be injected on next UserPromptSubmit */ }
+    finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
   }
 
   // Surface pending_work backlog so the assistant knows to drain. The queue

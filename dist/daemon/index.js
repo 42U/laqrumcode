@@ -22,9 +22,9 @@
  * everything else returns a "not yet implemented" error. Subsequent
  * commits migrate tool/hook handlers from the legacy mcp-server.ts.
  */
-import { writeFileSync, unlinkSync, existsSync, readFileSync, mkdirSync, readdirSync, rmSync } from "node:fs";
+import { writeFileSync, unlinkSync, existsSync, readFileSync, mkdirSync, readdirSync, rmSync, openSync, writeSync, closeSync, statSync, constants as fsConstants } from "node:fs";
 import { join, dirname } from "node:path";
-import { homedir } from "node:os";
+import { homedir, platform } from "node:os";
 import { PROTOCOL_VERSION, DEFAULT_DAEMON_SOCKET_PATH, DEFAULT_DAEMON_TCP_PORT, DAEMON_PID_FILE, } from "../shared/ipc-types.js";
 import { DaemonServer } from "./server.js";
 import { log } from "../engine/log.js";
@@ -57,6 +57,7 @@ import { startDrainScheduler, stopDrainScheduler } from "./auto-drain.js";
 import { configureReranker, disposeReranker, initReranker, isRerankerActive } from "../engine/graph-context.js";
 import { disposeSharedLlama } from "../engine/llama-loader.js";
 import { detectResourceProfile } from "../engine/resource-tier.js";
+import { registerRetrievalQualityCleanup } from "../engine/retrieval-quality.js";
 /** Daemon version reported via meta.handshake. Read from package.json at
  *  runtime (dev), or injected by esbuild --define at bundle time (SEA). */
 const DAEMON_VERSION = (() => {
@@ -187,6 +188,11 @@ async function initializeStack() {
     const embeddings = new EmbeddingService(config.embedding, resourceProfile);
     globalState = new GlobalPluginState(config, store, embeddings);
     globalState.workspaceDir = process.env.KONGCODE_PROJECT_DIR ?? process.cwd();
+    // Wire session-removed cleanup so per-session staged retrieval entries
+    // (now keyed by sessionId after the Map refactor) get purged when a
+    // session ends. Without this, the module-scoped Map would leak entries
+    // indefinitely as new sessions arrive.
+    registerRetrievalQualityCleanup(globalState);
     setBootstrapPhase("connecting-store");
     try {
         await store.initialize();
@@ -294,29 +300,254 @@ async function initializeStack() {
 function pidFilePath() {
     return join(homedir(), DAEMON_PID_FILE);
 }
-function writeOwnPidFile() {
+/** Stale-recovery window: if a daemon lock file is older than this (mtime)
+ *  AND its PID is dead/non-daemon, we steal it. Mirrors acan.ts's pattern. */
+const DAEMON_LOCK_STALE_AGE_MS = 30 * 60 * 1000;
+/** Empty/tiny-marker tightened recovery window: if a daemon lock file is
+ *  unparseable AND smaller than this (bytes), we treat it as a partial-write
+ *  crash artifact. The O_EXCL openSync claims the file before writeSync runs;
+ *  a SIGKILL between those two syscalls leaves an empty (0-byte) file. A real
+ *  daemon's marker JSON is ~120 bytes minimum (marker + pid + startedAt +
+ *  daemonVersion). Below 10 bytes there's no possible valid content. */
+const DAEMON_LOCK_EMPTY_THRESHOLD_BYTES = 10;
+/** A daemon process that JUST started (still in its tiny race window
+ *  between O_EXCL and writeSync) has an mtime that's seconds old at most.
+ *  Anything older than this is past the legitimate write window and the
+ *  PID-owning process is presumed dead. Used together with the empty-size
+ *  check to short-circuit the 30-min stale wait for crash-during-write. */
+const DAEMON_LOCK_EMPTY_STALE_AGE_MS = 5_000;
+/** Read /proc/<pid>/cmdline on Linux and check it looks like a kongcode daemon.
+ *  cmdline is NUL-separated. We require 'node' in argv[0] AND a hint that the
+ *  process is the daemon — either 'kongcode' anywhere or a path component like
+ *  'daemon/index.js'/'daemon/index.cjs'. On non-Linux platforms /proc is
+ *  unavailable so we conservatively return null ('cannot verify').
+ *
+ *  Returns true  → confirmed to be a kongcode daemon (don't steal lock)
+ *  Returns false → confirmed to be a different process (safe to steal)
+ *  Returns null  → cannot determine (treat as 'maybe alive' on linux, fall
+ *                  back to PID-alive on other platforms) */
+function cmdlineLooksLikeKongcodeDaemon(pid) {
+    if (platform() !== "linux")
+        return null;
+    try {
+        const raw = readFileSync(`/proc/${pid}/cmdline`, "utf8");
+        if (!raw)
+            return false;
+        // cmdline is NUL-separated; rejoin with spaces for substring tests.
+        const joined = raw.replace(/\0/g, " ").toLowerCase();
+        if (!joined.includes("node"))
+            return false;
+        if (joined.includes("kongcode-daemon"))
+            return true;
+        if (joined.includes("daemon/index.js") || joined.includes("daemon/index.cjs"))
+            return true;
+        if (joined.includes("kongcode") && joined.includes("daemon"))
+            return true;
+        return false;
+    }
+    catch {
+        // /proc/<pid>/cmdline missing → PID isn't running. Caller treats this
+        // as 'stale lock, safe to steal' via the separate isPidAlive check.
+        return false;
+    }
+}
+function isPidAlive(pid) {
+    if (!Number.isFinite(pid) || pid <= 0)
+        return false;
+    try {
+        process.kill(pid, 0);
+        return true;
+    }
+    catch (e) {
+        return e.code === "EPERM";
+    }
+}
+/** Module-level: holds the daemon.pid fd for the daemon's lifetime so the
+ *  file stays exclusively claimed. Released by removeOwnPidFile() on exit. */
+let daemonLockFd = null;
+/** Acquire an exclusive lock on daemon.pid. Refuses to start if another live
+ *  kongcode daemon already owns it. Returns true on success; on failure
+ *  exits the process (the daemon singleton invariant is non-negotiable).
+ *
+ *  Lock-stealing rules:
+ *    - File doesn't exist           → take it.
+ *    - File exists, JSON parse fails → if mtime > DAEMON_LOCK_STALE_AGE_MS old, steal.
+ *    - File exists, PID dead         → steal.
+ *    - File exists, PID alive but cmdline says non-daemon → steal (PID recycled).
+ *    - File exists, PID alive AND cmdline matches daemon  → REFUSE (exit 1). */
+function acquireDaemonSingletonLock() {
     const path = pidFilePath();
-    // mkdir before write — first run on a fresh machine may not have the
-    // cache dir yet. Same path 0.6.3 already creates for surreal.pid.
     try {
         mkdirSync(dirname(path), { recursive: true });
     }
     catch { }
-    writeFileSync(path, String(process.pid), "utf8");
-    log.info(`[daemon] wrote pid file ${path} (pid=${process.pid})`);
+    const writeMarker = (fd) => {
+        const marker = {
+            marker: "kongcode-daemon",
+            pid: process.pid,
+            startedAt: Date.now(),
+            daemonVersion: DAEMON_VERSION,
+        };
+        writeSync(fd, JSON.stringify(marker));
+    };
+    const tryCreate = () => {
+        try {
+            // O_EXCL atomically claims the file. Fails with EEXIST if it's there.
+            const fd = openSync(path, fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_WRONLY, 0o600);
+            writeMarker(fd);
+            return fd;
+        }
+        catch (e) {
+            if (e.code === "EEXIST")
+                return null;
+            throw e;
+        }
+    };
+    let fd = tryCreate();
+    if (fd !== null) {
+        daemonLockFd = fd;
+        log.info(`[daemon] acquired singleton lock ${path} (pid=${process.pid})`);
+        return;
+    }
+    // Lock exists — figure out whether to steal it.
+    let holderPid = null;
+    let holderMarker = null;
+    try {
+        const raw = readFileSync(path, "utf8");
+        // Try JSON marker (new format) first.
+        try {
+            const parsed = JSON.parse(raw);
+            if (parsed && parsed.marker === "kongcode-daemon" && Number.isFinite(parsed.pid)) {
+                holderMarker = parsed;
+                holderPid = parsed.pid;
+            }
+        }
+        catch {
+            // Legacy plain-PID format (pre-singleton). Read as a number.
+            const n = Number(raw.trim());
+            if (Number.isFinite(n) && n > 0)
+                holderPid = n;
+        }
+    }
+    catch (e) {
+        log.warn(`[daemon] couldn't read existing pid file: ${e.message}`);
+    }
+    let stale = false;
+    let reason = "";
+    if (holderPid === null) {
+        // Unparseable. Two fallback signals:
+        //  (a) Very old file → presumably abandoned long ago, stale.
+        //  (b) Empty/tiny + non-fresh file → SIGKILL between O_EXCL and writeSync;
+        //      the holder PID is unrecoverable from the empty file but the
+        //      write window is sub-millisecond on any reasonable disk, so any
+        //      file >5s old that's still empty is from a process that's gone.
+        //      Tightens the recovery time from 30min to 5s for the crash-during-
+        //      write case carryover Reviewer E flagged.
+        try {
+            const st = statSync(path);
+            const age = Date.now() - st.mtimeMs;
+            if (age > DAEMON_LOCK_STALE_AGE_MS) {
+                stale = true;
+                reason = `unparseable, age=${Math.round(age / 1000)}s`;
+            }
+            else if (st.size < DAEMON_LOCK_EMPTY_THRESHOLD_BYTES && age > DAEMON_LOCK_EMPTY_STALE_AGE_MS) {
+                stale = true;
+                reason = `empty/partial marker (${st.size}B), age=${Math.round(age / 1000)}s — crash between O_EXCL and writeSync`;
+            }
+        }
+        catch { }
+    }
+    else if (!isPidAlive(holderPid)) {
+        stale = true;
+        reason = `pid ${holderPid} not alive`;
+    }
+    else {
+        // PID is alive. Verify it's actually a kongcode daemon, not a recycled PID.
+        const looksLike = cmdlineLooksLikeKongcodeDaemon(holderPid);
+        if (looksLike === false) {
+            stale = true;
+            reason = `pid ${holderPid} alive but cmdline doesn't match kongcode daemon (recycled PID)`;
+        }
+        else {
+            // looksLike === true OR null (non-Linux: cannot verify, must assume valid).
+            stale = false;
+        }
+    }
+    if (!stale) {
+        const versionInfo = holderMarker ? ` v${holderMarker.daemonVersion} startedAt=${new Date(holderMarker.startedAt).toISOString()}` : "";
+        log.error(`[daemon] REFUSING TO START — another kongcode daemon already owns ${path} (pid=${holderPid}${versionInfo}). Stop the existing daemon first or remove the lock file if you're certain it's stale.`);
+        process.exit(1);
+    }
+    log.warn(`[daemon] stealing stale daemon lock at ${path}: ${reason}`);
+    // KNOWN TOCTOU: between unlinkSync and tryCreate's O_EXCL open, a sibling
+    // daemon attempting the same stale-recovery can win the create. The window
+    // is sub-millisecond (two syscalls) and the failure mode is benign: the
+    // losing process gets EEXIST → tryCreate returns null → we log and exit.
+    // The winning daemon proceeds normally. We accept "one of two daemon spawn
+    // attempts fails loudly" as preferable to alternatives like flock (less
+    // portable across Linux/macOS/Windows) or rename-into-place (no atomicity
+    // guarantee on macOS APFS for cross-fs renames). Detection + exit is the
+    // safe failure mode — never silently end up with two daemons.
+    try {
+        unlinkSync(path);
+    }
+    catch { }
+    fd = tryCreate();
+    if (fd === null) {
+        log.error(`[daemon] lost race acquiring daemon lock at ${path}; another process beat us — refusing to start`);
+        process.exit(1);
+    }
+    daemonLockFd = fd;
+    log.info(`[daemon] acquired singleton lock ${path} (pid=${process.pid}, stole stale)`);
+}
+function writeOwnPidFile() {
+    // Now a no-op — the singleton lock function above already wrote the marker.
+    // Kept as a stable call-site for clarity; if someone wants to rewrite the
+    // marker (e.g. after a config change) they can call this.
+    if (daemonLockFd === null) {
+        // Defensive: should never happen because main() always calls
+        // acquireDaemonSingletonLock first. Fall back to legacy behavior so the
+        // daemon doesn't silently lose its pid file.
+        const path = pidFilePath();
+        try {
+            mkdirSync(dirname(path), { recursive: true });
+        }
+        catch { }
+        writeFileSync(path, String(process.pid), "utf8");
+        log.warn(`[daemon] writeOwnPidFile called without singleton lock — falling back to legacy write`);
+    }
 }
 function removeOwnPidFile() {
     const path = pidFilePath();
+    // Close the held fd first (idempotent).
+    if (daemonLockFd !== null) {
+        try {
+            closeSync(daemonLockFd);
+        }
+        catch { }
+        daemonLockFd = null;
+    }
     try {
         if (!existsSync(path))
             return;
-        const recorded = Number(readFileSync(path, "utf8").trim());
-        // Only remove if the file still records OUR pid — protects against
-        // racing daemon instances stomping on each other's pid files during
-        // a brief restart window.
-        if (recorded === process.pid) {
+        // Verify the file still records OUR identity before unlinking — protects
+        // against a racing-replacement daemon's marker getting clobbered.
+        const raw = readFileSync(path, "utf8");
+        let ours = false;
+        try {
+            const parsed = JSON.parse(raw);
+            ours = parsed && parsed.marker === "kongcode-daemon" && parsed.pid === process.pid;
+        }
+        catch {
+            // Legacy plain-PID file.
+            ours = Number(raw.trim()) === process.pid;
+        }
+        if (ours) {
             unlinkSync(path);
             log.info(`[daemon] removed pid file ${path}`);
+        }
+        else {
+            log.warn(`[daemon] not removing pid file — owned by different daemon now`);
         }
     }
     catch (e) {
@@ -325,6 +556,12 @@ function removeOwnPidFile() {
 }
 async function main() {
     log.info(`[daemon] starting kongcode-daemon ${DAEMON_VERSION} (pid=${process.pid})`);
+    // Acquire daemon singleton lock BEFORE binding the socket. Two daemons
+    // bound to the same .kongcode-daemon.sock both run startDrainScheduler
+    // and double-process pending_work — a major amplifier of the duplicate-row
+    // bug. The lock fd is held for the daemon's lifetime; cleaned up by
+    // removeOwnPidFile() during graceful shutdown.
+    acquireDaemonSingletonLock();
     // Resolve socket / port from env with sensible defaults.
     const socketPath = process.env.KONGCODE_DAEMON_SOCKET ?? DEFAULT_DAEMON_SOCKET_PATH;
     const tcpPortEnv = process.env.KONGCODE_DAEMON_PORT;
@@ -471,7 +708,7 @@ async function main() {
      *  daemon-side IPC adapter. Resolves the per-session state from
      *  globalState's session map (creates a transient one keyed by
      *  sessionId if absent — matches mcp-server.ts's getSession() shape). */
-    const wrapToolHandler = (handler) => {
+    const wrapToolHandler = (handler, handlerName) => {
         return async (params) => {
             if (!globalState) {
                 const elapsed = Math.round((Date.now() - startedAt) / 1000);
@@ -486,24 +723,38 @@ async function main() {
             const sessionId = env?.sessionId ?? "daemon-default";
             const args = (env?.args ?? {});
             const session = globalState.getOrCreateSession(sessionId, sessionId);
-            return await handler(globalState, session, args);
+            // Outer try/catch so handler exceptions surface as tool-result content
+            // (which the model can interpret) instead of raw JSON-RPC transport
+            // errors. Mirrors the wrapper added to mcp-server.ts handleToolCall.
+            try {
+                return await handler(globalState, session, args);
+            }
+            catch (err) {
+                log.error("toolCall failed", { name: handlerName, err });
+                return {
+                    content: [{
+                            type: "text",
+                            text: `Tool ${handlerName} failed: ${err instanceof Error ? err.message : String(err)}`,
+                        }],
+                };
+            }
         };
     };
     // All 12 tool handlers wired through the same wrapToolHandler adapter.
     // Each one closes over daemon-owned globalState; per-session state is
     // resolved by sessionId from the IPC envelope.
-    server.register("tool.introspect", wrapToolHandler(handleIntrospect));
-    server.register("tool.recall", wrapToolHandler(handleRecall));
-    server.register("tool.coreMemory", wrapToolHandler(handleCoreMemory));
-    server.register("tool.fetchPendingWork", wrapToolHandler(handleFetchPendingWork));
-    server.register("tool.commitWorkResults", wrapToolHandler(handleCommitWorkResults));
-    server.register("tool.createKnowledgeGems", wrapToolHandler(handleCreateKnowledgeGems));
-    server.register("tool.memoryHealth", wrapToolHandler(handleMemoryHealth));
-    server.register("tool.linkHierarchy", wrapToolHandler(handleLinkHierarchy));
-    server.register("tool.supersede", wrapToolHandler(handleSupersede));
-    server.register("tool.recordFinding", wrapToolHandler(handleRecordFinding));
-    server.register("tool.clusterScan", wrapToolHandler(handleClusterScan));
-    server.register("tool.whatIsMissing", wrapToolHandler(handleWhatIsMissing));
+    server.register("tool.introspect", wrapToolHandler(handleIntrospect, "introspect"));
+    server.register("tool.recall", wrapToolHandler(handleRecall, "recall"));
+    server.register("tool.coreMemory", wrapToolHandler(handleCoreMemory, "core_memory"));
+    server.register("tool.fetchPendingWork", wrapToolHandler(handleFetchPendingWork, "fetch_pending_work"));
+    server.register("tool.commitWorkResults", wrapToolHandler(handleCommitWorkResults, "commit_work_results"));
+    server.register("tool.createKnowledgeGems", wrapToolHandler(handleCreateKnowledgeGems, "create_knowledge_gems"));
+    server.register("tool.memoryHealth", wrapToolHandler(handleMemoryHealth, "memory_health"));
+    server.register("tool.linkHierarchy", wrapToolHandler(handleLinkHierarchy, "link_hierarchy"));
+    server.register("tool.supersede", wrapToolHandler(handleSupersede, "supersede"));
+    server.register("tool.recordFinding", wrapToolHandler(handleRecordFinding, "record_finding"));
+    server.register("tool.clusterScan", wrapToolHandler(handleClusterScan, "cluster_scan"));
+    server.register("tool.whatIsMissing", wrapToolHandler(handleWhatIsMissing, "what_is_missing"));
     // Hook handlers — different signature from tools: (state, payload) → HookResponse,
     // where payload is the raw Claude Code hook event (already includes session_id,
     // cwd, transcript_path, etc.). The IPC params is the payload itself; no extra
@@ -532,6 +783,25 @@ async function main() {
     // ── Lifecycle ──
     process.on("SIGTERM", () => { gracefulCleanup("SIGTERM"); });
     process.on("SIGINT", () => { gracefulCleanup("SIGINT"); });
+    // SIGHUP: Node's default action is to terminate without cleanup, which
+    // would leave the singleton lock + daemon.pid stranded and the SurrealDB
+    // child orphaned. We treat it as a graceful-shutdown trigger — the next
+    // client connect will respawn a fresh daemon via ensureDaemon. This also
+    // covers the case where the daemon was started from a foreground shell
+    // that later exited; without unref'ing all child fds, Node would receive
+    // SIGHUP on shell teardown.
+    process.on("SIGHUP", () => { gracefulCleanup("SIGHUP"); });
+    // Defensive: log uncaught exceptions / unhandled rejections so a future
+    // bug can be diagnosed from the daemon.log instead of disappearing into
+    // detached-process limbo. We do NOT exit on these — the JSON-RPC layer
+    // already rejects pending requests when sockets close, and an isolated
+    // handler crash shouldn't take down the whole daemon.
+    process.on("uncaughtException", (err) => {
+        log.error(`[daemon] uncaughtException — continuing: ${err.message}`, err);
+    });
+    process.on("unhandledRejection", (reason) => {
+        log.error(`[daemon] unhandledRejection — continuing:`, reason);
+    });
     await server.listen();
     writeOwnPidFile();
     // Server is up and serving meta.* immediately. Stack initialization runs

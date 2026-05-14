@@ -12,16 +12,54 @@
  */
 
 import type { GlobalPluginState, SessionState } from "../engine/state.js";
-import type { PriorExtractions } from "../engine/daemon-types.js";
+import type { PriorExtractions, TurnData } from "../engine/daemon-types.js";
 import { validateExtraction } from "../engine/daemon-types.js";
 import { buildSystemPrompt, buildCoalescedPrompt, buildTranscript, writeExtractionResults } from "../engine/memory-daemon.js";
 import { createSoul, seedSoulAsCoreMemory, reviseSoul, getSoul, checkGraduation, getQualitySignals, recordGraduationEvent } from "../engine/soul.js";
 import { swallow } from "../engine/errors.js";
+import { clamp01 } from "../engine/math.js";
 import { log } from "../engine/log.js";
 import { stripStructuralTags } from "../engine/sanitize.js";
 import { commitKnowledge } from "../engine/commit.js";
 import { supersedeOldSkills } from "../engine/skills.js";
 import { assertRecordId } from "../engine/surreal.js";
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+/**
+ * Walk the .cause chain so wrapped errors (e.g. createArtifact wrapping a
+ * UNIQUE-conflict cause) don't lose their inner message when stringified
+ * into the JSON response the subagent reads. `String(e)` collapses to just
+ * the top-level message; this walks the chain and joins them.
+ *
+ * Bounded by both a cycle-detection WeakSet and a fixed depth ceiling — without
+ * these, a self-referencing `.cause` (legal in Node since 16; user code can
+ * trivially build one) would spin the loop indefinitely and a deeply-nested
+ * legitimate chain would still spend CPU producing a multi-megabyte string.
+ * Reviewer probe measured 6.4s CPU + RangeError on a circular chain before
+ * this guard; bound now caps at 8 cause hops + 4096 chars total.
+ */
+function serializeError(e: unknown): string {
+  if (!(e instanceof Error)) return String(e ?? "unknown");
+  const seen = new WeakSet<object>();
+  seen.add(e);
+  let out = e.message;
+  let cur: unknown = (e as { cause?: unknown }).cause;
+  let depth = 0;
+  let truncated = false;
+  while (cur instanceof Error && !seen.has(cur) && depth < 8) {
+    seen.add(cur);
+    out += ` | caused by: ${cur.message}`;
+    cur = (cur as { cause?: unknown }).cause;
+    depth++;
+  }
+  if ((cur instanceof Error && depth >= 8) || (cur && typeof cur === "object" && seen.has(cur as object))) {
+    truncated = true;
+  }
+  if (truncated) out += " | (chain truncated)";
+  if (out.length > 4096) out = out.slice(0, 4093) + "...";
+  return out;
+}
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -91,10 +129,48 @@ export async function handleFetchPendingWork(
   }
 
   try {
-    // Reset stale items stuck in "processing" > 10 min
-    await store.queryExec(
-      `UPDATE pending_work SET status = "pending" WHERE status = "processing" AND created_at < time::now() - 10m`,
-    ).catch(() => {});
+    // Reset stale items stuck in "processing" > 10 min. The compound UNIQUE on
+    // (session_id, work_type, status) means we can't blindly UPDATE status →
+    // "pending" — if a sibling pending row already exists for the same
+    // (session_id, work_type), the UPDATE collides and the stuck row stays
+    // "processing" forever (test-0768 soul_evolve hit this exact bug). So:
+    //  1. find stuck rows
+    //  2. for each, check for a sibling pending row → DELETE the stuck duplicate
+    //     (it'll naturally re-queue) or UPDATE to pending if none exists.
+    try {
+      // ORDER BY created_at ASC: without this, the sibling-pending SELECT
+      // below picks at random. Under multi-stuck conditions that can DELETE
+      // the wrong row. Stable ordering ensures the oldest stuck row is
+      // recovered first, matching FIFO intuition.
+      const stuck = await store.queryFirst<{ id: string; session_id: string; work_type: string }>(
+        `SELECT id, session_id, work_type FROM pending_work
+           WHERE status = "processing" AND created_at < time::now() - 10m
+           ORDER BY created_at ASC`,
+      );
+      for (const row of stuck as { id: string; session_id: string; work_type: string }[]) {
+        try {
+          assertRecordId(String(row.id));
+          // BEGIN/COMMIT around the (sibling-check + DELETE-or-UPDATE) so
+          // the check-and-act is atomic. Without the transaction, a sibling
+          // pending row could be CREATEd between our SELECT and our UPDATE,
+          // causing the UPDATE to leave two pending rows for the same
+          // (session_id, work_type) — which then collides with the schema
+          // UNIQUE constraint on the next claim attempt.
+          await store.queryExec(
+            `BEGIN TRANSACTION;
+             LET $siblings = (SELECT id FROM pending_work
+               WHERE session_id = $sid AND work_type = $wt AND status = "pending" LIMIT 1);
+             IF array::len($siblings) > 0 THEN
+               DELETE ${row.id}
+             ELSE
+               UPDATE ${row.id} SET status = "pending"
+             END;
+             COMMIT TRANSACTION;`,
+            { sid: row.session_id, wt: row.work_type },
+          );
+        } catch (e) { swallow.warn("pending-work:stale-recovery-row", e); }
+      }
+    } catch (e) { swallow.warn("pending-work:stale-recovery", e); }
 
     // Claim the highest-priority pending item. SELECT-then-conditional-UPDATE:
     // the WHERE status="pending" on the UPDATE acts as an optimistic lock so
@@ -130,7 +206,7 @@ export async function handleFetchPendingWork(
     return text(JSON.stringify(result));
   } catch (e) {
     log.error("[pending_work] fetch error:", e);
-    return text(JSON.stringify({ error: String(e) }));
+    return text(JSON.stringify({ error: serializeError(e) }));
   }
 }
 
@@ -141,25 +217,10 @@ async function buildWorkPayload(
   const { store } = state;
 
   switch (item.work_type) {
-    // TODO(post-0.8): remove once pre-coalesce items have drained
-    case "extraction": {
-      const turns = await store.getSessionTurnsRich(item.session_id, 50);
-      const transcript = buildTranscript(turns as any);
-      const prior: PriorExtractions = { conceptNames: [], artifactPaths: [], skillNames: [] };
-      const instructions = buildSystemPrompt(false, false, prior);
-      return {
-        work_id: item.id,
-        work_type: "extraction",
-        instructions,
-        data: { transcript: transcript.slice(0, 30000), turn_count: turns.length },
-        output_format: "Return ONLY valid JSON matching the schema in the instructions. All fields are arrays — use [] if empty.",
-      };
-    }
-
     case "coalesced_extraction": {
       const payload = (item.payload ?? {}) as { turn_count?: number; include_handoff?: boolean; include_reflection?: boolean };
-      const turns = await store.getSessionTurnsRich(item.session_id, 50);
-      const transcript = buildTranscript(turns as any);
+      const turns: TurnData[] = await store.getSessionTurnsRich(item.session_id, 50);
+      const transcript = buildTranscript(turns);
       const prior: PriorExtractions = { conceptNames: [], artifactPaths: [], skillNames: [] };
       const instructions = buildCoalescedPrompt(
         false, false, prior,
@@ -178,18 +239,6 @@ async function buildWorkPayload(
         instructions,
         data: { transcript: fullTranscript, turn_count: turns.length },
         output_format: "Return ONLY valid JSON matching the schema in the instructions. All fields are arrays — use [] if empty. handoff_note, reflection are strings. rules_compliance is a number 0.0-1.0.",
-      };
-    }
-
-    case "reflection": {
-      const turns = await store.getSessionTurns(item.session_id, 15);
-      const transcript = turns.map(t => `[${t.role}] ${stripStructuralTags((t.text ?? "").slice(0, 300))}`).join("\n");
-      return {
-        work_id: item.id,
-        work_type: "reflection",
-        instructions: `Reflect on this session. Write 2-4 sentences about: what went well, what could improve, any patterns worth noting. Be specific and actionable. If the session was too trivial for reflection, respond with just "skip".`,
-        data: { transcript: transcript.slice(0, 15000), turn_count: turns.length },
-        output_format: "Return plain text (2-4 sentences). Return exactly 'skip' if the session is too trivial.",
       };
     }
 
@@ -285,22 +334,10 @@ async function buildWorkPayload(
       };
     }
 
-    case "handoff_note": {
-      const turns = await store.getSessionTurns(item.session_id, 15);
-      const transcript = turns.map(t => `[${t.role}] ${stripStructuralTags((t.text ?? "").slice(0, 200))}`).join("\n");
-      return {
-        work_id: item.id,
-        work_type: "handoff_note",
-        instructions: `Summarize this session for handoff to your next self. What was worked on, what's unfinished, what to remember. 2-3 sentences. Write in first person.`,
-        data: { transcript: transcript.slice(0, 10000), turn_count: turns.length },
-        output_format: "Return plain text (2-3 sentences in first person).",
-      };
-    }
-
     case "deferred_cleanup": {
       // Same as extraction but for orphaned sessions
-      const turns = await store.getSessionTurnsRich(item.session_id, 50);
-      const transcript = buildTranscript(turns as any);
+      const turns: TurnData[] = await store.getSessionTurnsRich(item.session_id, 50);
+      const transcript = buildTranscript(turns);
       const prior: PriorExtractions = { conceptNames: [], artifactPaths: [], skillNames: [] };
       const instructions = buildSystemPrompt(false, false, prior);
       return {
@@ -351,12 +388,14 @@ export async function handleCommitWorkResults(
     log.info(`[pending_work] Completed ${item.work_type} (${workId})`);
     return text(JSON.stringify({ success: true, work_type: item.work_type, ...outcome }));
   } catch (e) {
-    // Mark failed (workId already validated above)
+    // Mark failed (workId already validated above). If THIS update also fails
+    // (e.g. DB unreachable), the row stays in "processing" until stale-recovery
+    // catches it. Surface the failure to logs so it's not silently lost.
     await store.queryExec(
       `UPDATE ${workId} SET status = "failed", completed_at = time::now()`,
-    ).catch(() => {});
+    ).catch(e => swallow.warn("pending-work:mark-failed", e));
     log.error(`[pending_work] Failed ${item.work_type} (${workId}):`, e);
-    return text(JSON.stringify({ success: false, error: String(e) }));
+    return text(JSON.stringify({ success: false, error: serializeError(e) }));
   }
 }
 
@@ -454,7 +493,6 @@ async function commitResults(
   const { store, embeddings } = state;
 
   switch (item.work_type) {
-    case "extraction":
     case "deferred_cleanup":
     case "coalesced_extraction": {
       if (typeof results === "string") {
@@ -490,13 +528,13 @@ async function commitResults(
 
         // Three-bucket scoring: backfill rules_compliance + curation on turn_score rows
         const rulesCompliance = typeof parsed.rules_compliance === "number"
-          ? Math.max(0, Math.min(1, parsed.rules_compliance))
+          ? clamp01(parsed.rules_compliance)
           : 0.7;
 
         // Re-fetch transcript for curation analysis (not stored on work item)
-        const curationTurns = await store.getSessionTurnsRich(item.session_id, 50).catch(() => []);
-        const curationTranscript = buildTranscript(curationTurns as any);
-        const toolNames = (curationTurns as any[]).map((t: any) => t.tool_name ?? "").filter(Boolean);
+        const curationTurns: TurnData[] = await store.getSessionTurnsRich(item.session_id, 50).catch(() => [] as TurnData[]);
+        const curationTranscript = buildTranscript(curationTurns);
+        const toolNames = curationTurns.map(t => t.tool_name ?? "").filter(Boolean);
         const curation = computeCurationScore(curationTranscript, toolNames);
 
         // Compute composite in JS (avoids SurrealQL IF/THEN/ELSE risk) and write scalar values
@@ -520,16 +558,6 @@ async function commitResults(
         }
       }
       return { counts };
-    }
-
-    // TODO(post-0.8): remove once pre-coalesce items have drained
-    case "reflection": {
-      const reflText = typeof results === "string" ? results : String((results as any)?.text ?? results);
-      if (reflText.length < 20 || reflText.toLowerCase().trim() === "skip") {
-        return { skipped: true };
-      }
-      await commitReflection(reflText, item, state);
-      return { stored: true };
     }
 
     case "skill_extract": {
@@ -601,14 +629,6 @@ async function commitResults(
         }
       }
       return { sections_revised: revised };
-    }
-
-    // TODO(post-0.8): remove once pre-coalesce items have drained
-    case "handoff_note": {
-      const noteText = typeof results === "string" ? results : String((results as any)?.text ?? results);
-      if (noteText.length < 20) return { skipped: true };
-      await commitHandoffNote(noteText, item, state);
-      return { stored: true };
     }
 
     default:
@@ -765,7 +785,7 @@ export async function handleCreateKnowledgeGems(
           from: link.from,
           to: link.to,
           edge: link.edge,
-          reason: `relate failed: ${(e as Error).message ?? String(e)}`,
+          reason: `relate failed: ${serializeError(e)}`,
         });
       }
     }
@@ -785,7 +805,7 @@ export async function handleCreateKnowledgeGems(
     }));
   } catch (e) {
     log.error("[gems] failed:", e);
-    return text(JSON.stringify({ success: false, error: String(e) }));
+    return text(JSON.stringify({ success: false, error: serializeError(e) }));
   }
 }
 

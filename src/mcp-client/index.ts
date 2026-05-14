@@ -37,7 +37,7 @@ import { MCP_TOOLS, MCP_TO_IPC_METHOD } from "../shared/tool-defs.js";
 import { IpcErrorCode } from "../shared/ipc-types.js";
 import { log } from "../engine/log.js";
 
-const CLIENT_VERSION = "0.7.69";
+const CLIENT_VERSION = "0.7.70";
 
 let ipc: IpcClient | null = null;
 /** In-flight connect promise — concurrent callers share it so we never
@@ -57,7 +57,10 @@ export function decideOrphanAction(activeClients: number | undefined): "recycle"
   return "recycle";
 }
 
-/** Test-only exports. Not part of the public API. */
+/**
+ * Test-only exports. Not part of the public API.
+ * @internal
+ */
 export const __testing = {
   compareSemver: (a: string, b: string) => compareSemver(a, b),
 };
@@ -126,10 +129,12 @@ async function connectAndHandshake(): Promise<IpcClient> {
           log.warn(`[mcp-client] supersede flag declined by daemon`);
         }
       } catch (e) {
-        // Pre-0.7.22 daemons don't know meta.requestSupersede. Fall back
-        // to the "orphan check + direct recycle" path — supported by
-        // every daemon since 0.7.0 (meta.health and meta.shutdown have
-        // been there from the start).
+        // @deprecated pre-0.7.22 fallback. Daemons before 0.7.22 don't know
+        // meta.requestSupersede. Fall back to the "orphan check + direct
+        // recycle" path — supported by every daemon since 0.7.0 (meta.health
+        // and meta.shutdown have been there from the start). Retained for
+        // backward compat with very old running daemons; very unlikely in
+        // practice this many versions later.
         log.warn(`[mcp-client] meta.requestSupersede unavailable on this daemon (${(e as Error).message}); checking orphan status for direct recycle`);
         const recycled = await tryOrphanRecycle(client, socketPath, handshake.daemonVersion);
         if (recycled) return recycled;
@@ -281,8 +286,11 @@ async function main(): Promise<void> {
 
   // Same shutdown contract as mcp-server: SIGTERM/SIGINT trigger graceful close.
   // Daemon stays alive — the whole point of the split is daemon outlives client.
+  // SIGHUP added so the client doesn't terminate uncleanly when its parent
+  // shell exits (leaves stdio half-closed); we just close IPC and exit.
   process.on("SIGTERM", async () => { await shutdown(); process.exit(0); });
   process.on("SIGINT", async () => { await shutdown(); process.exit(0); });
+  process.on("SIGHUP", async () => { await shutdown(); process.exit(0); });
 
   // Connect stdio FIRST — Claude Code's handshake window is short. Daemon
   // ensure runs in the background after handshake completes.

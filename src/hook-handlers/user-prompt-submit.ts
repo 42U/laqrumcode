@@ -120,8 +120,11 @@ export async function handleUserPromptSubmit(
       .catch(() => []);
   }
 
-  // Ingest user message into graph (async, don't block context assembly)
-  ingestTurn(state, session, "user", userPrompt).catch(() => {});
+  // Ingest user message into graph (async, don't block context assembly).
+  // Surface failures to logs — losing user-prompt turns silently breaks the
+  // retrieval pipeline downstream (turn_count undercount, missing context).
+  ingestTurn(state, session, "user", userPrompt)
+    .catch(e => swallow.warn("user-prompt:ingestTurn", e));
 
   // 0.7.44: bypass sigil. Prefix with `*` or `/raw` to suppress kongcode's
   // injection for that turn. Turn ingestion still fires (we want history

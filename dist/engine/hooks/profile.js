@@ -50,7 +50,10 @@ export function shouldHookRun(hookId, requiredFor) {
         return false;
     return requiredFor.includes(getActiveProfile());
 }
-/** Test-only: clear cached env reads so a new env can take effect. */
+/**
+ * Test-only: clear cached env reads so a new env can take effect.
+ * @internal
+ */
 export function _resetProfileCacheForTests() {
     cachedProfile = null;
     cachedDisabled = null;

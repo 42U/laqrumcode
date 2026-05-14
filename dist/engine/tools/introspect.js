@@ -8,6 +8,7 @@ import { migrateWorkspace } from "../workspace-migrate.js";
 import { checkGraduation, formatGraduationReport, hasSoul } from "../soul.js";
 import { computeTrends } from "../observability.js";
 import { recoverProjectIdRows, recoverDaemonOrphans } from "../recovery.js";
+import { probeEmbeddingService as probeEmbeddingsRaw } from "../embeddings.js";
 const ALLOWED_TABLES = new Set([
     "agent", "project", "task", "artifact", "concept",
     "turn", "identity_chunk", "session", "memory",
@@ -144,10 +145,18 @@ async function statusAction(store, sessionId, embeddings) {
     const info = store.getInfo();
     const alive = await store.ping();
     const embStatus = await probeEmbeddingService(embeddings);
+    // Strip embedded user:pass from the connection URL before printing — the
+    // statusAction output frequently ends up in shared session logs, and a
+    // surreal://user:pass@host/ form would otherwise leak credentials. Matches
+    // any scheme://userinfo@ prefix and replaces the userinfo portion.
+    const rawUrl = info?.url ?? "unknown";
+    const safeUrl = typeof rawUrl === "string"
+        ? rawUrl.replace(/^(\w+:\/\/)[^:@/]+:[^@/]+@/, "$1[credentials-redacted]@")
+        : "unknown";
     const lines = [];
     lines.push("MEMORY DATABASE STATUS");
     lines.push("═══════════════════════════════════");
-    lines.push(`Connection:  ${info?.url ?? "unknown"}`);
+    lines.push(`Connection:  ${safeUrl}`);
     lines.push(`Namespace:   ${info?.ns ?? "unknown"}`);
     lines.push(`Database:    ${info?.db ?? "unknown"}`);
     lines.push(`Ping:        ${alive ? "OK" : "FAILED"}`);
@@ -214,39 +223,11 @@ async function statusAction(store, sessionId, embeddings) {
 // pull from getDiagnostics() to name the actual init failure instead of just
 // reporting `isAvailable=false`.
 async function probeEmbeddingService(embeddings) {
-    if (!embeddings || typeof embeddings.isAvailable !== "function") {
-        return { status: "down", label: "DOWN — embedding service not present" };
-    }
-    if (!embeddings.isAvailable()) {
-        const diag = typeof embeddings.getDiagnostics === "function" ? embeddings.getDiagnostics() : null;
-        if (diag?.initError) {
-            const msg = String(diag.initError.message ?? "").split("\n")[0].slice(0, 200);
-            return { status: "down", label: `DOWN — initialize() threw: ${msg}` };
-        }
-        if (diag?.initStartedAt != null && diag.initFinishedAt == null) {
-            const ageS = Math.floor((Date.now() - diag.initStartedAt) / 1000);
-            return { status: "down", label: `DOWN — initialize() in progress (${ageS}s elapsed; native build may be running)` };
-        }
-        if (diag?.initStartedAt == null) {
-            return { status: "down", label: "DOWN — initialize() never called (boot path may have skipped embedding init)" };
-        }
-        return { status: "down", label: "DOWN — isAvailable=false (no diagnostics captured)" };
-    }
-    try {
-        const probe = embeddings.embed("ping").then((v) => v?.length ?? 0);
-        const len = await Promise.race([
-            probe,
-            new Promise((_, rej) => setTimeout(() => rej(new Error("probe timeout")), 1500)),
-        ]);
-        if (typeof len === "number" && len > 0) {
-            return { status: "ok", label: `OK (BGE-M3 responsive, ${len}-dim)` };
-        }
-        return { status: "degraded", label: "DEGRADED — embed returned empty vector" };
-    }
-    catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
-        return { status: "degraded", label: `DEGRADED — embed probe failed: ${msg.slice(0, 100)}` };
-    }
+    const { status, message } = await probeEmbeddingsRaw(embeddings);
+    const prefix = status === "ok" ? "OK" : status === "degraded" ? "DEGRADED" : "DOWN";
+    const sep = status === "ok" ? " (" : " — ";
+    const suffix = status === "ok" ? ")" : "";
+    return { status, label: `${prefix}${sep}${message}${suffix}` };
 }
 async function countAction(store, table, filter) {
     if (!table || !ALLOWED_TABLES.has(table)) {
@@ -273,6 +254,149 @@ async function countAction(store, table, filter) {
         details: { table, count, filter },
     };
 }
+// Fields stripped from `verify` output regardless of table — secrets, claim
+// tokens, and anything else that would be an authority bypass if printed back
+// to a session log. Add new names here when the schema adds new sensitive
+// columns. The strip happens AFTER `SELECT *` so we can't accidentally rely on
+// schema-defined defaults to keep them out.
+const VERIFY_SENSITIVE_FIELDS = new Set([
+    "cleanup_claim_token",
+    "auth_token",
+    "credentials",
+    "password",
+]);
+// Fields that hold user-pasted content. The same payload that a user might
+// paste a paragraph of prose into is also where an accidentally-pasted API
+// key or secret would land. The defence-in-depth posture:
+//   1. Tighter visible truncation (80 chars) so a long secret prefix can't
+//      ride out in the SELECT projection.
+//   2. Pattern-mask known secret formats anywhere inside the visible window.
+//      This catches secrets shorter than the truncation limit (e.g. a
+//      stray ghp_ token at the head of a memory.text).
+// Patterns are conservative — only common provider prefixes we can match with
+// high precision. The full record is still available through the regular
+// recall/grounding pipeline; introspect is an operator tool whose output
+// frequently ends up in shared session logs.
+const USER_CONTENT_FIELDS = new Set([
+    "text", // memory.text, reflection.text
+    "content", // monologue.content, concept.content
+    "description", // artifact.description
+    "summary", // task.summary
+    "llm_reason", // retrieval_outcome.llm_reason
+    "rationale", // decision / finding rationale
+    "reason", // generic reason fields
+    "name", // concept.name / record name fields
+    "preconditions", // skill.preconditions — user-authored prose
+    "postconditions", // skill.postconditions — user-authored prose
+    "payload", // pending_work.payload — may include pasted content
+]);
+const USER_CONTENT_TRUNCATE_LEN = 80;
+// Anthropic, AWS, GitHub PAT/server-to-server, OpenAI, Slack, Stripe live/test,
+// Google API keys, GitLab PATs, npm tokens, Hugging Face, JWTs. Each is anchored
+// to its provider's documented prefix. OpenAI `sk-` requires a word boundary +
+// at least 40 trailing alphanumerics (no internal hyphens) so benign content
+// like `sk-learn-documentation-page` does not match.
+const SECRET_PATTERNS = [
+    /sk-ant-[A-Za-z0-9_-]+/g,
+    /AKIA[0-9A-Z]{16,}/g,
+    /ghp_[A-Za-z0-9]{20,}/g,
+    /gho_[A-Za-z0-9]{20,}/g,
+    /ghs_[A-Za-z0-9]{20,}/g,
+    /github_pat_[A-Za-z0-9_]{20,}/g,
+    /sk_live_[A-Za-z0-9]{20,}/g,
+    /sk_test_[A-Za-z0-9]{20,}/g,
+    // OpenAI project / service-account scoped keys (newer prefixed format).
+    // Must come BEFORE the plain `\bsk-…` rule so the longer prefix matches
+    // first; the plain rule still catches legacy `sk-<40+>` strings.
+    /\bsk-(proj|svcacct)-[A-Za-z0-9_-]{20,}\b/g,
+    /\bsk-[A-Za-z0-9]{40,}\b/g,
+    /xox[baprs]-[A-Za-z0-9-]{10,}/g,
+    /AIza[0-9A-Za-z_-]{20,}/g,
+    // GitLab PATs are exactly 20 chars after the `glpat-` prefix. The old
+    // `{20,}` open-ended length plus `_` and `-` in the charset matched benign
+    // strings like `glpat-some-feature-branch-name`. Lock to exactly 20 and
+    // require a word boundary at the tail so longer hyphenated identifiers
+    // don't trip it.
+    /glpat-[A-Za-z0-9_-]{20}\b/g,
+    /npm_[A-Za-z0-9]{36}/g,
+    /hf_[A-Za-z0-9]{30,}/g,
+    /\beyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g,
+];
+/** Mask secret-looking substrings and truncate to USER_CONTENT_TRUNCATE_LEN.
+ *  Applied to memory.text, monologue.content, concept.content, reflection.text
+ *  before any operator-facing serialization. */
+function redactUserContent(value) {
+    if (typeof value !== "string")
+        return JSON.stringify(value);
+    let masked = value;
+    for (const pat of SECRET_PATTERNS) {
+        masked = masked.replace(pat, "[redacted-secret-pattern]");
+    }
+    if (masked.length > USER_CONTENT_TRUNCATE_LEN) {
+        return masked.slice(0, USER_CONTENT_TRUNCATE_LEN) + "...";
+    }
+    return masked;
+}
+/** Apply secret-pattern masking + operator-diagnostic 300-char truncation to a
+ *  non-user-content string. The 80-char USER_CONTENT_TRUNCATE_LEN path is for
+ *  fields where pasted secrets are most likely; non-content fields still
+ *  benefit from masking because nested records (e.g. payload subfields)
+ *  occasionally carry tokens. */
+function maskAndTruncate(value, len = 300) {
+    let masked = value;
+    for (const pat of SECRET_PATTERNS) {
+        masked = masked.replace(pat, "[redacted-secret-pattern]");
+    }
+    return masked.length > len ? masked.slice(0, len - 3) + "..." : masked;
+}
+/** Walk `value` recursively and redact every string leaf. Used for
+ *  `details.record` in verifyAction so nested objects/arrays don't leak
+ *  unredacted strings (a SELECT * row can return embedded JSON or arrays
+ *  of objects depending on the table). Depth-capped at 4 to bound
+ *  pathological cycles / deeply-nested payloads.
+ *
+ *  - String leaves: `parentKey` decides whether USER_CONTENT-tight (80 chars)
+ *    or operator-loose (300 chars). Either way SECRET_PATTERNS masking runs
+ *    first.
+ *  - Number/boolean/null: passthrough.
+ *  - Array: map element-wise.
+ *  - Object: recurse with the entry's key as parentKey.
+ *  - Beyond depth cap: stringify + redact to bound recursion. */
+function deepRedact(value, depth = 0, parentKey) {
+    if (depth > 4) {
+        const s = typeof value === "string" ? value : JSON.stringify(value);
+        return maskAndTruncate(s, 300);
+    }
+    if (value === null || value === undefined)
+        return value;
+    if (typeof value === "string") {
+        if (parentKey && USER_CONTENT_FIELDS.has(parentKey)) {
+            return redactUserContent(value);
+        }
+        return maskAndTruncate(value, 300);
+    }
+    if (typeof value === "number" || typeof value === "boolean")
+        return value;
+    if (Array.isArray(value)) {
+        return value.map(v => deepRedact(v, depth + 1, parentKey));
+    }
+    if (typeof value === "object") {
+        const out = {};
+        for (const [k, v] of Object.entries(value)) {
+            if (VERIFY_SENSITIVE_FIELDS.has(k)) {
+                out[k] = "[redacted]";
+                continue;
+            }
+            if (Array.isArray(v) && v.length > 100 && typeof v[0] === "number") {
+                out[k] = `[${v.length} dims]`;
+                continue;
+            }
+            out[k] = deepRedact(v, depth + 1, k);
+        }
+        return out;
+    }
+    return value;
+}
 async function verifyAction(store, recordId) {
     if (!recordId) {
         return { content: [{ type: "text", text: "Error: 'record_id' is required." }], details: null };
@@ -291,15 +415,51 @@ async function verifyAction(store, recordId) {
     const record = rows[0];
     const cleaned = {};
     for (const [key, val] of Object.entries(record)) {
+        // Strip sensitive columns BEFORE the dims-collapse / serialization path so
+        // they never appear in the returned text or details.record. Replace with a
+        // placeholder so the operator can see the field exists without leaking it.
+        if (VERIFY_SENSITIVE_FIELDS.has(key)) {
+            cleaned[key] = "[redacted]";
+            continue;
+        }
         if (Array.isArray(val) && val.length > 100 && typeof val[0] === "number") {
             cleaned[key] = `[${val.length} dims]`;
+            continue;
         }
-        else {
-            cleaned[key] = val;
+        // User-content fields (memory.text, monologue.content, concept.content,
+        // reflection.text) can hold pasted secrets. Mask known secret patterns
+        // and tighten the visible window to 80 chars before they hit any caller-
+        // visible serialization.
+        if (USER_CONTENT_FIELDS.has(key) && typeof val === "string") {
+            cleaned[key] = redactUserContent(val);
+            continue;
         }
+        // Nested objects/arrays — recurse so embedded strings are pattern-masked
+        // and length-bounded. `details.record` is consumed by tooling that may
+        // surface it back into operator-visible logs; an unredacted nested
+        // structure would defeat the same defence the top-level loop provides.
+        if (val !== null && typeof val === "object") {
+            cleaned[key] = deepRedact(val, 0, key);
+            continue;
+        }
+        cleaned[key] = val;
     }
     const lines = Object.entries(cleaned)
-        .map(([k, v]) => `  ${k}: ${typeof v === "string" ? v.slice(0, 300) : JSON.stringify(v)}`)
+        .map(([k, v]) => {
+        // User-content fields were already redacted+truncated above; emit as-is.
+        // Other strings: mask known secret patterns BEFORE the 300-char slice so
+        // a token sitting at offset 0-50 of a longer string cannot survive the
+        // truncation. Non-string values are JSON-stringified.
+        if (USER_CONTENT_FIELDS.has(k) && typeof v === "string")
+            return `  ${k}: ${v}`;
+        if (typeof v === "string") {
+            let masked = v;
+            for (const pat of SECRET_PATTERNS)
+                masked = masked.replace(pat, "[redacted-secret-pattern]");
+            return `  ${k}: ${masked.length > 300 ? masked.slice(0, 297) + "..." : masked}`;
+        }
+        return `  ${k}: ${JSON.stringify(v)}`;
+    })
         .join("\n");
     return {
         content: [{ type: "text", text: `Record ${recordId}:\n${lines}` }],
@@ -476,6 +636,12 @@ async function queryAction(store, table, template) {
         const fields = Object.entries(r)
             .filter(([k]) => k !== "embedding")
             .map(([k, v]) => {
+            // User-content fields can carry pasted secrets. Tighter truncation
+            // (80 chars) + pattern-mask before serialization. The recent template
+            // SELECTs text + content explicitly, so both routes pass through here.
+            if (USER_CONTENT_FIELDS.has(k) && typeof v === "string") {
+                return `${k}: ${redactUserContent(v)}`;
+            }
             if (typeof v === "string" && v.length > 200)
                 return `${k}: ${v.slice(0, 200)}...`;
             return `${k}: ${JSON.stringify(v)}`;

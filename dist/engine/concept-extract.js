@@ -15,7 +15,7 @@ export { linkToRelevantConcepts, linkConceptHierarchy } from "./concept-links.js
 export const CONCEPT_RE = /\b(?:use|using|implement|create|add|configure|setup|install|import|fix|deploy|ship|launch|run|test|check|monitor|update|hedge|build|refactor|audit|extract|classify|trigger)\s+([A-Z][a-zA-Z0-9_-]+(?:\s+[A-Z][a-zA-Z0-9_-]+)?)/g;
 // Generic tech nouns — kept for backwards compatibility but the identifier
 // patterns below surface the domain-specific jargon that actually matters.
-export const TECH_TERMS = /\b(api|database|schema|migration|endpoint|middleware|component|service|module|handler|controller|model|interface|type|class|function|method|hook|plugin|extension|config|cache|queue|worker|daemon)\b/gi;
+const TECH_TERMS = /\b(api|database|schema|migration|endpoint|middleware|component|service|module|handler|controller|model|interface|type|class|function|method|hook|plugin|extension|config|cache|queue|worker|daemon)\b/gi;
 // snake_case or dotted identifiers: smart_mm_bot, hedge_lock, reply_log.csv
 const IDENT_SNAKE = /\b([a-z][a-z0-9]*(?:_[a-z0-9]+){1,})\b/g;
 // kebab-case identifiers: follow-up, hedge-lock, reply-banner

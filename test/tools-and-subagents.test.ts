@@ -48,6 +48,11 @@ function mockState(session: SessionState, storeOverride?: any) {
     embeddings: mockEmbeddings(),
     config: { thresholds: {} },
     getSession: (key: string) => key === session.sessionKey ? session : undefined,
+    // Real GlobalPluginState.onSessionRemoved returns a disposer. The
+    // core-memory tool registers a cleanup callback exactly once per state
+    // (via a module-scoped WeakSet), so we just need a callable that returns
+    // a disposer function.
+    onSessionRemoved: vi.fn((_cb: (sessionId: string) => void) => () => {}),
   } as any;
 }
 
@@ -236,7 +241,12 @@ describe("subagent spawned handler", () => {
 
   it("creates subagent record and spawned edge", async () => {
     const store = mockStore();
-    store.queryFirst.mockResolvedValueOnce([{ id: "subagent:sa1" }]);
+    // Spawned handler now does a SELECT-then-CREATE dedup. First call returns
+    // empty (no existing row for this run_id), second call is the CREATE that
+    // returns the new row id.
+    store.queryFirst
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([{ id: "subagent:sa1" }]);
     const state = mockState(session, store);
 
     const handler = createSubagentSpawnedHandler(state);
@@ -245,7 +255,15 @@ describe("subagent spawned handler", () => {
       { runId: "run1", childSessionKey: "child-1", requesterSessionKey: "test-key" },
     );
 
-    expect(store.queryFirst).toHaveBeenCalledWith(
+    // Existence-check SELECT fired first.
+    expect(store.queryFirst).toHaveBeenNthCalledWith(
+      1,
+      expect.stringContaining("SELECT id FROM subagent"),
+      expect.objectContaining({ rid: "run1" }),
+    );
+    // Then the CREATE.
+    expect(store.queryFirst).toHaveBeenNthCalledWith(
+      2,
       expect.stringContaining("CREATE subagent"),
       expect.objectContaining({ run_id: "run1", child_key: "child-1", label: "research" }),
     );
@@ -254,9 +272,13 @@ describe("subagent spawned handler", () => {
 
   it("handles missing parent session gracefully", async () => {
     const store = mockStore();
+    // SELECT existence check returns empty (no prior row), CREATE returns the
+    // new row id, parent-session fallback SELECT returns empty (no active
+    // session record found).
     store.queryFirst
+      .mockResolvedValueOnce([])
       .mockResolvedValueOnce([{ id: "subagent:sa1" }])
-      .mockResolvedValueOnce([]); // no active session found
+      .mockResolvedValueOnce([]);
     const state = mockState(session, store);
 
     const handler = createSubagentSpawnedHandler(state);

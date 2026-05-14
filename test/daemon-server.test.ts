@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { connect } from "node:net";
 import { DaemonServer } from "../src/daemon/server.js";
+import { __testing as httpApiTesting } from "../src/http-api.js";
 
 const SILENT_LOG = {
   info: () => {},
@@ -334,5 +335,233 @@ describe("DaemonServer: client identity registry", () => {
     socket.end();
     await new Promise(r => setTimeout(r, 100));
     expect(server.getStats().clients.find(c => c.pid === 99999)).toBeUndefined();
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// HTTP /health endpoint — Agent E gap #1: off-band liveness probe.
+// Tests verify buildHealthResponse directly (no real HTTP listener) — the
+// route handler is a trivial wrapper that calls into this function, so unit
+// testing the function covers the contract without flake-prone network IO.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("http-api /health endpoint", () => {
+  beforeEach(() => {
+    httpApiTesting.resetHealthCache();
+  });
+
+  it("returns 200 with expected shape on healthy daemon", () => {
+    // Simulate the background refresher having populated the cache once.
+    httpApiTesting.healthCache.dbConnected = true;
+    httpApiTesting.healthCache.pendingWorkCount = 3;
+    httpApiTesting.healthCache.embeddingGapPct = 5;
+    httpApiTesting.healthCache.refreshedAt = Date.now();
+    const fakeState = {
+      store: { isAvailable: () => true },
+    } as Parameters<typeof httpApiTesting.buildHealthResponse>[0];
+    // Public /health is intentionally minimal — only {status, db_connection}
+    // to avoid leaking host-fingerprint details on the open Unix socket.
+    const minimal = httpApiTesting.buildHealthResponse(fakeState);
+    expect(minimal.status).toBe(200);
+    expect(minimal.body).toEqual({ status: "ok", db_connection: true });
+    // Full diagnostic shape lives behind the bearer token at /health/detailed.
+    const { status, body } = httpApiTesting.buildHealthDetailedResponse(fakeState);
+    expect(status).toBe(200);
+    expect(body).toMatchObject({
+      status: "ok",
+      db_connection: true,
+      pending_work_count: 3,
+      embedding_gap_pct: 5,
+      pid: process.pid,
+    });
+    // Shape fields the task contract requires.
+    expect(typeof body.uptime_ms).toBe("number");
+    expect(typeof body.daemon_uptime).toBe("number");
+    expect(typeof body.version).toBe("string");
+    expect(typeof body.memory_usage_mb).toBe("number");
+    // null is the legitimate value when no error has been recorded yet.
+    expect(body.last_error_ms_ago === null || typeof body.last_error_ms_ago === "number").toBe(true);
+  });
+
+  it("returns 503 with status=initializing before the first cache refresh", () => {
+    // resetHealthCache() in beforeEach already set refreshedAt to null. The
+    // initializing branch must fire here regardless of whether the store
+    // would otherwise grade ok/degraded/error.
+    const fakeState = {
+      store: { isAvailable: () => true },
+    } as Parameters<typeof httpApiTesting.buildHealthResponse>[0];
+    const { status, body } = httpApiTesting.buildHealthResponse(fakeState);
+    expect(status).toBe(503);
+    expect(body.status).toBe("initializing");
+    expect(body.db_connection).toBe(true);
+    // No other fields: just status + db_connection, per the contract.
+    expect(Object.keys(body).sort()).toEqual(["db_connection", "status"]);
+  });
+
+  it("returns 503 with status=initializing when state is null", () => {
+    httpApiTesting.healthCache.refreshedAt = Date.now(); // cache ready, state isn't
+    const { status, body } = httpApiTesting.buildHealthResponse(null);
+    expect(status).toBe(503);
+    expect(body.status).toBe("initializing");
+    expect(body.db_connection).toBe(false);
+  });
+
+  it("returns 503 with status=error when DB is unavailable", () => {
+    // Mark cache as refreshed so we exercise the post-startup grading path
+    // rather than the new "initializing" branch (which short-circuits before
+    // status grading whenever refreshedAt is still null).
+    httpApiTesting.healthCache.refreshedAt = Date.now();
+    const fakeState = {
+      store: { isAvailable: () => false },
+    } as Parameters<typeof httpApiTesting.buildHealthResponse>[0];
+    const { status, body } = httpApiTesting.buildHealthResponse(fakeState);
+    expect(status).toBe(503);
+    expect(body.status).toBe("error");
+    expect(body.db_connection).toBe(false);
+  });
+
+  it("status=degraded when DB is up but embedding gap is high", () => {
+    httpApiTesting.healthCache.dbConnected = true;
+    httpApiTesting.healthCache.pendingWorkCount = 0;
+    httpApiTesting.healthCache.embeddingGapPct = 42; // > 15 threshold
+    httpApiTesting.healthCache.refreshedAt = Date.now();
+    const fakeState = {
+      store: { isAvailable: () => true },
+    } as Parameters<typeof httpApiTesting.buildHealthResponse>[0];
+    const { status, body } = httpApiTesting.buildHealthResponse(fakeState);
+    expect(status).toBe(200);
+    expect(body.status).toBe("degraded");
+  });
+
+  it("last_error_ms_ago tracks recordLastError calls", () => {
+    httpApiTesting.healthCache.dbConnected = true;
+    httpApiTesting.healthCache.pendingWorkCount = 0;
+    httpApiTesting.healthCache.embeddingGapPct = 0;
+    httpApiTesting.healthCache.refreshedAt = Date.now();
+    const fakeState = {
+      store: { isAvailable: () => true },
+    } as Parameters<typeof httpApiTesting.buildHealthResponse>[0];
+    // last_error_ms_ago is only emitted by the auth-gated /health/detailed
+    // shape — the public /health endpoint deliberately strips it (and every
+    // other host-fingerprint field). Test against the detailed responder.
+    // Before any error: null.
+    expect(httpApiTesting.buildHealthDetailedResponse(fakeState).body.last_error_ms_ago).toBeNull();
+    // After recording: a non-negative number.
+    httpApiTesting.recordLastError();
+    const after = httpApiTesting.buildHealthDetailedResponse(fakeState).body.last_error_ms_ago;
+    expect(typeof after).toBe("number");
+    expect(after as number).toBeGreaterThanOrEqual(0);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Periodic pruneDeadClients — Agent E gap #2: phantom clients on idle daemon.
+// The interval runs every 60s in production; tests exercise the same logic
+// synchronously via _testRunPrune and verify the timer handle is installed.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("DaemonServer: periodic pruneDeadClients", () => {
+  let server: DaemonServer;
+  let port: number;
+  let onIdleReap: ReturnType<typeof vi.fn>;
+
+  afterEach(async () => {
+    if (server) await server.close();
+  });
+
+  it("installs a periodic prune timer on listen() and clears it on close()", async () => {
+    server = new DaemonServer({
+      socketPath: null,
+      tcpPort: 0,
+      log: SILENT_LOG,
+    });
+    server.register("meta.health", async () => ({ ok: true, stats: server.getStats() }));
+    expect(server._testHasPruneTimer()).toBe(false);
+    await server.listen();
+    expect(server._testHasPruneTimer()).toBe(true);
+    await server.close();
+    expect(server._testHasPruneTimer()).toBe(false);
+  });
+
+  it("periodic prune drops phantom client entries that lost their close event", async () => {
+    onIdleReap = vi.fn();
+    server = new DaemonServer({
+      socketPath: null,
+      tcpPort: 0,
+      log: SILENT_LOG,
+      idleTimeoutMs: 100_000, // long — we only care about the prune path
+      onIdleReap,
+    });
+    server.register("meta.health", async () => ({ ok: true, stats: server.getStats() }));
+    await server.listen();
+
+    // Inject a phantom: a destroyed socket sitting in the clients Map as if
+    // its 'close' event never fired. This is exactly the edge case Agent E
+    // flagged — Node sometimes drops close events for short-lived probe
+    // connections and SIGKILL'd peers.
+    server._testInjectPhantomClient();
+    expect(server.attachedClientCount).toBe(1);
+
+    // Run the same prune logic the periodic interval runs.
+    const pruned = server._testRunPrune();
+    expect(pruned).toBeGreaterThanOrEqual(1);
+    expect(server.attachedClientCount).toBe(0);
+  });
+
+  it("periodic prune re-arms idle timer when pruning drops phantoms to zero clients", async () => {
+    onIdleReap = vi.fn();
+    server = new DaemonServer({
+      socketPath: null,
+      tcpPort: 0,
+      log: SILENT_LOG,
+      idleTimeoutMs: 100, // short — we want to observe re-arm + fire
+      onIdleReap,
+    });
+    server.register("meta.health", async () => ({ ok: true, stats: server.getStats() }));
+    await server.listen();
+
+    // Inject a phantom — armIdleTimer should now see clients.size==1 and
+    // refuse to arm. (Verify the gap Agent E flagged: without periodic
+    // prune, this state persists forever and onIdleReap never fires.)
+    server._testInjectPhantomClient();
+    expect(server.attachedClientCount).toBe(1);
+    // Wait past the idle deadline — phantom keeps the timer disarmed.
+    await new Promise(r => setTimeout(r, 200));
+    expect(onIdleReap).not.toHaveBeenCalled();
+
+    // Now run the periodic prune. Phantom dies, clients.size==0, idle
+    // timer re-arms.
+    const pruned = server._testRunPrune();
+    expect(pruned).toBe(1);
+    expect(server.attachedClientCount).toBe(0);
+
+    // Wait past idleTimeoutMs; onIdleReap should fire now.
+    await new Promise(r => setTimeout(r, 200));
+    expect(onIdleReap).toHaveBeenCalledTimes(1);
+  });
+
+  it("setInterval-based periodic prune is wired up via the real timer (not just _testRunPrune)", () => {
+    // Verify the production path uses an unref'd setInterval. We mock
+    // setInterval before constructing the server, then check it was called
+    // with the expected cadence and the returned handle had unref() called.
+    const setIntervalSpy = vi.spyOn(globalThis, "setInterval");
+    server = new DaemonServer({
+      socketPath: null,
+      tcpPort: 0,
+      log: SILENT_LOG,
+    });
+    server.register("meta.health", async () => ({ ok: true, stats: server.getStats() }));
+    return server.listen().then(() => {
+      expect(setIntervalSpy).toHaveBeenCalledWith(expect.any(Function), 60_000);
+      expect(server._testHasPruneTimer()).toBe(true);
+      // The handle returned by setInterval should have had unref() called.
+      const handle = setIntervalSpy.mock.results[setIntervalSpy.mock.results.length - 1].value as NodeJS.Timeout;
+      // Node Timer objects expose hasRef(); after unref() it returns false.
+      // Fall back to a truthy check on the symbol if hasRef is unavailable.
+      if (typeof (handle as { hasRef?: () => boolean }).hasRef === "function") {
+        expect((handle as { hasRef: () => boolean }).hasRef()).toBe(false);
+      }
+      setIntervalSpy.mockRestore();
+    });
   });
 });

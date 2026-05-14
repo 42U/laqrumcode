@@ -8,7 +8,7 @@
  *
  * Ported from kongbrain — takes SurrealStore/EmbeddingService as params.
  */
-import { swallow } from "./errors.js";
+import { swallow, RECORD_ID_RE } from "./errors.js";
 import { assertRecordId } from "./surreal.js";
 import { commitKnowledge } from "./commit.js";
 /**
@@ -66,22 +66,37 @@ export async function linkCausalEdges(chains, sessionId, store, embeddings) {
                     await store.relate(descriptionId, "describes", outcomeId).catch(e => swallow.warn("causal:relateDescOutcome", e));
                 }
             }
-            // Store chain metadata
-            await store.queryExec(`CREATE causal_chain CONTENT $data`, {
-                data: {
-                    session_id: String(sessionId),
-                    trigger_memory: triggerId,
-                    outcome_memory: outcomeId,
-                    description_memory: descriptionId,
-                    chain_type: chain.chainType,
-                    success: chain.success,
-                    confidence: chain.confidence,
-                    description: chain.description,
-                },
-            }).catch(e => swallow.warn("causal:storeChain", e));
+            // Store chain metadata. Pre-check for an existing row with the same
+            // (trigger, outcome, chain_type) tuple so we don't trip the UNIQUE
+            // index on retries / concurrent runs. The UNIQUE index is the hard
+            // backstop; this skip-on-exists avoids the surfaced error path entirely.
+            try {
+                const existing = await store.queryFirst(`SELECT id FROM causal_chain
+             WHERE trigger_memory = $t AND outcome_memory = $o AND chain_type = $type
+             LIMIT 1`, { t: triggerId, o: outcomeId, type: chain.chainType });
+                if (existing.length === 0) {
+                    await store.queryExec(`CREATE causal_chain CONTENT $data`, {
+                        data: {
+                            session_id: String(sessionId),
+                            trigger_memory: triggerId,
+                            outcome_memory: outcomeId,
+                            description_memory: descriptionId,
+                            chain_type: chain.chainType,
+                            success: chain.success,
+                            confidence: chain.confidence,
+                            description: chain.description,
+                        },
+                    });
+                }
+            }
+            catch (e) {
+                swallow.warn("causal:storeChain", e);
+            }
         }
         catch (e) {
-            swallow("causal:silent", e);
+            // Upgraded from swallow → swallow.warn: a failure here means an entire
+            // causal chain was lost, which is rare-but-real and worth surfacing.
+            swallow.warn("causal:silent", e);
         }
     }
 }
@@ -94,7 +109,6 @@ export async function linkCausalEdges(chains, sessionId, store, embeddings) {
 export async function queryCausalContext(seedIds, queryVec, hops = 2, minConfidence = 0.4, store) {
     if (seedIds.length === 0 || !store?.isAvailable())
         return [];
-    const RECORD_ID_RE = /^[a-zA-Z_][a-zA-Z0-9_]*:[a-zA-Z0-9_\-]+$/;
     const validIds = seedIds.filter((id) => RECORD_ID_RE.test(id)).slice(0, 10);
     if (validIds.length === 0)
         return [];
@@ -129,18 +143,19 @@ export async function queryCausalContext(seedIds, queryVec, hops = 2, minConfide
             break;
         }
         const nextFrontier = [];
-        for (const rows of allQueryResults) {
+        for (const rawRows of allQueryResults) {
+            const rows = rawRows;
             for (const row of rows) {
                 const nodeId = String(row.id);
                 if (seen.has(nodeId))
                     continue;
                 seen.add(nodeId);
-                const text = row.text ?? "";
+                const text = (row.text ?? "");
                 if (text) {
                     results.push({
                         id: nodeId,
                         text,
-                        score: row.score ?? 0,
+                        score: typeof row.score === "number" ? row.score : 0,
                         importance: row.importance,
                         accessCount: row.accessCount,
                         timestamp: row.timestamp,

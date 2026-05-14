@@ -8,7 +8,6 @@
  * Ported from kongbrain — per-session state via WeakMap, takes SurrealStore param.
  */
 import type { SessionState } from "./state.js";
-import type { SurrealStore } from "./surreal.js";
 export interface CognitiveDirective {
     type: "repeat" | "continuation" | "contradiction" | "noise" | "insight";
     target: string;
@@ -54,6 +53,13 @@ export declare function getPendingDirectives(session: SessionState): CognitiveDi
 export declare function clearPendingDirectives(session: SessionState): void;
 export declare function getSessionContinuity(session: SessionState): string;
 export declare function getSuppressedNodeIds(session: SessionState): ReadonlySet<string>;
-/** Fire-and-forget LLM call. Stores directives, writes grades to DB. */
-export declare function runCognitiveCheck(params: CognitiveCheckInput, session: SessionState, store: SurrealStore): Promise<void>;
+/**
+ * Cognitive check is now handled by the subagent-driven pending_work pipeline
+ * (commit_work_results tool). The in-line runCognitiveCheck() function was
+ * left as an empty no-op shim through the 0.4.x ports; this comment is the
+ * gravestone. Pending-work scheduling lives in the daemon/MCP layer — search
+ * for `cognitive_check` work_type and `commit_work_results`. The hook in
+ * context-engine.ts (afterTurn) was removed because the no-op shim was
+ * misleading: it suggested in-line cognitive checks were still firing.
+ */
 export declare function parseCheckResponse(text: string): CognitiveCheckResult | null;

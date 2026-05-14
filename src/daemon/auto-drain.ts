@@ -24,10 +24,10 @@
  */
 
 import { spawn } from "node:child_process";
-import { existsSync, openSync, closeSync, writeSync, writeFileSync, readFileSync, unlinkSync, renameSync, statSync } from "node:fs";
+import { existsSync, openSync, closeSync, writeSync, readFileSync, unlinkSync, statSync, appendFileSync, mkdirSync, ftruncateSync, renameSync, writeFileSync, constants as fsConstants } from "node:fs";
 import { execFileSync } from "node:child_process";
-import { join, resolve } from "node:path";
-import { homedir } from "node:os";
+import { join, resolve, dirname } from "node:path";
+import { homedir, platform } from "node:os";
 import type { GlobalPluginState } from "../engine/state.js";
 import { log } from "../engine/log.js";
 import { swallow } from "../engine/errors.js";
@@ -130,23 +130,147 @@ function isPidAlive(pid: number): boolean {
   }
 }
 
-/** Try to acquire the auto-drain lock. Returns the fd on success, or null
- *  if another extractor is already running (live PID in lock file). Stale
- *  locks (dead PID) are auto-cleaned. */
-function tryAcquireLock(lockPath: string): number | null {
+/** Marker written into auto-drain.pid as JSON. The 'marker' field
+ *  distinguishes a real drainer (or its parent daemon) from any other
+ *  process that may have recycled the same PID. */
+interface DrainLockMarker {
+  marker: "kongcode-auto-drain";
+  /** PID of the drainer child OR the daemon parent during the brief pre-spawn
+   *  window between O_EXCL claim and child launch. */
+  pid: number;
+  /** Daemon process that owns this drain lifecycle. Used by the close-time
+   *  identity check so a recycled drainer-PID can't fool us. */
+  daemonPid: number;
+  /** Wall-clock time the lock was claimed. */
+  startedAt: number;
+}
+
+/** Stale-recovery age: a marker file older than this with a non-matching
+ *  identity is unconditionally stolen. Drains run seconds to a few minutes;
+ *  20m is well beyond any plausible legit drain. */
+const DRAIN_LOCK_STALE_AGE_MS = 20 * 60 * 1000;
+
+/** Check whether a PID's /proc cmdline looks like a plausible drainer.
+ *  Returns true → looks like claude/node (likely real drainer)
+ *  Returns false → confirmed different process (e.g. shell, browser)
+ *  Returns null → cannot determine (non-Linux, or proc read failed)
+ *
+ *  We accept any cmdline containing 'claude' or 'node' since the auto-drain
+ *  child is a detached `claude --agent ...` invocation which spawns a node
+ *  subprocess. On macOS and Windows /proc doesn't exist, so we return null
+ *  and callers fall back to PID-alive checking. */
+function cmdlineLooksLikeDrainer(pid: number): boolean | null {
+  if (platform() !== "linux") return null;
   try {
-    return openSync(lockPath, "wx", 0o600);
-  } catch (e) {
-    if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
-    try {
-      const holderPid = Number(readFileSync(lockPath, "utf-8").trim());
-      if (!isPidAlive(holderPid)) {
-        unlinkSync(lockPath);
-        try { return openSync(lockPath, "wx", 0o644); } catch {}
-      }
-    } catch {}
-    return null;
+    const raw = readFileSync(`/proc/${pid}/cmdline`, "utf8");
+    if (!raw) return false;
+    const joined = raw.replace(/\0/g, " ").toLowerCase();
+    return joined.includes("claude") || joined.includes("node");
+  } catch {
+    return false;
   }
+}
+
+/** Parse the existing lock file. Returns the marker on success or null if
+ *  the file is unreadable / unparseable / wrong shape. Tolerates legacy
+ *  plain-PID files (returns a synthesized marker so callers can apply the
+ *  same identity logic).
+ *
+ *  Implementation note: JSON.parse("12345") succeeds and returns a number,
+ *  so we must check whether the parse produced an object-with-marker before
+ *  falling back to bare-PID parsing — the catch-block alone isn't enough. */
+function readLockMarker(lockPath: string): DrainLockMarker | null {
+  let raw: string;
+  try { raw = readFileSync(lockPath, "utf-8"); }
+  catch { return null; }
+  raw = raw.trim();
+  if (!raw) return null;
+
+  // Try JSON marker format first.
+  let parsed: unknown = undefined;
+  try { parsed = JSON.parse(raw); } catch { parsed = undefined; }
+  if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+    const p = parsed as Partial<DrainLockMarker>;
+    if (p.marker === "kongcode-auto-drain" && Number.isFinite(p.pid)) {
+      return {
+        marker: "kongcode-auto-drain",
+        pid: p.pid as number,
+        daemonPid: Number.isFinite(p.daemonPid) ? (p.daemonPid as number) : 0,
+        startedAt: Number.isFinite(p.startedAt) ? (p.startedAt as number) : 0,
+      };
+    }
+  }
+
+  // Legacy bare-PID format (pre-singleton drainers wrote raw String(pid)).
+  // JSON.parse("12345") succeeds with a number, so we still come through here
+  // after the not-an-object check above.
+  const n = Number(raw);
+  if (Number.isFinite(n) && n > 0) {
+    return { marker: "kongcode-auto-drain", pid: n, daemonPid: 0, startedAt: 0 };
+  }
+  return null;
+}
+
+/** Try to acquire the auto-drain lock. Returns the fd on success, or null
+ *  if another live drainer (verified by PID-alive AND cmdline) already
+ *  owns it. Stale locks (dead PID, unparseable file, OR alive-PID-but-
+ *  cmdline-doesn't-match-a-drainer i.e. recycled PID) are reclaimed.
+ *
+ *  IMPORTANT: The fd returned must be held open until the spawned child
+ *  exits. Closing it early downgrades the lock to a regular file and lets
+ *  the next drainer race in even though our child is still running. */
+function tryAcquireLock(lockPath: string): number | null {
+  // mkdir the parent — the cache dir may not yet exist on a fresh install.
+  try { mkdirSync(dirname(lockPath), { recursive: true }); } catch {}
+
+  const tryCreate = (): number | null => {
+    try {
+      return openSync(lockPath, fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_WRONLY, 0o600);
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === "EEXIST") return null;
+      throw e;
+    }
+  };
+
+  let fd = tryCreate();
+  if (fd !== null) return fd;
+
+  // Lock exists. Decide whether to steal.
+  const marker = readLockMarker(lockPath);
+  let stale = false;
+
+  if (marker === null) {
+    // Unparseable. Only steal if old enough (someone might be mid-write).
+    try {
+      const age = Date.now() - statSync(lockPath).mtimeMs;
+      if (age > DRAIN_LOCK_STALE_AGE_MS) stale = true;
+    } catch { stale = true; }
+  } else if (!isPidAlive(marker.pid)) {
+    stale = true;
+  } else {
+    // PID alive — verify it's plausibly a drainer (not a recycled PID owned
+    // by an unrelated process). Linux: read /proc cmdline. Other platforms:
+    // we can't verify, so we trust the PID-alive signal (conservative).
+    const looks = cmdlineLooksLikeDrainer(marker.pid);
+    if (looks === false) {
+      stale = true;
+    } else {
+      // Also stale-age check: even a "looks like" alive process is suspicious
+      // if the lock has been sitting there for >20min. Drains don't run that
+      // long; assume the child crashed mid-exit and the on('exit') handler
+      // missed.
+      try {
+        const age = Date.now() - statSync(lockPath).mtimeMs;
+        if (age > DRAIN_LOCK_STALE_AGE_MS) stale = true;
+      } catch {}
+    }
+  }
+
+  if (!stale) return null;
+
+  try { unlinkSync(lockPath); } catch {}
+  fd = tryCreate();
+  return fd;
 }
 
 function releaseLock(fd: number, lockPath: string): void {
@@ -154,11 +278,54 @@ function releaseLock(fd: number, lockPath: string): void {
   try { unlinkSync(lockPath); } catch {}
 }
 
+/** Write the daemon's interim marker into the freshly-claimed lock fd.
+ *  Done immediately after tryAcquireLock so an external observer sees a
+ *  valid identity even before the drainer child has been forked. */
+function writeDaemonInterimMarker(fd: number): void {
+  const marker: DrainLockMarker = {
+    marker: "kongcode-auto-drain",
+    pid: process.pid,         // daemon PID until the child is spawned
+    daemonPid: process.pid,
+    startedAt: Date.now(),
+  };
+  try { writeSync(fd, JSON.stringify(marker)); } catch {}
+}
+
+/** Rewrite the lock fd with the child PID once spawn() succeeds. The fd is
+ *  truncated first so an observer never sees a partial JSON document. */
+function writeChildMarker(fd: number, childPid: number): void {
+  const marker: DrainLockMarker = {
+    marker: "kongcode-auto-drain",
+    pid: childPid,
+    daemonPid: process.pid,
+    startedAt: Date.now(),
+  };
+  try { ftruncateSync(fd, 0); } catch {}
+  try { writeSync(fd, JSON.stringify(marker), 0); } catch {}
+}
+
 function spendingFilePath(cacheDir: string): string {
+  // Append-only deltas log (one JSON line per increment). The old
+  // auto-drain-spending.json read-modify-write was racy across concurrent
+  // drainers; an append-only log uses a single appendFileSync(O_APPEND)
+  // syscall which is atomic on POSIX for writes <= PIPE_BUF, well above
+  // our 100-byte lines.
+  return join(resolve(cacheDir), "auto-drain-spending.ndjson");
+}
+
+/** Legacy spending file kept around so existing installs migrate gracefully
+ *  (any pre-existing count is treated as authoritative for the recorded
+ *  date and merged with new ndjson entries). */
+function legacySpendingFilePath(cacheDir: string): string {
   return join(resolve(cacheDir), "auto-drain-spending.json");
 }
 
-function todayUtc(): string {
+/**
+ * Daily-key helper — `YYYY-MM-DD` in UTC. Exported so the other modules that
+ * roll per-UTC-day counters (stop.ts spending state, workspace-migrate.ts
+ * roll-forward) stop reinventing `new Date().toISOString().slice(0, 10)`.
+ */
+export function todayUtc(): string {
   return new Date().toISOString().slice(0, 10); // YYYY-MM-DD
 }
 
@@ -167,32 +334,162 @@ interface SpendingState {
   count: number;
 }
 
-/** Read today's spawn count from the spending file. Auto-resets to 0 if the
- *  recorded date is not today. Tolerant of missing/corrupt files. */
-function readSpending(cacheDir: string): SpendingState {
-  const path = spendingFilePath(cacheDir);
-  try {
-    const raw = readFileSync(path, "utf-8");
-    const parsed = JSON.parse(raw) as SpendingState;
-    if (parsed.date === todayUtc() && Number.isFinite(parsed.count)) {
-      return parsed;
-    }
-  } catch { /* missing or corrupt → fall through */ }
-  return { date: todayUtc(), count: 0 };
+interface SpendingDelta {
+  date: string;
+  ts: number;
+  pid: number;
 }
 
-function bumpSpending(cacheDir: string): SpendingState {
-  const cur = readSpending(cacheDir);
-  const next: SpendingState = { date: todayUtc(), count: cur.count + 1 };
-  const dest = spendingFilePath(cacheDir);
+/** Read today's spawn count from the append-only deltas log. Counts only
+ *  entries whose `date` matches today's UTC date so the per-day cap resets
+ *  cleanly at UTC midnight without any rewrite. Tolerant of missing files
+ *  and partial/truncated trailing lines (skipped silently — they don't
+ *  count). Merges in any pre-existing legacy JSON's count for the same
+ *  date so an upgrade doesn't reset a user's running cap. */
+function readSpending(cacheDir: string): SpendingState {
+  const today = todayUtc();
+  let count = 0;
+
+  // Legacy file: a single {date,count} object. Used pre-ndjson. If the
+  // recorded date matches today we add its count; otherwise we ignore
+  // (UTC date rollover resets the cap, same as the new format).
   try {
-    const tmp = dest + ".tmp";
-    writeFileSync(tmp, JSON.stringify(next), "utf-8");
-    renameSync(tmp, dest);
-  } catch (e) {
-    swallow.warn("auto-drain:spending:write", e);
+    const legacyRaw = readFileSync(legacySpendingFilePath(cacheDir), "utf-8");
+    const parsed = JSON.parse(legacyRaw) as SpendingState;
+    if (parsed && parsed.date === today && Number.isFinite(parsed.count)) {
+      count += parsed.count;
+    }
+  } catch { /* legacy file absent or unreadable */ }
+
+  // New append-only format: one JSON line per increment. Strict schema:
+  // every counted line must carry {date, ts, pid} so a stray hand-written
+  // {date} marker file (or pre-ndjson partial file) doesn't inflate the
+  // count. Truncated/malformed lines are skipped silently.
+  try {
+    const raw = readFileSync(spendingFilePath(cacheDir), "utf-8");
+    for (const line of raw.split("\n")) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      try {
+        const delta = JSON.parse(trimmed) as Partial<SpendingDelta>;
+        if (
+          delta &&
+          delta.date === today &&
+          Number.isFinite(delta.ts) &&
+          Number.isFinite(delta.pid)
+        ) {
+          count++;
+        }
+      } catch { /* skip malformed line */ }
+    }
+  } catch { /* file absent → count remains 0 */ }
+
+  return { date: today, count };
+}
+
+/** When the ndjson grows past this byte count, opportunistically prune stale
+ *  entries (drop everything whose date != today). At ~100 bytes per line and
+ *  the default 50 spawns/day cap, today's data alone is ~5KB; 64KB allows
+ *  several days of yesterday-data to accumulate before pruning kicks in.
+ *  Prevents the unbounded-growth case Reviewer E flagged.
+ *
+ *  Pruning is safe inside the daemon process because:
+ *   (a) The daemon singleton lock guarantees one daemon at a time.
+ *   (b) bumpSpending is only called from spawnHeadlessDrainer which itself
+ *       runs after tryAcquireLock claims the auto-drain.pid lock, so two
+ *       bumpSpending calls never overlap. The prune happens inside the
+ *       same call → serialized by construction.
+ *   (c) renameSync is atomic on POSIX (same-filesystem rename), so a
+ *       concurrent reader sees either the old file or the new — never a
+ *       half-written one. */
+const SPENDING_PRUNE_THRESHOLD_BYTES = 64 * 1024;
+
+/** Rewrite the spending file with only today's entries. Atomic via
+ *  write-temp-then-rename. Silent on failure — the file stays large but
+ *  remains parseable, so a failed prune just defers cleanup to a later call. */
+function pruneStaleSpending(cacheDir: string): void {
+  const path = spendingFilePath(cacheDir);
+  const today = todayUtc();
+  let raw: string;
+  try { raw = readFileSync(path, "utf-8"); }
+  catch { return; }
+
+  const kept: string[] = [];
+  for (const line of raw.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    try {
+      const delta = JSON.parse(trimmed) as Partial<SpendingDelta>;
+      if (
+        delta &&
+        delta.date === today &&
+        Number.isFinite(delta.ts) &&
+        Number.isFinite(delta.pid)
+      ) {
+        kept.push(trimmed);
+      }
+    } catch { /* drop malformed line */ }
   }
-  return next;
+
+  const tmpPath = path + ".tmp." + process.pid;
+  try {
+    const body = kept.length === 0 ? "" : kept.join("\n") + "\n";
+    writeFileSync(tmpPath, body, { encoding: "utf-8", mode: 0o600 });
+    renameSync(tmpPath, path);
+  } catch (e) {
+    try { unlinkSync(tmpPath); } catch {}
+    swallow.warn("auto-drain:spending:prune", e);
+    return;
+  }
+  log.info(`[auto-drain] pruned spending log: kept ${kept.length} entries for ${today} (was ${raw.length}B)`);
+}
+
+/** Append one delta to the spending log. O_APPEND + a single write under
+ *  PIPE_BUF is atomic on POSIX: even with two daemons racing (which the
+ *  singleton lock should prevent, but belt-and-suspenders), each delta
+ *  lands on its own line and the sum stays correct.
+ *
+ *  After append, if the file has grown past SPENDING_PRUNE_THRESHOLD_BYTES,
+ *  rewrite it keeping only today's entries. Bounds growth at roughly one
+ *  day's worth of activity (~5KB at the default 50/day cap). */
+function bumpSpending(cacheDir: string): SpendingState {
+  const delta: SpendingDelta = {
+    date: todayUtc(),
+    ts: Date.now(),
+    pid: process.pid,
+  };
+  const path = spendingFilePath(cacheDir);
+  try { mkdirSync(dirname(path), { recursive: true }); } catch {}
+  try {
+    appendFileSync(path, JSON.stringify(delta) + "\n", { encoding: "utf-8", mode: 0o600 });
+  } catch (e) {
+    swallow.warn("auto-drain:spending:append", e);
+  }
+
+  // Opportunistic prune. Cheap statSync; only proceeds if file is genuinely
+  // bloated. The legacy .json file is pruned too if it sits stale on disk.
+  try {
+    const st = statSync(path);
+    if (st.size > SPENDING_PRUNE_THRESHOLD_BYTES) {
+      pruneStaleSpending(cacheDir);
+    }
+  } catch { /* statSync failure → skip prune, harmless */ }
+
+  // Drop the legacy {date,count} file if its date no longer matches today.
+  // The migration logic in readSpending only consumes it when date == today;
+  // an older file just sits forever otherwise. Same singleton-lock argument
+  // applies — only this daemon writes to cacheDir spending files.
+  try {
+    const legacyPath = legacySpendingFilePath(cacheDir);
+    if (existsSync(legacyPath)) {
+      const parsed = JSON.parse(readFileSync(legacyPath, "utf-8")) as SpendingState;
+      if (!parsed || parsed.date !== todayUtc()) {
+        unlinkSync(legacyPath);
+      }
+    }
+  } catch { /* malformed/missing legacy file → ignore */ }
+
+  return readSpending(cacheDir);
 }
 
 async function getPendingCount(state: GlobalPluginState): Promise<number> {
@@ -265,6 +562,10 @@ async function spawnHeadlessDrainer(
   if (lockFd === null) {
     return { spawned: false, reason: "another extractor already running" };
   }
+  // Stamp the daemon's identity into the lock immediately. If we crash
+  // between here and spawn, the file at least carries a verifiable marker
+  // so the next acquirer can identify+steal it cleanly.
+  writeDaemonInterimMarker(lockFd);
 
   const agentName = process.env.KONGCODE_AUTO_DRAIN_MODEL === "opus"
     ? "kongcode:memory-extractor"
@@ -291,27 +592,53 @@ async function spawnHeadlessDrainer(
       releaseLock(lockFd, lockPath);
       return { spawned: false, reason: "spawn returned no pid" };
     }
-    try { writeSync(lockFd, String(child.pid)); } catch {}
-    try { closeSync(lockFd); } catch {}
+    // Update the lock marker to the child's PID so an external observer
+    // can correctly attribute the lock. DO NOT closeSync here — the fd
+    // hold is what semantically owns the lock; we only release on child
+    // exit. The previous code closed the fd immediately, demoting the
+    // lock to a regular file and letting the next spawn race in even
+    // though the child was still running.
+    writeChildMarker(lockFd, child.pid);
     child.unref();
 
     // Bump the daily counter once the spawn succeeds (we have a pid). Done
     // BEFORE awaiting the exit so a long-running extractor doesn't get a
-    // free-pass on its sibling spawn that might land mid-flight.
+    // free-pass on its sibling spawn that might land mid-flight. The
+    // append-only log keeps this atomic across concurrent drainers.
     if (opts.maxDaily > 0) {
       const post = bumpSpending(opts.cacheDir);
       log.info(`[auto-drain] daily count: ${post.count}/${opts.maxDaily}`);
     }
 
-    // Watch for exit so we can clean the lock file. Detached + unref'd means
-    // the daemon won't block on this, but we still want to know when it's done.
+    // Watch for exit so we can release the lock. The closure captures lockFd
+    // and lockPath so the fd is closed (releasing the lock) and the path is
+    // unlinked only when the child actually terminates. Idempotent guard
+    // prevents double-release if both 'exit' and 'error' fire.
+    let released = false;
+    const releaseOnce = () => {
+      if (released) return;
+      released = true;
+      // Verify the lock still records our daemon's identity before unlinking
+      // — protects against a fresh drainer that stole the lock (e.g. after a
+      // very long-running child triggered the stale-age branch).
+      try {
+        const marker = readLockMarker(lockPath);
+        const ours = marker !== null && marker.daemonPid === process.pid;
+        try { closeSync(lockFd); } catch {}
+        if (ours) {
+          try { unlinkSync(lockPath); } catch {}
+        }
+      } catch {
+        try { closeSync(lockFd); } catch {}
+      }
+    };
     child.on("exit", (code) => {
       log.info(`[auto-drain] extractor pid=${child.pid} exited with code=${code}`);
-      try { unlinkSync(lockPath); } catch {}
+      releaseOnce();
     });
     child.on("error", (err) => {
       log.error(`[auto-drain] extractor pid=${child.pid} error:`, err);
-      try { unlinkSync(lockPath); } catch {}
+      releaseOnce();
     });
 
     return { spawned: true };
@@ -370,7 +697,10 @@ export function triggerDrainCheck(state: GlobalPluginState, opts: DrainScheduler
     .catch(e => swallow.warn("auto-drain:trigger", e));
 }
 
-/** Test-only exports. Not part of the public API. */
+/**
+ * Test-only exports. Not part of the public API.
+ * @internal
+ */
 export const __testing = {
   findClaudeBin,
   resetClaudeBinCache: () => { claudeBinPath = null; claudeBinUnavailable = false; },
@@ -379,7 +709,14 @@ export const __testing = {
   isPidAlive,
   readSpending,
   bumpSpending,
+  pruneStaleSpending,
   todayUtc,
   spendingFilePath,
+  legacySpendingFilePath,
   pidFilePath,
+  readLockMarker,
+  writeDaemonInterimMarker,
+  writeChildMarker,
+  cmdlineLooksLikeDrainer,
+  SPENDING_PRUNE_THRESHOLD_BYTES,
 };

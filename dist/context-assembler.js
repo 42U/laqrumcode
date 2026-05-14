@@ -25,7 +25,7 @@ export async function assembleContextString(state, session, userPrompt) {
     }
     // Run orchestrator preflight to classify intent and set adaptive config
     try {
-        const preflightResult = await preflight(userPrompt, session, embeddings);
+        const preflightResult = await preflight(userPrompt, session, embeddings, 42000, store);
         session.currentConfig = preflightResult.config;
         if (preflightResult.config.toolLimit != null) {
             session.toolLimit = preflightResult.config.toolLimit;
@@ -76,15 +76,24 @@ export async function assembleContextString(state, session, userPrompt) {
         }
         // Include wakeup briefing if available and this is the first turn
         if (session.userTurnCount <= 1 && session._wakeupPromise) {
+            let wakeupTimer;
             try {
                 const wakeup = await Promise.race([
                     session._wakeupPromise,
-                    new Promise(resolve => setTimeout(() => resolve(null), 2000)),
+                    new Promise(resolve => {
+                        wakeupTimer = setTimeout(() => resolve(null), 2000);
+                    }),
                 ]);
                 if (wakeup)
                     parts.push(wakeup);
             }
             catch { /* non-critical */ }
+            finally {
+                // Clear so a fast-resolving wakeupPromise doesn't leak a 2s pending
+                // Timeout per first-turn context assembly.
+                if (wakeupTimer !== undefined)
+                    clearTimeout(wakeupTimer);
+            }
         }
         // Include compaction summary if present
         if (session._compactionSummary) {

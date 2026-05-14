@@ -5,7 +5,11 @@ import {
 } from "../src/engine/soul.js";
 import type { QualitySignals, SoulDocument, GraduationReport } from "../src/engine/soul.js";
 
-// Mock SurrealStore that returns configurable signal counts + quality data
+// Mock SurrealStore that returns configurable signal counts + quality data.
+//
+// 8-gate model: 7 volume thresholds (sessions, reflections, causalChains,
+// concepts, skills, monologues, spanDays) + 1 quality gate (composite ≥ 0.85).
+// There is no `totalMemories` gate — quality is the 8th.
 function mockStore(signals: Partial<{
   sessions: number;
   reflections: number;
@@ -116,7 +120,8 @@ describe("checkGraduation", () => {
     expect(result.ready).toBe(false);
     expect(result.stage).toBe("nascent");
     expect(result.volumeScore).toBe(0);
-    expect(result.unmet.length).toBe(7);
+    // 7 unmet volume gates + 1 unmet quality gate = 8 unmet, 0 met
+    expect(result.unmet.length).toBe(8);
     expect(result.met.length).toBe(0);
   });
 
@@ -128,24 +133,9 @@ describe("checkGraduation", () => {
     expect(result.volumeScore).toBe(0);
   });
 
-  it("developing at 4/7 thresholds", async () => {
-    const result = await checkGraduation(mockStore({
-      sessions: 20,
-      reflections: 15,
-      causalChains: 10,
-      concepts: 50,
-      skills: 0,
-      monologues: 0,
-      spanDays: 0,
-    }) as any);
-
-    expect(result.ready).toBe(false);
-    expect(result.stage).toBe("developing");
-    expect(result.met.length).toBe(4);
-    expect(result.diagnostics.length).toBeGreaterThan(0);
-  });
-
-  it("emerging at 5/7 thresholds", async () => {
+  it("developing at 5/8 — 5 volume met, quality short", async () => {
+    // 5 volume met (sessions, reflections, causalChains, concepts, monologues);
+    // unmet: skills, spanDays + quality. New 8-gate boundary: developing >= 5.
     const result = await checkGraduation(mockStore({
       sessions: 20,
       reflections: 15,
@@ -153,16 +143,37 @@ describe("checkGraduation", () => {
       concepts: 50,
       skills: 0,
       monologues: 10,
+      spanDays: 0,
+    }) as any);
+
+    expect(result.ready).toBe(false);
+    expect(result.stage).toBe("developing");
+    expect(result.met.length).toBe(5);
+    expect(result.unmet.length).toBe(3); // skills + spanDays + quality
+    expect(result.qualityScore).toBeLessThan(0.85);
+    expect(result.diagnostics.length).toBeGreaterThan(0);
+  });
+
+  it("emerging at 6/8 — 6 volume met, quality short", async () => {
+    // 6 volume met; unmet: spanDays + quality. emerging >= 6.
+    const result = await checkGraduation(mockStore({
+      sessions: 20,
+      reflections: 15,
+      causalChains: 10,
+      concepts: 50,
+      skills: 35,
+      monologues: 10,
       spanDays: 1,      // below threshold (3)
     }) as any);
 
     expect(result.ready).toBe(false);
     expect(result.stage).toBe("emerging");
-    expect(result.met.length).toBe(5);
-    expect(result.unmet.length).toBe(2);
+    expect(result.met.length).toBe(6);
+    expect(result.unmet.length).toBe(2); // spanDays + quality
   });
 
-  it("maturing at 7/7 thresholds but low quality", async () => {
+  it("maturing at 7/8 — all volume met but quality short", async () => {
+    // All 7 volume gates met, quality fails: 7 met, 1 unmet (quality), stage=maturing.
     const result = await checkGraduation(mockStore({
       sessions: 20,
       reflections: 15,
@@ -183,9 +194,11 @@ describe("checkGraduation", () => {
     expect(result.ready).toBe(false);
     expect(result.stage).toBe("maturing");
     expect(result.met.length).toBe(7);
+    expect(result.unmet.length).toBe(1);
+    expect(result.unmet[0]).toContain("quality");
   });
 
-  it("NOT ready at 7/7 if quality is too low", async () => {
+  it("NOT ready at 7/8 volume if quality is too low", async () => {
     const result = await checkGraduation(mockStore({
       sessions: 20,
       reflections: 15,
@@ -203,14 +216,15 @@ describe("checkGraduation", () => {
       toolFailRate: 0.8,
     }) as any);
 
-    expect(result.met.length).toBe(7);
+    expect(result.met.length).toBe(7);   // 7 volume, quality unmet
     expect(result.ready).toBe(false);
-    expect(result.stage).toBe("maturing"); // 7/7 volume but quality blocks "ready"
+    expect(result.stage).toBe("maturing"); // volume complete but quality blocks "ready"
+    expect(result.volumeScore).toBe(1);
     expect(result.qualityScore).toBeLessThan(0.6);
     expect(result.diagnostics.some(d => d.area === "quality:composite")).toBe(true);
   });
 
-  it("ready at 7/7 with good quality", async () => {
+  it("ready at 8/8 — all volume + quality met", async () => {
     const result = await checkGraduation(mockStore({
       sessions: 20,
       reflections: 15,
@@ -230,9 +244,11 @@ describe("checkGraduation", () => {
 
     expect(result.ready).toBe(true);
     expect(result.stage).toBe("ready");
-    expect(result.met.length).toBe(7);
+    expect(result.met.length).toBe(8); // 7 volume + 1 quality
+    expect(result.unmet.length).toBe(0);
     expect(result.volumeScore).toBe(1);
     expect(result.qualityScore).toBeGreaterThanOrEqual(0.85);
+    expect(result.met.some(s => s.includes("quality"))).toBe(true);
   });
 
   it("reports exact threshold values in met/unmet strings", async () => {
@@ -262,11 +278,14 @@ describe("checkGraduation", () => {
   });
 
   it("quality diagnostics flag poor retrieval utilization", async () => {
+    // 5 volume met (sessions, reflections, causalChains, concepts, monologues)
+    // — needed to clear nascent so quality diagnostics fire.
     const result = await checkGraduation(mockStore({
       sessions: 20,
       reflections: 15,
       causalChains: 10,
       concepts: 50,
+      monologues: 10,
       avgUtil: 0.1,
       retrievalCount: 30,
     }) as any);
@@ -284,6 +303,7 @@ describe("checkGraduation", () => {
       reflections: 15,
       causalChains: 10,
       concepts: 50,
+      monologues: 10,   // 5 volume met — needed for non-nascent stage
       toolFailRate: 0.5,
     }) as any);
 
@@ -392,7 +412,7 @@ describe("formatGraduationReport", () => {
 
   it("shows met and unmet thresholds", () => {
     const text = formatGraduationReport(baseReport);
-    expect(text).toContain("2/7 thresholds met");
+    expect(text).toContain("2/8 met");
     expect(text).toContain("sessions: 20/15");
     expect(text).toContain("reflections: 3/10");
   });

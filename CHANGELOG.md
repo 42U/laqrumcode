@@ -4,6 +4,64 @@ All notable changes to KongCode are documented here. The 0.7.x series introduced
 
 ## [Unreleased]
 
+## [0.7.70] — 2026-05-14
+
+- Hardening sweep across 9 adversarial review rounds, ~1,300+ LOC cleanup, and 200+ new tests. Highlights below.
+
+### Added
+- **`safeId(v)` helper** (`src/engine/errors.ts`): canonical RecordId→string coercion used by 6 row-mapping sites (surreal.ts:getSessionTurnsRich, skills.ts, reflection.ts, what-is-missing.ts ×2, cluster-scan.ts). Accepts strings and toString-able objects (RecordId), rejects null/undefined/numbers/booleans/plain `{}`.
+- **`isUniqueViolation`, `isTransactionConflict`, `RECORD_ID_RE`, `errMsg`** in `src/engine/errors.ts`: single canonical source replaces 4-5 duplicated copies across hooks and store layers.
+- **`src/engine/math.ts`** with `clamp`/`clamp01` (replaces 8 inline `Math.max(0, Math.min(1, ...))` sites).
+- **Shared `probeEmbeddingService`** in `src/engine/embeddings.ts` (replaces 2 near-identical copies in introspect + memory-health).
+- **Daemon singleton lock** (`src/daemon/index.ts`): O_EXCL on `daemon.pid` with cmdline-verify stale recovery + JSON marker (refuses to start if another live kongcode daemon owns the file).
+- **`/health` + `/health/detailed`** auth-tiered HTTP endpoints (`src/http-api.ts`): public minimal status + bearer-gated full diagnostics with `cmdlineLooksLikeKongcodeMcp` PID-recycle protection on `sweepStaleSockets`.
+- **Atomic auth-token write** (`src/http-api.ts`): per-PID tmpfile + O_EXCL + fsync + rename + startup sweep for orphans.
+- **Substrate detectors**: `cache_write_failures`, `db_unreachable`, `embedding_service_down`, memory-pressure breadcrumb in `src/engine/observability.ts`.
+- **`clearSessionClaim` retry-once** wiring on success paths in `src/hook-handlers/session-end.ts` and `src/engine/deferred-cleanup.ts`.
+- **Predeploy normalize pass** in `scripts/predeploy-dedup.mjs` (`normalizePendingWorkStatus`) covering the enum ASSERT contract.
+- **Schema repair** scripts: `scripts/migrate-concept-superseded-by.mjs` (REMOVE+DEFINE in BEGIN/COMMIT), `scripts/migrate-memory-utility-cache-id.mjs` (memory_id retyped to `record<memory|concept|turn>`), `scripts/reset-soul-graduation.mjs` (transactional archive+delete), `scripts/repair-vector-dim.mjs` (one-off dim-mismatch sweep), `scripts/postdeploy-verify.mjs` (27-check deploy gate).
+- **Tests**: 200+ new tests covering safeId, dedup-writers, claim-token idempotency, daemon-singleton lock, prefetch fire-and-forget, serializeError circular-cause DoS guard, mcp-tool-error try/catch, http-api-sweep cmdline branches, observability detectors, schema-edge-integrity. Total 970 tests across 57 files.
+
+### Fixed
+- **Duplicate-row enqueue (root cause closed)** — `pending_work` no longer accumulates duplicate `causal_graduate`/`soul_evolve` rows. Closed via (a) atomic `claimSessionForCleanup` DB primitive replacing the defeated in-memory `cleanedUp` guard, (b) compound UNIQUE on `(session_id, work_type, status)`, (c) code-side SELECT-before-CREATE at write sites, (d) `pre-tool-use.ts` setting `run_id = correlation_key` as placeholder.
+- **`getSessionTurnsRich` missing `id` projection** (`src/engine/surreal.ts`): prior projection added `tool_result`/`file_paths` but dropped `id`, causing `memory-daemon.ts` to silently skip every `mentions(turn→concept)` edge write. Restored `id` + `safeId`-filtered post-map.
+- **Supersede filter coverage** on main recall + dedup sites: added `superseded_at IS NONE` to `vectorSearch` concept branch, `tagBoostedConcepts`, `upsertConcept` KNN dedup, `concept-links.ts` hierarchy KNN + related_to peers (6 sites total now filtered).
+- **`supersedes` edge type widened** (`src/engine/schema.surql`): OUT changed to `record<concept | memory>` via `DEFINE TABLE OVERWRITE` so live installs converge; was rejecting memory→supersedes→memory writes from supersedes.ts.
+- **NaN-propagation cluster**: `parseDatetimeMs` helper now exported from observability.ts; applied at graph-context.ts:recencyScore, retrieval-quality.ts:363, soul.ts:127, wakeup.ts:33/89, surreal.ts:1507. Replaces raw `Date.parse` / `new Date(x).getTime()` that returned `NaN` on SurrealDB DateTime objects.
+- **`orchestrator_metrics` UNIQUE collisions** (`src/engine/orchestrator.ts`): postflight now SELECT-checks before CREATE to make the write idempotent under Stop-hook re-fire.
+- **`createArtifact` retry race** (`src/engine/surreal.ts`): UNIQUE-rejection fallback now retries CREATE once + KNN-similarity fallback, throws wrapped error preserving root cause in message text.
+- **`serializeError` DoS guard** (`src/tools/pending-work.ts`): WeakSet cycle detection + depth-8 cap + 4096-char output cap. Circular `.cause` chain previously burned 6.4s CPU + threw RangeError.
+- **mcp-server outer try/catch** (`src/mcp-server.ts`): tool-call dispatch wraps errors as `{content: [{type:"text", text:"Tool X failed: ..."}]}` so the model sees recoverable failure instead of raw JSON-RPC error.
+- **Prefetch cross-session bleed** (`src/engine/prefetch.ts`): cache entries keyed by `${sessionId}:${projectId}:${query}`; in-flight dedup map prevents duplicate embed calls; counters reset on `clearPrefetchCache`.
+- **`pendingToolArgs` keyed by `tool_use_id`** (`src/hook-handlers/pre-tool-use.ts`/`post-tool-use.ts`): parallel Write calls no longer collide on `toolName`.
+- **3 subagent CREATE sites dedup'd** by `correlation_key`/`run_id` (pre-tool-use, subagent, subagent-lifecycle); recency-fallback in subagent.ts replaced with exact-match SELECT.
+- **`subagent.ended_at` datetime cast** (`src/engine/hooks/subagent-lifecycle.ts`): uses `<datetime>$ended_at` so the typed schema field accepts the binding.
+- **Mutexes** on `seedIdentity` (`src/engine/identity.ts`) and `seedCognitiveBootstrap` (`src/engine/cognitive-bootstrap.ts`): concurrent SessionStarts share one in-flight execution.
+- **`memory_utility_cache.memory_id` retyped** to union `record<memory|concept|turn>` (1,656 rows migrated); `runMemoryMaintenance` no longer needs `string::concat(meta::tb, meta::id)` coercion.
+- **`concept.superseded_by` retyped** from `none|string` to `option<record<memory>>` (13 rows migrated via `migrate-concept-superseded-by.mjs`).
+- **`maturity_quality_drift` detector** correctly labels post-graduation quality signal (previously misframed as "graduation_close" alert).
+- **ACAN weights forward-migrate** from `~/.kongbrain/acan_weights.json` → `~/.kongcode/cache/` on startup (`src/engine/maintenance.ts`).
+- **Idempotent schema** (`src/engine/schema.surql`): all `DEFINE INDEX`/`DEFINE FIELD` use `IF NOT EXISTS` so daemon restart no longer crashes with "already exists".
+- **Concept hierarchy + dedup KNN** (`src/engine/concept-links.ts`, `src/engine/surreal.ts:upsertConcept`): replaced first-50-insertion-order scan (`LIMIT 50` with no ORDER BY) and O(N) `string::lowercase` equality with two-stage KNN (`concept_vec_idx` top-N + in-process precise check).
+- **Stale-recovery race** in `src/tools/pending-work.ts`: per-row branch wrapped in BEGIN/COMMIT with `ORDER BY created_at ASC` on sibling probe.
+
+### Removed
+- **`src/engine/context-engine.ts` (535 lines)** + `test/context-pipeline.test.ts` (567 lines): parallel context-assembly impl only kept alive by its own test; production uses `context-assembler.ts`.
+- **6 dead exports**: `getGlobalState`, `IpcResponse`, `MetaHandshakeRequest`, `MetaRequestSupersedeRequest`, `MetaRequestSupersedeResponse`, `ExtractionResult`.
+- **6 dead class methods**: `SurrealStore.getConnection`, `endSession`, `deactivateSessionMemories`; `EmbeddingService.resetCircuitBreaker`; `GlobalPluginState.allSessions`; `HandlerContext.getIdentity`.
+- **2 dead helpers**: `graph-context.ts` `msgRole()` + inner `makeResult()`.
+- **3 stale env flags**: `KONGCODE_RERANKER_KEEP_TAIL` (no legitimate use case per CHANGELOG), `KONGCODE_DETACH_SURREAL=0` opt-out, `KongBrainConfig` deprecated alias (renamed all callers to `KongCodeConfig`).
+- **Deprecated shim**: `SurrealStore.updateSessionStats` (caller in `hooks/llm-output.ts` rewritten to `bumpSessionTurn` + `addSessionTokens`).
+- **3 `TODO(post-0.8)` drain-compat branches** in `src/tools/pending-work.ts` (extraction, reflection, handoff_note); 2 `TODO(post-0.5.0)` blocks in observability.ts.
+- **Pre-0.5.5 `backfillOrphanKcSessionIds`** call site + underlying method.
+- **`@internal` JSDoc tags** added to 9 test-only exports (`__testing` blocks ×3, `_reset*ForTests` ×3, `_test*` instance methods ×3 on DaemonServer).
+
+### Security
+- **Introspect output redaction** (`src/engine/tools/introspect.ts`): expanded `USER_CONTENT_FIELDS` to include `description`/`summary`/`llm_reason`/`rationale`/`reason`/`preconditions`/`postconditions`/`payload`/`name`; SECRET_PATTERNS now covers `sk-proj-`, `sk-svcacct-`, glpat-, npm_, hf_, sk_live_, sk_test_, JWT three-segment, `\bsk-[A-Za-z0-9]{40,}\b` (tightened from `{20,}` to avoid `sk-learn-*` false positives). `deepRedact` walks nested arrays/objects up to depth 4. `verifyAction` non-USER_CONTENT strings get SECRET_PATTERNS mask before truncation.
+- **`statusAction` info.url** strips embedded credentials before print.
+- **`setup.sh` cache-dir**: `umask 077` BEFORE `mkdir -p` so cache dir is 0o700 from creation.
+- **`auth-token` atomic write**: per-PID tmpfile + O_EXCL + fsync + rename, plus startup sweep for orphans from crashed daemons.
+
 ## [0.7.68] — 2026-05-12
 
 ### Added

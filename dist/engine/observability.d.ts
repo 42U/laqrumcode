@@ -67,6 +67,69 @@ export declare function rollupDailyMetrics(store: SurrealStore, day: string): Pr
 export declare function pruneRawMetrics(store: SurrealStore, retentionDays?: number): Promise<void>;
 export declare function computeTrends(store: SurrealStore, windowDays?: number): Promise<TrendReport>;
 export declare function resetAnomalyCache(): void;
+/**
+ * Record the outcome of a write attempt under `~/.kongcode/cache/`. Call
+ * sites: bootstrap.ts (auth token, daemon.pid), auto-drain.ts (spending
+ * ledger), any other code path that persists state into the cache dir.
+ * Each call appends an outcome to a 10-minute sliding window.
+ */
+export declare function recordCacheWriteOutcome(ok: boolean): void;
+export declare function resetCacheWriteOutcomes(): void;
+export declare function getCacheWriteFailureStats(): {
+    total: number;
+    failures: number;
+    rate: number;
+};
+/**
+ * Record an isAvailable() probe outcome. The detector flips critical only
+ * after 5 consecutive failures within a 60s window — single transient
+ * disconnects should not page the operator. Call sites that already hold
+ * a store reference (orchestrator pre-flight, maintenance loop, hook
+ * handlers) should call this each time they consult availability.
+ */
+export declare function recordDbAvailability(ok: boolean): void;
+export declare function resetDbAvailability(): void;
+/**
+ * Contract for the embedding-service-down detector. Until EmbeddingService
+ * exposes a public `lastError` getter, call sites that catch an embedding
+ * error should forward it here. The detector treats the error as "fresh"
+ * for 5 minutes; if a subsequent embed succeeds, callers should
+ * `clearEmbeddingError()` to drop the flag.
+ */
+export declare function recordEmbeddingError(err: unknown): void;
+export declare function clearEmbeddingError(): void;
+/**
+ * Memory-pressure breadcrumb for inclusion in meta.health responses.
+ * Returns heap and RSS in MB plus the delta since the last call. Callers
+ * (introspect, health endpoint, anomaly format) get a stable shape without
+ * pulling `process` directly.
+ */
+export declare function getMemoryBreadcrumb(): {
+    heapUsedMB: number;
+    rssMB: number;
+    heapDeltaMB: number;
+    externalMB: number;
+};
 export declare function detectAnomalies(store: SurrealStore, cooldown: CooldownState): Promise<AnomalyFlag[]>;
 export declare function makeCooldownState(): CooldownState;
+/**
+ * Helper: parse a value that should be a datetime into epoch ms, or null
+ * if it's not a finite timestamp.
+ *
+ * Defensive against TWO observed SurrealDB return shapes:
+ *
+ *   1. `math::min(datetime)` returns the JS Number `Infinity` (math min
+ *      identity element). `Infinity` is truthy and `new Date(Infinity)`
+ *      is NaN, so the previous code path emitted "NaNh"/"Infinity" in
+ *      messages. We reject non-finite Numbers explicitly.
+ *
+ *   2. Plain `SELECT created_at` returns a SurrealDB `DateTime` class
+ *      instance — `typeof v === "object"` but `v instanceof Date === false`
+ *      and `Object.keys(v).length === 0`. Its `toString()` and
+ *      `toISOString()` both yield the RFC 3339 string. `new Date(v)`
+ *      passes through Symbol.toPrimitive and produces a valid JS Date,
+ *      so the universal path is: try the Date constructor, accept only
+ *      a finite getTime().
+ */
+export declare function parseDatetimeMs(v: unknown): number | null;
 export declare function formatAnomalyBlock(flags: AnomalyFlag[]): string;

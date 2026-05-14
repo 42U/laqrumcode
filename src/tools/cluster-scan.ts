@@ -16,7 +16,8 @@
  */
 
 import type { GlobalPluginState, SessionState } from "../engine/state.js";
-import { swallow } from "../engine/errors.js";
+import { swallow, safeId } from "../engine/errors.js";
+import { clamp } from "../engine/math.js";
 import { stripStructuralTags } from "../engine/sanitize.js";
 
 interface ResultItem {
@@ -146,7 +147,7 @@ export async function handleClusterScan(
   args: Record<string, unknown>,
 ): Promise<{ content: Array<{ type: "text"; text: string }> }> {
   const query = String(args.query ?? "").trim();
-  const limit = Math.min(15, Math.max(5, Number(args.limit) || 10));
+  const limit = clamp(Number(args.limit) || 10, 5, 15);
 
   if (!query) {
     return { content: [{ type: "text", text: "Error: `query` is required." }] };
@@ -172,12 +173,15 @@ export async function handleClusterScan(
     artifact: Math.ceil(limit / 2),
   }).catch(() => []);
 
-  const items: ResultItem[] = searchResults.slice(0, limit * 2).map((r: any) => ({
-    id: String(r.id),
-    text: stripStructuralTags(String(r.text ?? "").slice(0, 200)),
-    table: String(r.table ?? ""),
-    score: Number(r.score ?? 0),
-  }));
+  const items: ResultItem[] = searchResults
+    .slice(0, limit * 2)
+    .map((r: any) => ({
+      id: safeId(r.id),
+      text: stripStructuralTags(String(r.text ?? "").slice(0, 200)),
+      table: String(r.table ?? ""),
+      score: Number(r.score ?? 0),
+    }))
+    .filter((r: ResultItem) => r.id);
 
   if (items.length === 0) {
     return {

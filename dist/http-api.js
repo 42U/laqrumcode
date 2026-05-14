@@ -7,15 +7,206 @@
  * shared GlobalPluginState and returns hook response JSON.
  */
 import { createServer } from "node:http";
-import { chmodSync, existsSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, fsyncSync, openSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
+import { constants as fsConstants } from "node:fs";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { dirname, join, resolve as resolvePath } from "node:path";
+import { platform } from "node:os";
 import { log } from "./engine/log.js";
 let server = null;
 let socketPath = null;
 let portFilePath = null;
 let authToken = null;
 let authTokenPath = null;
+const healthCache = {
+    refreshedAt: null,
+    dbConnected: false,
+    pendingWorkCount: -1,
+    embeddingGapPct: -1,
+};
+/** ms timestamp of the last error logged through the HTTP API path. */
+let lastErrorAt = null;
+/** Process start time used for `uptime_ms`. Set on module load (the daemon
+ *  process this http-api lives in starts at module load). */
+const HTTP_API_STARTED_AT = Date.now();
+/** Daemon version, resolved once at module load. Read from injected define
+ *  (SEA bundle) or package.json (dev). Falls back to "0.0.0" if neither found. */
+const DAEMON_VERSION = (() => {
+    // @ts-expect-error — replaced by esbuild --define at bundle time
+    try {
+        if (typeof __KONGCODE_VERSION__ === "string")
+            return __KONGCODE_VERSION__;
+    }
+    catch { }
+    // Try walking up from this module's location for package.json. The compiled
+    // dist/ layout places this file two dirs deep relative to package.json.
+    for (const candidate of [
+        join(process.cwd(), "package.json"),
+        join(import.meta?.url ? new URL("../../package.json", import.meta.url).pathname : "", ""),
+        join(import.meta?.url ? new URL("../package.json", import.meta.url).pathname : "", ""),
+    ]) {
+        if (!candidate)
+            continue;
+        try {
+            const pkg = JSON.parse(readFileSync(candidate, "utf8"));
+            if (typeof pkg.version === "string")
+                return pkg.version;
+        }
+        catch { }
+    }
+    return "0.0.0";
+})();
+/** Background refresher handle. unref'd so it doesn't keep the event loop alive. */
+let healthRefreshTimer = null;
+/** How often to refresh the DB-derived cached fields. 30s is cheap relative
+ *  to typical poll cadences and keeps `/health` numbers fresh enough for ops. */
+const HEALTH_REFRESH_INTERVAL_MS = 30_000;
+/** Record a daemon-side error timestamp, exposed via /health's last_error_ms_ago.
+ *  Internal — called from the request error catch and any future error path
+ *  that wants to be surfaced through /health. The optional `message` arg is
+ *  accepted but only the timestamp is tracked through /health; callers that
+ *  also want the message logged should pass it to `log.error` separately. */
+function recordLastError(_message) {
+    lastErrorAt = Date.now();
+}
+/** Refresh the cached health fields from the store. Background only — never
+ *  called from a request handler. Failures degrade the cache to "DB down" but
+ *  do not throw. */
+async function refreshHealthCache(state) {
+    // isAvailable() is a synchronous flag read, but ping() may exist on the
+    // store and exercise an actual round-trip. Either is fine for the cached
+    // field; the request-path uses isAvailable() directly so the cache value
+    // here just informs the cached snapshot for clients reading older fields.
+    try {
+        healthCache.dbConnected = state.store.isAvailable();
+    }
+    catch {
+        healthCache.dbConnected = false;
+    }
+    if (!healthCache.dbConnected) {
+        healthCache.refreshedAt = Date.now();
+        return;
+    }
+    // pending_work_count: count rows with status='pending'. Identical query to
+    // tools/memory-health.ts so the two surfaces report the same number.
+    try {
+        const rows = await state.store.queryFirst("SELECT count() AS n FROM pending_work WHERE status = 'pending' GROUP ALL");
+        healthCache.pendingWorkCount = rows?.[0]?.n ?? 0;
+    }
+    catch (e) {
+        recordLastError();
+        log.warn(`[http-api] refreshHealthCache: pending_work count failed: ${e.message}`);
+        // Leave previous value in place; -1 (initial) stays until first success.
+    }
+    // embedding_gap_pct: aggregate across concept/memory/turn/artifact. Same
+    // formula as tools/memory-health.ts.
+    try {
+        const [conceptTotal, conceptEmb, memTotal, memEmb, turnTotal, turnEmb, artTotal, artEmb] = await Promise.all([
+            state.store.queryFirst("SELECT count() AS n FROM concept GROUP ALL"),
+            state.store.queryFirst("SELECT count() AS n FROM concept WHERE embedding != NONE AND array::len(embedding) > 0 GROUP ALL"),
+            state.store.queryFirst("SELECT count() AS n FROM memory GROUP ALL"),
+            state.store.queryFirst("SELECT count() AS n FROM memory WHERE embedding != NONE AND array::len(embedding) > 0 GROUP ALL"),
+            state.store.queryFirst("SELECT count() AS n FROM turn GROUP ALL"),
+            state.store.queryFirst("SELECT count() AS n FROM turn WHERE embedding != NONE AND array::len(embedding) > 0 GROUP ALL"),
+            state.store.queryFirst("SELECT count() AS n FROM artifact GROUP ALL"),
+            state.store.queryFirst("SELECT count() AS n FROM artifact WHERE embedding != NONE AND array::len(embedding) > 0 GROUP ALL"),
+        ]);
+        const total = (conceptTotal?.[0]?.n ?? 0) + (memTotal?.[0]?.n ?? 0) + (turnTotal?.[0]?.n ?? 0) + (artTotal?.[0]?.n ?? 0);
+        const embedded = (conceptEmb?.[0]?.n ?? 0) + (memEmb?.[0]?.n ?? 0) + (turnEmb?.[0]?.n ?? 0) + (artEmb?.[0]?.n ?? 0);
+        healthCache.embeddingGapPct = total > 0 ? Math.round(((total - embedded) / total) * 100) : 0;
+    }
+    catch (e) {
+        recordLastError();
+        log.warn(`[http-api] refreshHealthCache: embedding gap query failed: ${e.message}`);
+    }
+    healthCache.refreshedAt = Date.now();
+}
+/** Compute the {ok|degraded|error} status grade once — shared by both the
+ *  public /health and the auth-gated /health/detailed responders. */
+function gradeHealth(state) {
+    const dbAvailable = state ? (() => { try {
+        return state.store.isAvailable();
+    }
+    catch {
+        return false;
+    } })() : false;
+    let status;
+    if (!dbAvailable) {
+        status = "error";
+    }
+    else if (healthCache.embeddingGapPct > 15 || healthCache.pendingWorkCount > 50) {
+        status = "degraded";
+    }
+    else {
+        status = "ok";
+    }
+    return { status, dbAvailable };
+}
+/** Public /health responder. Auth-free. Returns ONLY the minimum needed for
+ *  external liveness probes: a status grade and db_connection bool. No pid,
+ *  no version, no memory_usage, no uptime — those leak host-fingerprint
+ *  details to anyone who can reach the Unix socket (which on many setups
+ *  is just "any local user"). Detailed shape lives at /health/detailed
+ *  behind the bearer token (same gate as /hook/*).
+ *
+ *  Status grading:
+ *    initializing → state is null OR the background health cache has not yet
+ *                   completed its first refresh → 503. External probes use
+ *                   this to back off rather than treating the daemon as
+ *                   permanently broken during startup.
+ *    error        → DB unreachable right now (regardless of cache) → 503
+ *    degraded     → DB up but embedding_gap_pct > 15 OR pending_work_count > 50
+ *    ok           → DB up and within thresholds */
+function buildHealthResponse(state) {
+    // "initializing" is its own 503 status separate from "error" so probes can
+    // tell startup-in-progress from a broken daemon. Two triggers:
+    //   - state is null (called before startHttpApi got a state ref)
+    //   - the background refresher has not completed its first round yet
+    //     (healthCache.refreshedAt === null)
+    // Body is intentionally minimal — no status grade, no cache fields — only
+    // db_connection so probes know whether the DB ping has at least been tried.
+    if (state === null || healthCache.refreshedAt === null) {
+        const dbAvailable = state ? (() => { try {
+            return state.store.isAvailable();
+        }
+        catch {
+            return false;
+        } })() : false;
+        return {
+            status: 503,
+            body: { status: "initializing", db_connection: dbAvailable },
+        };
+    }
+    const { status, dbAvailable } = gradeHealth(state);
+    return {
+        status: dbAvailable ? 200 : 503,
+        body: { status, db_connection: dbAvailable },
+    };
+}
+/** Auth-gated /health/detailed responder. Returns the full diagnostic shape
+ *  (pid, version, uptime, memory, last-error, cached counts). Bearer token
+ *  required — same secret as /hook/* — so a local-socket attacker can't
+ *  cheaply fingerprint the daemon. */
+function buildHealthDetailedResponse(state) {
+    const now = Date.now();
+    const { status, dbAvailable } = gradeHealth(state);
+    const uptimeMs = now - HTTP_API_STARTED_AT;
+    const memoryUsageMb = Math.round(process.memoryUsage().rss / 1024 / 1024);
+    const lastErrorMsAgo = lastErrorAt === null ? null : now - lastErrorAt;
+    const body = {
+        status,
+        uptime_ms: uptimeMs,
+        pid: process.pid,
+        version: DAEMON_VERSION,
+        daemon_uptime: uptimeMs, // alias kept for the task-specified shape
+        db_connection: dbAvailable,
+        pending_work_count: healthCache.pendingWorkCount,
+        embedding_gap_pct: healthCache.embeddingGapPct,
+        memory_usage_mb: memoryUsageMb,
+        last_error_ms_ago: lastErrorMsAgo,
+    };
+    return { status: dbAvailable ? 200 : 503, body };
+}
 /** Helper: wrap additionalContext in the hookSpecificOutput envelope Claude Code expects. */
 export function makeHookOutput(eventName, additionalContext, extra) {
     if (!additionalContext && !extra)
@@ -35,10 +226,31 @@ export function registerHookHandler(event, handler) {
     handlers.set(event, handler);
 }
 async function handleRequest(state, req, res) {
-    // Health check
+    // Public /health: auth-free, minimal shape. Just status+db_connection.
+    // Synchronous: reads cached snapshot, no DB round-trip on the request path,
+    // so a hung DB still allows the probe to detect it via status=error/503.
     if (req.method === "GET" && req.url === "/health") {
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ ok: true }));
+        const { status, body } = buildHealthResponse(state);
+        res.writeHead(status, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(body));
+        return;
+    }
+    // Detailed /health/detailed: full diagnostic shape (pid, version, uptime,
+    // memory, cached counts). Bearer-token gated so local-socket attackers
+    // can't fingerprint the daemon for free. Same secret as /hook/*.
+    if (req.method === "GET" && req.url === "/health/detailed") {
+        if (authToken) {
+            const bearer = req.headers.authorization?.replace(/^Bearer\s+/i, "");
+            if (!bearer || bearer.length !== authToken.length ||
+                !timingSafeEqual(Buffer.from(bearer), Buffer.from(authToken))) {
+                res.writeHead(401, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ error: "unauthorized" }));
+                return;
+            }
+        }
+        const { status, body } = buildHealthDetailedResponse(state);
+        res.writeHead(status, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(body));
         return;
     }
     // Hook endpoints: POST /hook/<event-name>
@@ -88,6 +300,11 @@ async function handleRequest(state, req, res) {
             res.end(JSON.stringify(response));
         }
         catch (err) {
+            // Surface the failure through /health/detailed's last_error_ms_ago BEFORE
+            // logging and replying. The hook proxy fail-opens with `{}`, so without
+            // this the only signal of a broken hook handler is the daemon log file —
+            // ops probes hitting /health/detailed would otherwise see clean state.
+            recordLastError(err instanceof Error ? err.message : String(err));
             log.error(`Hook handler error [${event}]: ${err instanceof Error ? err.message : "unknown"}`);
             res.writeHead(200, { "Content-Type": "application/json" });
             res.end("{}"); // Fail open
@@ -98,6 +315,40 @@ async function handleRequest(state, req, res) {
     res.writeHead(404);
     res.end("Not found");
 }
+/** Read /proc/<pid>/cmdline on Linux and check it looks like a kongcode
+ *  MCP-client process. Mirrors `cmdlineLooksLikeKongcodeDaemon` in
+ *  src/daemon/index.ts (~L371) but matches the per-session MCP relay rather
+ *  than the long-lived daemon: substrings like 'mcp-client/index.js',
+ *  'kongcode-mcp', or 'kongcode' alongside an mcp-ish path component.
+ *
+ *  Returns true  → confirmed to be a kongcode MCP (safe to SIGTERM)
+ *  Returns false → confirmed to be a different process (do NOT SIGTERM — PID was recycled)
+ *  Returns null  → cannot determine (non-Linux, or /proc unreadable) */
+function cmdlineLooksLikeKongcodeMcp(pid) {
+    if (platform() !== "linux")
+        return null;
+    try {
+        const raw = readFileSync(`/proc/${pid}/cmdline`, "utf8");
+        if (!raw)
+            return false;
+        // cmdline is NUL-separated; rejoin with spaces for substring tests.
+        const joined = raw.replace(/\0/g, " ").toLowerCase();
+        if (!joined.includes("node"))
+            return false;
+        if (joined.includes("mcp-client/index.js") || joined.includes("mcp-client/index.cjs"))
+            return true;
+        if (joined.includes("kongcode-mcp"))
+            return true;
+        if (joined.includes("kongcode") && joined.includes("mcp"))
+            return true;
+        return false;
+    }
+    catch {
+        // /proc/<pid>/cmdline missing → PID isn't running. Caller treats this
+        // as 'stale, safe to unlink' via the separate process.kill(pid,0) probe.
+        return false;
+    }
+}
 /**
  * Remove `.kongcode-<pid>.sock` files in `dir` whose PID is no longer alive.
  * Skips ownPid and any PID that exists but we can't signal (EPERM).
@@ -106,6 +357,17 @@ async function handleRequest(state, req, res) {
  * The hook proxy routes to whichever per-PID socket has the newest mtime, so
  * older MCPs become unreachable after a Claude Code restart and just sit
  * holding memory until killed manually. Reaping closes that loop.
+ *
+ * SAFETY (round-2): before SIGTERMing a PID derived from the socket filename
+ * we verify via /proc/<pid>/cmdline that it actually IS a kongcode MCP
+ * process. PIDs can recycle quickly under load — a daemon restart could find
+ * the socket file's PID number now belongs to an unrelated user process, and
+ * the original behavior would SIGTERM that innocent process. Verification
+ * mirrors the cmdlineLooksLikeKongcodeDaemon pattern used in
+ * src/daemon/index.ts for daemon.pid lock validation.
+ *
+ * Non-Linux platforms (no /proc): cmdline check returns null and we
+ * CONSERVATIVELY skip the SIGTERM — only unlink if the PID is already dead.
  *
  * Set `KONGCODE_KEEP_SIBLINGS=1` to opt out — required when running multiple
  * Claude Code windows simultaneously, since each window has its own MCP and
@@ -123,6 +385,7 @@ export function sweepStaleSockets(dir, ownPid) {
     const keepSiblings = process.env.KONGCODE_KEEP_SIBLINGS === "1";
     let removedFiles = 0;
     let reapedLive = 0;
+    let skippedForeign = 0;
     for (const name of entries) {
         const m = /^\.kongcode-(\d+)\.sock$/.exec(name);
         if (!m)
@@ -141,18 +404,36 @@ export function sweepStaleSockets(dir, ownPid) {
             foreign = code === "EPERM";
         }
         if (alive && !foreign && !keepSiblings) {
-            try {
-                process.kill(pid, "SIGTERM");
-                reapedLive++;
-                // Sibling will unlink its own socket on graceful shutdown; remove
-                // here too in case SIGTERM handling is slow or absent.
+            // Verify PID actually points at a kongcode MCP before signalling. PIDs
+            // recycle; a stale socket file might name a number that's now an
+            // innocent user process. cmdline check returns:
+            //   true  → kongcode MCP confirmed, SIGTERM safe
+            //   false → different process (recycled PID) → skip SIGTERM, just unlink the orphan
+            //   null  → non-Linux (no /proc), can't verify → skip SIGTERM to be safe
+            const looksLike = cmdlineLooksLikeKongcodeMcp(pid);
+            if (looksLike === true) {
                 try {
-                    unlinkSync(`${dir}/${name}`);
-                    removedFiles++;
+                    process.kill(pid, "SIGTERM");
+                    reapedLive++;
+                    // Sibling will unlink its own socket on graceful shutdown; remove
+                    // here too in case SIGTERM handling is slow or absent.
+                    try {
+                        unlinkSync(`${dir}/${name}`);
+                        removedFiles++;
+                    }
+                    catch { /* ignore */ }
                 }
-                catch { /* ignore */ }
+                catch { /* ignore — race or perms */ }
+                continue;
             }
-            catch { /* ignore — race or perms */ }
+            // PID alive but isn't us → recycled. Unlink the orphan socket file but
+            // do NOT signal the stranger.
+            skippedForeign++;
+            try {
+                unlinkSync(`${dir}/${name}`);
+                removedFiles++;
+            }
+            catch { /* ignore */ }
             continue;
         }
         if (alive)
@@ -167,6 +448,8 @@ export function sweepStaleSockets(dir, ownPid) {
         log.info(`Swept ${removedFiles} stale kongcode socket file(s)`);
     if (reapedLive > 0)
         log.info(`Reaped ${reapedLive} sibling MCP process(es) (set KONGCODE_KEEP_SIBLINGS=1 to opt out)`);
+    if (skippedForeign > 0)
+        log.info(`Skipped SIGTERM on ${skippedForeign} recycled PID(s) — cmdline did not match kongcode MCP`);
 }
 /**
  * Start the internal HTTP API.
@@ -177,7 +460,74 @@ export async function startHttpApi(state, sock, projectDir) {
     try {
         authToken = randomBytes(24).toString("hex");
         authTokenPath = join(cacheDir, "auth-token");
-        writeFileSync(authTokenPath, authToken, { mode: 0o600 });
+        // Sweep orphan auth-token tmpfiles from previously-crashed daemons before
+        // the O_EXCL open below. Without this, a prior daemon that crashed
+        // between openSync and renameSync leaves `auth-token.<pid>.tmp` on disk;
+        // if the kernel later recycles that PID for us, our O_EXCL open here
+        // fails with EEXIST and the daemon refuses to start. Worse, even when
+        // PIDs don't collide, those tmpfiles accumulate forever.
+        //
+        // Sweep rules: for each `auth-token.<digits>.tmp`, parse the PID.
+        //   - If the PID is alive AND its cmdline looks like a kongcode MCP,
+        //     leave it alone — another live daemon owns that tmpfile.
+        //   - Otherwise unlink it (orphan from a crashed daemon, or recycled
+        //     PID now owned by an unrelated process).
+        try {
+            const cacheEntries = readdirSync(cacheDir);
+            for (const name of cacheEntries) {
+                const m = /^auth-token\.(\d+)\.tmp$/.exec(name);
+                if (!m)
+                    continue;
+                const orphanPid = Number(m[1]);
+                if (!Number.isFinite(orphanPid))
+                    continue;
+                let alive = true;
+                try {
+                    process.kill(orphanPid, 0);
+                }
+                catch (e) {
+                    const code = e?.code;
+                    alive = code !== "ESRCH";
+                }
+                // Live PID + cmdline matches kongcode MCP → leave it alone.
+                // Anything else (dead PID, recycled PID owned by stranger, or a
+                // non-Linux box where we can't verify cmdline) → unlink the orphan.
+                // On non-Linux, cmdlineLooksLikeKongcodeMcp returns null; treat null
+                // as "not us" so the orphan gets cleaned (the only daemon that could
+                // legitimately own it would be ourselves, and our PID hasn't written
+                // the tmpfile yet at this point in startHttpApi).
+                if (alive && cmdlineLooksLikeKongcodeMcp(orphanPid) === true)
+                    continue;
+                try {
+                    unlinkSync(join(cacheDir, name));
+                }
+                catch { /* ignore */ }
+            }
+        }
+        catch { /* cacheDir missing — openSync below will surface the real error */ }
+        // Atomic write: tmpfile + rename so a crash mid-write can never leave a
+        // truncated/empty auth-token file. Two extra constraints on top of the
+        // bare rename pattern:
+        //   1. tmpfile name includes our PID — two concurrent daemon starts (e.g.
+        //      a fast restart racing the prior process's exit handler) won't
+        //      overwrite each other's tmpfile or rename a half-written stranger.
+        //   2. open with O_CREAT|O_EXCL|O_TRUNC + mode 0o600 so we ALWAYS create
+        //      a fresh file at exactly the right mode. writeFileSync's mode arg
+        //      is ignored on pre-existing files (umask path), which would leak a
+        //      0o644 tmpfile if one was left behind by a prior crash. Failing-
+        //      noisily with EEXIST when that happens is the safe default; the
+        //      catch below logs and rethrows so the daemon refuses to start
+        //      unauthenticated rather than reuse a stale tmpfile.
+        const tmpPath = `${authTokenPath}.${process.pid}.tmp`;
+        const fd = openSync(tmpPath, fsConstants.O_CREAT | fsConstants.O_TRUNC | fsConstants.O_WRONLY | fsConstants.O_EXCL, 0o600);
+        try {
+            writeSync(fd, authToken);
+            fsyncSync(fd);
+        }
+        finally {
+            closeSync(fd);
+        }
+        renameSync(tmpPath, authTokenPath);
         log.info("[http-api] auth token written to", authTokenPath);
     }
     catch (err) {
@@ -186,6 +536,7 @@ export async function startHttpApi(state, sock, projectDir) {
     }
     server = createServer((req, res) => {
         handleRequest(state, req, res).catch(err => {
+            recordLastError();
             log.error(`HTTP API error: ${err instanceof Error ? err.message : "unknown"}`);
             if (!res.headersSent) {
                 res.writeHead(500);
@@ -193,6 +544,24 @@ export async function startHttpApi(state, sock, projectDir) {
             }
         });
     });
+    // Start background /health cache refresher. Runs cheap COUNT queries off
+    // the request path so the /health endpoint stays synchronous and won't
+    // block on a hung DB. Fire one immediately so the first /health call
+    // after startup has populated values (catch in async wrapper — never
+    // throws into startup). unref'd so it doesn't keep the loop alive.
+    refreshHealthCache(state).catch(e => {
+        log.warn(`[http-api] initial health cache refresh failed: ${e.message}`);
+    });
+    if (healthRefreshTimer) {
+        clearInterval(healthRefreshTimer);
+        healthRefreshTimer = null;
+    }
+    healthRefreshTimer = setInterval(() => {
+        refreshHealthCache(state).catch(e => {
+            log.warn(`[http-api] health cache refresh failed: ${e.message}`);
+        });
+    }, HEALTH_REFRESH_INTERVAL_MS);
+    healthRefreshTimer.unref?.();
     if (sock) {
         // Sweep sibling sockets whose owning MCP process is dead. Uses
         // ESRCH-only detection so a foreign-owned (EPERM) PID is left alone.
@@ -247,6 +616,10 @@ export async function startHttpApi(state, sock, projectDir) {
 }
 /** Stop the internal HTTP API and clean up socket/port files. */
 export async function stopHttpApi() {
+    if (healthRefreshTimer) {
+        clearInterval(healthRefreshTimer);
+        healthRefreshTimer = null;
+    }
     if (server) {
         server.closeAllConnections();
         await new Promise((resolve) => {
@@ -277,3 +650,23 @@ export async function stopHttpApi() {
         authToken = null;
     }
 }
+/**
+ * Test-only handle: exposes the synchronous /health builder + cache state so
+ * the test suite can verify the response shape and 503-on-DB-down behavior
+ * without standing up a real HTTP listener. Not part of the public API.
+ * @internal
+ */
+export const __testing = {
+    buildHealthResponse,
+    buildHealthDetailedResponse,
+    healthCache,
+    recordLastError,
+    cmdlineLooksLikeKongcodeMcp,
+    resetHealthCache() {
+        healthCache.refreshedAt = null;
+        healthCache.dbConnected = false;
+        healthCache.pendingWorkCount = -1;
+        healthCache.embeddingGapPct = -1;
+        lastErrorAt = null;
+    },
+};

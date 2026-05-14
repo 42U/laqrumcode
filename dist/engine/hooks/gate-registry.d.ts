@@ -46,7 +46,10 @@ export declare function listGates(): readonly GateDefinition[];
  */
 export declare function runGates(ctx: GateContext): Promise<HookResponse | null>;
 export declare function makeDenyResponse(gateId: string, message: string): HookResponse;
-/** Reset to empty. If skipAutoInit is true, ensureInitialized() becomes
- *  a no-op — use this when tests register gates manually and don't want
- *  builtins auto-loaded. */
+/**
+ * Reset to empty. If skipAutoInit is true, ensureInitialized() becomes
+ * a no-op — use this when tests register gates manually and don't want
+ * builtins auto-loaded.
+ * @internal
+ */
 export declare function _resetRegistryForTests(skipAutoInit?: boolean): void;

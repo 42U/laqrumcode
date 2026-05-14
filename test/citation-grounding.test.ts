@@ -33,8 +33,11 @@ describe("evaluateRetrieval — [#N] citation parsing", () => {
         created.push(params.data);
       }
     });
+    // SELECT-then-CREATE dedup: writer pre-checks the UNIQUE-index tuple via
+    // queryFirst before issuing CREATE. Returning [] lets the CREATE fire.
+    const queryFirst = vi.fn().mockResolvedValue([]);
     const updateUtilityCache = vi.fn().mockResolvedValue(undefined);
-    const store = { queryExec, updateUtilityCache } as any;
+    const store = { queryFirst, queryExec, updateUtilityCache } as any;
     return { store, created };
   }
 
@@ -47,6 +50,7 @@ describe("evaluateRetrieval — [#N] citation parsing", () => {
     stageRetrieval("session:s1", items, undefined, indexMap);
 
     await evaluateRetrieval(
+      "session:s1",
       "turn:t1",
       "Per [#1] and [#3], the answer is yes.",
       store,
@@ -67,7 +71,7 @@ describe("evaluateRetrieval — [#N] citation parsing", () => {
     const indexMap = new Map<number, string>([[1, "concept:a"]]);
     stageRetrieval("session:s1", items, undefined, indexMap);
 
-    await evaluateRetrieval("turn:t1", "Citing [#99] which doesn't exist.", store);
+    await evaluateRetrieval("session:s1", "turn:t1", "Citing [#99] which doesn't exist.", store);
 
     expect(created[0].cited).toBe(false);
     expect(created[0].citation_method).toBe("none");
@@ -78,7 +82,7 @@ describe("evaluateRetrieval — [#N] citation parsing", () => {
     const items = [makeItem("concept:a", 0.9)];
     stageRetrieval("session:s1", items, undefined);
 
-    await evaluateRetrieval("turn:t1", "Some response.", store);
+    await evaluateRetrieval("session:s1", "turn:t1", "Some response.", store);
 
     expect(created).toHaveLength(1);
     expect(created[0].cited).toBeUndefined();
@@ -102,6 +106,7 @@ describe("evaluateRetrieval — [#N] citation parsing", () => {
     stageRetrieval("session:s1", items, undefined, indexMap);
 
     await evaluateRetrieval(
+      "session:s1",
       "turn:t1",
       "When releasing a new version remember to bump package.json package-lock.json and plugin.json plus the README version badge — all four version surfaces — so the marketplace cache stays in sync with the new release.",
       store,
@@ -117,7 +122,7 @@ describe("evaluateRetrieval — [#N] citation parsing", () => {
     const indexMap = new Map<number, string>([[1, "concept:a"]]);
     stageRetrieval("session:s1", items, undefined, indexMap);
 
-    await evaluateRetrieval("turn:t1", "[#1] is great. See also [#1] for confirmation.", store);
+    await evaluateRetrieval("session:s1", "turn:t1", "[#1] is great. See also [#1] for confirmation.", store);
 
     expect(created[0].cited).toBe(true);
   });

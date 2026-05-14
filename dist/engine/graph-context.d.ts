@@ -2,8 +2,7 @@
  * Graph-based context transformation for KongCode.
  *
  * Core retrieval pipeline: vector search → graph expand → WMR/ACAN scoring
- * → dedup → budget trim → format. All retrieval logic is identical to KongBrain;
- * only the integration layer (imports, output format) differs.
+ * → dedup → budget trim → format.
  */
 import type { AgentMessage } from "./types.js";
 import type { SurrealStore } from "./surreal.js";

@@ -41,10 +41,16 @@ interface SteeringCandidate {
     detail: string;
 }
 export declare const DEFAULT_ADAPTIVE_CONFIG: AdaptiveConfig;
-export declare function preflight(input: string, session: SessionState, embeddings: EmbeddingService, retrievalBudgetTokens?: number): Promise<PreflightResult>;
+export declare function preflight(input: string, session: SessionState, embeddings: EmbeddingService, retrievalBudgetTokens?: number, store?: SurrealStore): Promise<PreflightResult>;
 /** Record a tool call for steering analysis. */
 export declare function recordToolCall(session: SessionState, name: string, args?: string): void;
-/** Record metrics to SurrealDB (non-blocking). */
+/** Record metrics to SurrealDB (non-blocking).
+ *
+ *  Sections that may be added here in the future (token recording, ACAN
+ *  sample write, retrieval grade write) each get their own try/catch so a
+ *  failure in one section doesn't silently swallow the whole metrics
+ *  pipeline — the previous single-blanket catch would have hidden a metrics
+ *  CREATE failure behind any earlier section's error. */
 export declare function postflight(input: string, result: PreflightResult, actualToolCalls: number, actualTokensIn: number, actualTokensOut: number, turnDurationMs: number, session: SessionState, store: SurrealStore): Promise<void>;
 export declare function getLastPreflightConfig(session: SessionState): AdaptiveConfig;
 export declare function getSteeringCandidates(session: SessionState): SteeringCandidate[];

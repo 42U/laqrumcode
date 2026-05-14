@@ -11,7 +11,7 @@
 
 import type { EmbeddingService } from "./embeddings.js";
 import type { SurrealStore, VectorSearchResult } from "./surreal.js";
-import { swallow } from "./errors.js";
+import { swallow, RECORD_ID_RE } from "./errors.js";
 import { assertRecordId } from "./surreal.js";
 import { commitKnowledge } from "./commit.js";
 
@@ -98,21 +98,38 @@ export async function linkCausalEdges(
         }
       }
 
-      // Store chain metadata
-      await store.queryExec(`CREATE causal_chain CONTENT $data`, {
-        data: {
-          session_id: String(sessionId),
-          trigger_memory: triggerId,
-          outcome_memory: outcomeId,
-          description_memory: descriptionId,
-          chain_type: chain.chainType,
-          success: chain.success,
-          confidence: chain.confidence,
-          description: chain.description,
-        },
-      }).catch(e => swallow.warn("causal:storeChain", e));
+      // Store chain metadata. Pre-check for an existing row with the same
+      // (trigger, outcome, chain_type) tuple so we don't trip the UNIQUE
+      // index on retries / concurrent runs. The UNIQUE index is the hard
+      // backstop; this skip-on-exists avoids the surfaced error path entirely.
+      try {
+        const existing = await store.queryFirst<{ id: string }>(
+          `SELECT id FROM causal_chain
+             WHERE trigger_memory = $t AND outcome_memory = $o AND chain_type = $type
+             LIMIT 1`,
+          { t: triggerId, o: outcomeId, type: chain.chainType },
+        );
+        if (existing.length === 0) {
+          await store.queryExec(`CREATE causal_chain CONTENT $data`, {
+            data: {
+              session_id: String(sessionId),
+              trigger_memory: triggerId,
+              outcome_memory: outcomeId,
+              description_memory: descriptionId,
+              chain_type: chain.chainType,
+              success: chain.success,
+              confidence: chain.confidence,
+              description: chain.description,
+            },
+          });
+        }
+      } catch (e) {
+        swallow.warn("causal:storeChain", e);
+      }
     } catch (e) {
-      swallow("causal:silent", e);
+      // Upgraded from swallow → swallow.warn: a failure here means an entire
+      // causal chain was lost, which is rare-but-real and worth surfacing.
+      swallow.warn("causal:silent", e);
     }
   }
 }
@@ -133,7 +150,6 @@ export async function queryCausalContext(
 ): Promise<VectorSearchResult[]> {
   if (seedIds.length === 0 || !store?.isAvailable()) return [];
 
-  const RECORD_ID_RE = /^[a-zA-Z_][a-zA-Z0-9_]*:[a-zA-Z0-9_\-]+$/;
   const validIds = seedIds.filter((id) => RECORD_ID_RE.test(id)).slice(0, 10);
   if (validIds.length === 0) return [];
 
@@ -161,32 +177,46 @@ export async function queryCausalContext(
       }
     }
 
-    let allQueryResults: any[][];
+    // Per-edge SELECT rows projected to a {id, text, importance, accessCount,
+    // timestamp, category, table, score} shape. Wire is unknown[][]; narrow
+    // per-row with an explicit row type at the read site.
+    type CausalRow = {
+      id?: unknown;
+      text?: unknown;
+      importance?: unknown;
+      accessCount?: unknown;
+      timestamp?: unknown;
+      category?: unknown;
+      table?: unknown;
+      score?: unknown;
+    };
+    let allQueryResults: unknown[][];
     try {
-      allQueryResults = await store.queryBatch<any>(stmts, bindings);
+      allQueryResults = await store.queryBatch<unknown>(stmts, bindings);
     } catch (e) {
       swallow.warn("causal:batch", e);
       break;
     }
     const nextFrontier: string[] = [];
 
-    for (const rows of allQueryResults) {
+    for (const rawRows of allQueryResults) {
+      const rows = rawRows as CausalRow[];
       for (const row of rows) {
         const nodeId = String(row.id);
         if (seen.has(nodeId)) continue;
         seen.add(nodeId);
 
-        const text = row.text ?? "";
+        const text = (row.text ?? "") as string;
         if (text) {
           results.push({
             id: nodeId,
             text,
-            score: row.score ?? 0,
-            importance: row.importance,
-            accessCount: row.accessCount,
-            timestamp: row.timestamp,
+            score: typeof row.score === "number" ? row.score : 0,
+            importance: row.importance as number | undefined,
+            accessCount: row.accessCount as number | undefined,
+            timestamp: row.timestamp as string | undefined,
             table: String(row.table ?? "memory"),
-            source: row.category,
+            source: row.category as string | undefined,
           });
           if (RECORD_ID_RE.test(nodeId)) {
             nextFrontier.push(nodeId);

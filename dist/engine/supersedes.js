@@ -72,15 +72,24 @@ export async function linkSupersedesEdges(correctionMemId, originalText, correct
                 break;
             const conceptId = String(candidate.id);
             await store.relate(correctionMemId, "supersedes", conceptId)
-                .catch(e => swallow("supersedes:relate", e));
+                .catch(e => swallow.warn("supersedes:relate", e));
             const currentStability = candidate.stability ?? 1.0;
             const newStability = Math.max(STABILITY_FLOOR, currentStability * STABILITY_DECAY_FACTOR);
             try {
                 assertRecordId(conceptId);
-                await store.queryExec(`UPDATE ${conceptId} SET stability = $newStability, superseded_at = time::now(), superseded_by = $correctionId`, { newStability, correctionId: correctionMemId });
+                assertRecordId(correctionMemId);
+                // concept.superseded_by is now `option<record<memory>>` (migrated
+                // 2026-05-13 via scripts/migrate-concept-superseded-by.mjs). The
+                // SurrealDB type coercer rejects bare strings against a record-typed
+                // field, so wrap the binding with type::record() — it parses the
+                // "memory:xxx" string back into a Thing on the server side. Same
+                // mechanism is used in skills.ts for skill.superseded_by.
+                await store.queryExec(`UPDATE ${conceptId} SET stability = $newStability, superseded_at = time::now(), superseded_by = type::record($correctionId)`, { newStability, correctionId: correctionMemId });
             }
             catch (e) {
-                swallow("supersedes:decay", e);
+                // Critical write path: if decay fails the stale concept keeps competing
+                // in recall and the supersede contract silently breaks. Surface it.
+                swallow.warn("supersedes:decay", e);
             }
             supersededCount++;
         }
@@ -91,13 +100,15 @@ export async function linkSupersedesEdges(correctionMemId, originalText, correct
                 break;
             const memoryId = String(candidate.id);
             await store.relate(correctionMemId, "supersedes", memoryId)
-                .catch(e => swallow("supersedes:relate-memory", e));
+                .catch(e => swallow.warn("supersedes:relate-memory", e));
             try {
                 assertRecordId(memoryId);
                 await store.queryExec(`UPDATE ${memoryId} SET status = 'superseded', resolved_at = time::now(), resolved_by = $correctionId`, { correctionId: correctionMemId });
             }
             catch (e) {
-                swallow("supersedes:mark-memory", e);
+                // Critical write path: if the status flip fails the stale memory keeps
+                // surfacing in vectorSearch (which filters on status='active' OR NONE).
+                swallow.warn("supersedes:mark-memory", e);
             }
             supersededCount++;
         }

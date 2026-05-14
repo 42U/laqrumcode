@@ -1,4 +1,3 @@
-import { Surreal } from "surrealdb";
 import type { SurrealConfig } from "./config.js";
 /** Record with a vector similarity score from SurrealDB search */
 export interface VectorSearchResult {
@@ -54,8 +53,8 @@ declare function assertRecordId(id: string): void;
 declare const VALID_EDGES: Set<string>;
 declare function assertValidEdge(edge: string): void;
 /**
- * SurrealDB store — wraps all database operations for the KongBrain plugin.
- * Replaces the module-level singleton pattern from standalone KongBrain.
+ * SurrealDB store — wraps all database operations for the KongCode plugin.
+ * Replaces the module-level singleton pattern from standalone KongCode.
  */
 export declare class SurrealStore {
     private db;
@@ -69,7 +68,6 @@ export declare class SurrealStore {
     markShutdown(): void;
     private ensureConnected;
     private runSchema;
-    getConnection(): Surreal;
     isConnected(): boolean;
     getInfo(): {
         url: string;
@@ -114,9 +112,12 @@ export declare class SurrealStore {
         text: string;
     }[]>;
     getSessionTurnsRich(sessionId: string, limit?: number): Promise<{
+        turnId: string;
         role: string;
         text: string;
         tool_name?: string;
+        tool_result?: string;
+        file_paths?: string[];
     }[]>;
     relate(fromId: string, edge: string, toId: string): Promise<void>;
     ensureAgent(name: string, model?: string): Promise<string>;
@@ -143,23 +144,53 @@ export declare class SurrealStore {
      *  flush any tokens accrued mid-compaction). No-op when both deltas
      *  are zero, which is the common-no-tokens-accrued path. */
     addSessionTokens(sessionId: string, inputTokens: number, outputTokens: number): Promise<void>;
-    /** @deprecated since 0.7.12 — split into bumpSessionTurn + addSessionTokens.
-     *  Kept as a backward-compat shim for any external caller; new code should
-     *  call the split methods directly. Will be removed in 0.8.x. */
-    updateSessionStats(sessionId: string, inputTokens: number, outputTokens: number): Promise<void>;
-    endSession(sessionId: string, summary?: string): Promise<void>;
     markSessionActive(sessionId: string): Promise<void>;
     markSessionEnded(sessionId: string): Promise<void>;
+    /**
+     * Atomically claim a session for cleanup. Only one worker wins per session.
+     *
+     * Sets cleanup_completed = true and ended_at = time::now() in a single
+     * conditional UPDATE. Returns true when this caller won the claim (a row
+     * was matched and updated), false when another worker already claimed it
+     * (or the record does not exist).
+     *
+     * Callers MUST roll back via releaseSessionClaim() if the follow-up work
+     * (e.g. CREATEing pending_work rows) fails, otherwise the session will
+     * never be retried by deferred cleanup. On successful cleanup completion,
+     * callers SHOULD call clearSessionClaim() so the cleanup_claim_token does
+     * not linger on the row (it accumulates otherwise).
+     *
+     * Retry idempotency: queryFirst() wraps every call in withRetry(), which
+     * retries on connection error. The WHERE clause accepts either "row not
+     * yet claimed" OR "row already claimed by us (token matches)". So if the
+     * first attempt landed but the response was lost and withRetry re-runs,
+     * the second branch fires, RETURN BEFORE is non-empty, and we correctly
+     * report won=true on the retry.
+     *
+     * The cleanup_claim_token field is schemaless — schema rev still pending
+     * (Agent F3 owns the schema patch), but SCHEMALESS accepts the field
+     * without a definition, so the runtime path can land ahead of schema.
+     */
+    claimSessionForCleanup(sessionId: string): Promise<boolean>;
+    /**
+     * Roll back a prior claimSessionForCleanup() when the follow-up work failed.
+     * Resets cleanup_completed = false and clears ended_at so deferredCleanup
+     * picks the session up again on next boot. Also clears the claim token so
+     * a fresh claim attempt starts from a clean slate.
+     */
+    releaseSessionClaim(sessionId: string): Promise<void>;
+    /**
+     * Clear the cleanup_claim_token after successful cleanup completion. Leaves
+     * cleanup_completed = true so the session stays "done"; only the token is
+     * reset so it does not accumulate across re-runs on the same record. Safe
+     * to call multiple times (idempotent on the NONE write).
+     */
+    clearSessionClaim(sessionId: string): Promise<void>;
     getOrphanedSessions(limit?: number): Promise<{
         id: string;
         started_at: string;
         kc_session_id: string | null;
     }[]>;
-    /** One-shot: for sessions created before 0.5.5 that lack kc_session_id,
-     * walk their `part_of` turn edges and copy the kc id from any turn row.
-     * Idempotent — only updates rows where kc_session_id is currently NONE.
-     * Bounded per call so a backlog of hundreds chips down across SessionStarts. */
-    backfillOrphanKcSessionIds(limit?: number): Promise<number>;
     countTurnsForSession(kcSessionId: string): Promise<number>;
     linkSessionToTask(sessionId: string, taskId: string): Promise<void>;
     linkTaskToProject(taskId: string, projectId: string): Promise<void>;
@@ -185,7 +216,6 @@ export declare class SurrealStore {
     createCoreMemory(text: string, category: string, priority: number, tier: number, sessionId?: string): Promise<string>;
     updateCoreMemory(id: string, fields: Partial<Pick<CoreMemoryEntry, "text" | "category" | "priority" | "tier" | "active">>): Promise<boolean>;
     deleteCoreMemory(id: string): Promise<void>;
-    deactivateSessionMemories(sessionId: string): Promise<void>;
     getLatestHandoff(): Promise<{
         text: string;
         created_at: string;

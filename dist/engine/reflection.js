@@ -8,7 +8,7 @@
  *
  * Ported from kongbrain — takes SurrealStore/EmbeddingService as params.
  */
-import { swallow } from "./errors.js";
+import { swallow, safeId } from "./errors.js";
 import { cosineSimilarity } from "./graph-context.js";
 // --- Reflection Retrieval ---
 /**
@@ -55,13 +55,13 @@ export async function retrieveReflections(queryVec, limit = 3, store, projectId)
                 deduped.push(r);
         }
         return deduped.map((r) => ({
-            id: String(r.id),
+            id: safeId(r.id),
             text: r.text ?? "",
             category: r.category ?? "efficiency",
             severity: r.severity ?? "minor",
             importance: Number(r.importance ?? 7.0),
             score: r.score,
-        }));
+        })).filter(r => r.id);
     }
     catch (e) {
         swallow.warn("reflection:retrieve", e);

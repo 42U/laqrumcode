@@ -5,6 +5,7 @@
  *
  * Ported from kongbrain — takes EmbeddingService instead of module-level embed.
  */
+import { cosineSimilarity } from "./graph-context.js";
 const PROTOTYPES = [
     { category: "simple-question", text: "What is two plus two?" },
     { category: "simple-question", text: "What is the capital of France?" },
@@ -74,16 +75,6 @@ async function ensurePrototypes(embeddings) {
     await promise;
     return centroidCache.get(embeddings);
 }
-function cosine(a, b) {
-    let dot = 0, normA = 0, normB = 0;
-    for (let i = 0; i < a.length; i++) {
-        dot += a[i] * b[i];
-        normA += a[i] * a[i];
-        normB += b[i] * b[i];
-    }
-    const denom = Math.sqrt(normA) * Math.sqrt(normB);
-    return denom > 0 ? dot / denom : 0;
-}
 // --- Public API ---
 export async function classifyIntent(text, embeddings) {
     if (!embeddings.isAvailable()) {
@@ -93,7 +84,7 @@ export async function classifyIntent(text, embeddings) {
     const inputVec = await embeddings.embed(text);
     const scores = [];
     for (const proto of prototypeVecs) {
-        scores.push({ category: proto.category, score: cosine(inputVec, proto.vec) });
+        scores.push({ category: proto.category, score: cosineSimilarity(inputVec, proto.vec) });
     }
     scores.sort((a, b) => b.score - a.score);
     const top = scores[0];

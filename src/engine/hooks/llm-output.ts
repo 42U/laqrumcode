@@ -68,7 +68,8 @@ export function createLlmOutputHandler(state: GlobalPluginState) {
       session._statsFlushCounter = (session._statsFlushCounter ?? 0) + 1;
       if (session._statsFlushCounter >= 5) {
         try {
-          await state.store.updateSessionStats(
+          await state.store.bumpSessionTurn(session.surrealSessionId);
+          await state.store.addSessionTokens(
             session.surrealSessionId,
             session._pendingInputTokens,
             session._pendingOutputTokens,

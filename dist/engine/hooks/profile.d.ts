@@ -23,7 +23,10 @@ export declare function getActiveProfile(): HookProfile;
  *                      explicitly disabled.
  */
 export declare function shouldHookRun(hookId: string, requiredFor: HookProfile[]): boolean;
-/** Test-only: clear cached env reads so a new env can take effect. */
+/**
+ * Test-only: clear cached env reads so a new env can take effect.
+ * @internal
+ */
 export declare function _resetProfileCacheForTests(): void;
 /**
  * Seed/refresh the Tier-0 core_memory directive that surfaces the active

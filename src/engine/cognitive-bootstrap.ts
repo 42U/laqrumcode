@@ -86,6 +86,12 @@ const IDENTITY_CHUNKS: { text: string; importance: number }[] = [
   },
 ];
 
+// Per-process mutex: prevents two concurrent SessionStart hooks from both
+// passing the version-tag check, both DELETEing identity_chunk rows, and both
+// re-inserting — yielding 2N rows. Single in-flight promise; subsequent
+// callers await the same result until it resolves.
+let _seedBootstrapInFlight: Promise<{ identitySeeded: number; coreSeeded: number }> | null = null;
+
 /**
  * Seed cognitive bootstrap knowledge on first run.
  * Idempotent — checks for existing entries before seeding.
@@ -95,7 +101,16 @@ export async function seedCognitiveBootstrap(
   embeddings: EmbeddingService,
 ): Promise<{ identitySeeded: number; coreSeeded: number }> {
   if (!store.isAvailable()) return { identitySeeded: 0, coreSeeded: 0 };
+  if (_seedBootstrapInFlight) return _seedBootstrapInFlight;
+  _seedBootstrapInFlight = seedCognitiveBootstrapImpl(store, embeddings)
+    .finally(() => { _seedBootstrapInFlight = null; });
+  return _seedBootstrapInFlight;
+}
 
+async function seedCognitiveBootstrapImpl(
+  store: SurrealStore,
+  embeddings: EmbeddingService,
+): Promise<{ identitySeeded: number; coreSeeded: number }> {
   let identitySeeded = 0;
   let coreSeeded = 0;
 
