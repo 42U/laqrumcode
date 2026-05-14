@@ -4,6 +4,11 @@ All notable changes to KongCode are documented here. The 0.7.x series introduced
 
 ## [Unreleased]
 
+## [0.7.73] — 2026-05-14
+
+### Fixed
+- **Reflection writer no longer produces anti-thoroughness self-critique or operations-recap content** (`src/engine/memory-daemon.ts:132`, `src/tools/pending-work.ts:commitReflection`). The `buildCoalescedPrompt` reflection extras previously asked the subagent for "what went well, what could improve, patterns worth noting" which invited anti-thoroughness framing in direct contradiction of the tier-0 founder rule "TAKE YOUR TIME, BE THOROUGH" and produced reflections like "should have just acknowledged and moved on faster" that then poisoned every future retrieval. Replaced with a prompt that targets REASONING signal (user correction, falsified hypothesis, tradeoff, pattern), forbids anti-thoroughness phrasings verbatim, and forbids listing tool calls / concept IDs / edge counts / save totals / completion markers (those are operations, not reflections). Added a three-regex content filter at `commitReflection` as belt-and-braces: anti-thoroughness matches are dropped entirely with a warning log; save-summary and work-completion matches are downgraded to importance 3 with no embedding so they neither rank in retrieval nor compete in dedup. Verified 20/20 filter cases on deployed `dist/tools/pending-work.js` (10 real anti-thoroughness samples from the cleanup, 3 save-summary, 3 work-completion, 4 clean-text false-positive checks). Live subagent confirmation that the new prompt is served via `fetch_pending_work`. As part of the fix, cleaned 14 pathological rows from this workstation's `reflection` table (74 → 60).
+
 ## [0.7.72] — 2026-05-14
 
 ### Fixed
