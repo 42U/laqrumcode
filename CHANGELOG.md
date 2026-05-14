@@ -4,6 +4,11 @@ All notable changes to KongCode are documented here. The 0.7.x series introduced
 
 ## [Unreleased]
 
+## [0.7.71] — 2026-05-14
+
+### Fixed
+- **Cross-platform CI: gate reaper test suite to Linux only** (`test/http-api-sweep.test.ts`): the `sweepStaleSockets` reaper relies on `/proc/<pid>/cmdline` to verify a sibling is a kongcode MCP before SIGTERM; on macOS/Windows it returns null and the sweep deliberately skips, so the SIGTERM assertions only make sense on Linux. Wrapped the describe block in `describe.runIf(process.platform === "linux")`. Other suites remain cross-platform.
+
 ## [0.7.70] — 2026-05-14
 
 - Hardening sweep across 9 adversarial review rounds, ~1,300+ LOC cleanup, and 200+ new tests. Highlights below.

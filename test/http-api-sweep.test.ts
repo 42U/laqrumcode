@@ -82,7 +82,12 @@ describe("sweepStaleSockets — keep-siblings semantics (KONGCODE_KEEP_SIBLINGS=
   });
 });
 
-describe("sweepStaleSockets — reaper (default-on)", () => {
+// The reaper's SIGTERM path depends on `cmdlineLooksLikeKongcodeMcp` returning
+// a definitive true/false, which it only does on Linux via /proc/<pid>/cmdline.
+// On macOS/Windows the helper returns null and the sweep deliberately skips
+// SIGTERM (defense-in-depth on PID recycling). Tests in this suite assert the
+// SIGTERM-and-reap behavior, so they only make sense on Linux.
+describe.runIf(process.platform === "linux")("sweepStaleSockets — reaper (default-on, linux)", () => {
   let dir: string;
   let child: ChildProcess | null = null;
 
