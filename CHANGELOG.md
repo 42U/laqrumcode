@@ -4,6 +4,28 @@ All notable changes to KongCode are documented here. The 0.7.x series introduced
 
 ## [Unreleased]
 
+## [0.7.79] — 2026-05-15
+
+Iteration 4 of 6 in the auto-sealing campaign.
+
+### Added
+- **`skill` kind in `commitKnowledge`** (`src/engine/commit.ts`). Skill writes now go through one canonical helper that handles embedding (default `${name}: ${description}`, override via `embeddingText`), CREATE, `skill_from_task` auto-seal (when `taskId` provided), `skill_uses_concept` auto-seal (explicit `conceptIds` OR similarity scan via linkToRelevantConcepts), and `supersedeOldSkills`. `CommitSkillData` accepts required `name`/`description`/`steps` (loose-typed union covers both `string[]` and `{tool,description}[]` shapes), optional `preconditions`/`postconditions`, embedding controls (`embeddingText`, `precomputedVec`), edge seeding (`taskId`, `conceptIds`), three link knobs default true (`linkFromTask`, `linkUsesConcepts`, `supersede`), scope (`sessionId`, `projectId`), and an `extras: Record<string, unknown>` escape hatch for SCHEMALESS fields used by individual writers.
+
+### Changed (caller migrations — 3 writers retired)
+- **`src/engine/memory-daemon.ts:390-438`** (extraction-pipeline skill writer): ~35 LOC of inline embed + CREATE + 2 relate calls + supersedeOldSkills collapsed to a ~15-line `commitKnowledge({ kind: "skill", embeddingText: content, ... })` call. Multi-line content blob preserved via `embeddingText`.
+- **`src/tools/pending-work.ts:createSkillRecord`** (subagent-extraction skill writer): ~30 LOC inline collapsed to ~12 LOC. **Behavior change**: this writer previously skipped `skill_uses_concept` entirely; post-migration it starts writing those edges via the linkToRelevantConcepts similarity fallback. The load-bearing gap Stage 1 audit flagged is closed.
+- **`src/engine/workspace-migrate.ts:440-475`** (workspace migration skill writer): collapsed to a commitKnowledge call with all three link knobs disabled (workspace migration has no task/session context) and `supersede: false` (migrations seed history, don't replace prior). `embedding` is computed once and shared between the skill row (via `precomputedVec`) and the artifact row CREATE below.
+
+### Changed (validation relaxation)
+- `commitSkill`'s steps requirement relaxed from non-empty array to "must be an array (use [] for skills with no documented steps)". Workspace-migrate produces skills from docs that occasionally have no extractable step list — those rows are still useful for retrieval.
+
+### Tests
+- `test/workspace-migrate.test.ts:mockStore` updated to track `queryFirst` records alongside `queryExec` records so assertions on `_records` stay agnostic to which write API the writer uses. commitKnowledge writes via `queryFirst` (returns id); the test now sees both paths.
+
+### Verified
+- `npm run build` clean.
+- `npm test` 968/968 passing across 58 test files (unchanged net count; mock update kept the existing workspace-migrate test green after the migration).
+
 ## [0.7.78] — 2026-05-15
 
 Iteration 3 of 6 in the auto-sealing campaign.
