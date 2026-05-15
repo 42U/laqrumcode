@@ -5,7 +5,8 @@
  * UNIQUE-index violations and duplicate rows:
  *
  *   1. subagent CREATE dedup — three call sites (pre-tool-use, subagent
- *      orphan-stop fallback, subagent-lifecycle.createSubagentSpawnedHandler).
+ *      orphan-stop fallback). subagent-lifecycle.createSubagentSpawnedHandler
+ *      retired v0.7.74 along with the OpenClaw-gateway file.
  *   2. artifact dedup — SurrealStore.createArtifact path key.
  *   3. causal_chain dedup — engine/causal.ts linkCausalEdges (trigger,
  *      outcome, chain_type) tuple key.
@@ -22,7 +23,6 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { handlePreToolUse } from "../src/hook-handlers/pre-tool-use.js";
 import { handlePostToolUse } from "../src/hook-handlers/post-tool-use.js";
 import { handleSubagentStop } from "../src/hook-handlers/subagent.js";
-import { createSubagentSpawnedHandler } from "../src/engine/hooks/subagent-lifecycle.js";
 import { linkCausalEdges, type CausalChain } from "../src/engine/causal.js";
 import {
   stageRetrieval,
@@ -220,52 +220,6 @@ describe("subagent CREATE dedup — subagent.ts orphan-stop fallback", () => {
         description: "orphan stop (no matching spawn)",
       }),
     });
-  });
-});
-
-describe("subagent CREATE dedup — engine/hooks/subagent-lifecycle.ts spawned handler", () => {
-  it("SKIPS the CREATE when SELECT finds a row for the same run_id", async () => {
-    const session = mockSession();
-    session.surrealSessionId = "session:parent-1";
-    const { state, queryFirst, relate } = mockStateForHooks(session);
-    queryFirst.mockResolvedValueOnce([{ id: "subagent:already-here" }]);
-
-    const handler = createSubagentSpawnedHandler(state);
-    await handler(
-      { runId: "run-dupe", childSessionKey: "child-1", label: "x", mode: "run" },
-      { runId: "run-dupe", childSessionKey: "child-1", requesterSessionKey: session.sessionId },
-    );
-
-    // Only one queryFirst call: the existence-check SELECT. No CREATE.
-    expect(queryFirst).toHaveBeenCalledTimes(1);
-    expect(queryFirst.mock.calls[0][0]).toContain("SELECT id FROM subagent");
-    expect(queryFirst.mock.calls[0][1]).toMatchObject({ rid: "run-dupe" });
-    // spawned edge is not created when CREATE was skipped.
-    expect(relate).not.toHaveBeenCalled();
-  });
-
-  it("PROCEEDS with CREATE when SELECT finds nothing — SELECT-first ordering", async () => {
-    const session = mockSession();
-    session.surrealSessionId = "session:parent-2";
-    const { state, queryFirst, relate } = mockStateForHooks(session);
-    queryFirst
-      .mockResolvedValueOnce([])                                 // SELECT → no existing
-      .mockResolvedValueOnce([{ id: "subagent:new-spawn" }]);    // CREATE
-
-    const handler = createSubagentSpawnedHandler(state);
-    await handler(
-      { runId: "run-fresh", childSessionKey: "child-2", label: "y", mode: "run" },
-      { runId: "run-fresh", childSessionKey: "child-2", requesterSessionKey: session.sessionId },
-    );
-
-    expect(queryFirst).toHaveBeenCalledTimes(2);
-    expect(queryFirst.mock.calls[0][0]).toContain("SELECT id FROM subagent");
-    expect(queryFirst.mock.calls[1][0]).toContain("CREATE subagent");
-    expect(relate).toHaveBeenCalledWith(
-      "session:parent-2",
-      "spawned",
-      "subagent:new-spawn",
-    );
   });
 });
 

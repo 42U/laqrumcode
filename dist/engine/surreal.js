@@ -39,7 +39,7 @@ function toRecordId(id) {
 /** Whitelist of valid SurrealDB edge table names — prevents SQL injection via edge interpolation. */
 const VALID_EDGES = new Set([
     // Semantic edges
-    "responds_to", "tool_result_of", "summarizes", "mentions", "related_to",
+    "responds_to", "mentions", "related_to",
     "narrower", "broader", "about_concept", "reflects_on",
     // Skill edges
     "skill_from_task", "skill_uses_concept",
@@ -705,7 +705,7 @@ export class SurrealStore {
             return [];
         const MAX_FRONTIER_SEEDS = 5; // max seed nodes to start BFS from
         const MAX_FRONTIER_PER_HOP = 3; // max nodes carried forward per hop (by score)
-        const forwardEdgeList = "responds_to, tool_result_of, summarizes, mentions, related_to, narrower, broader, about_concept, reflects_on, skill_from_task, skill_uses_concept, owns, performed, task_part_of, session_task, produced, derived_from, relevant_to, used_in, artifact_mentions";
+        const forwardEdgeList = "responds_to, mentions, related_to, narrower, broader, about_concept, reflects_on, skill_from_task, skill_uses_concept, owns, performed, task_part_of, session_task, produced, derived_from, relevant_to, used_in, artifact_mentions";
         const reverseEdgeList = "reflects_on, skill_from_task, produced, derived_from, performed, owns";
         const FORWARD_LIMIT = 25;
         const REVERSE_LIMIT = 10;

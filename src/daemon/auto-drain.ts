@@ -31,7 +31,12 @@ import { homedir, platform } from "node:os";
 import type { GlobalPluginState } from "../engine/state.js";
 import { log } from "../engine/log.js";
 import { swallow } from "../engine/errors.js";
-import { drainHeuristic } from "./heuristic-drain.js";
+// Heuristic in-process drain retired 2026-05-15 (v0.7.74 audit): the `handoff_note`
+// and `reflection` work_types it consumed were removed in commit cab768f when the
+// coalesced_extraction pipeline replaced them. The orphan-bug spike (17 orphan
+// reflection rows on the dev install) traced back to that file's discarded
+// rows[0].id, so we drop the consumer entirely. coalesced_extraction now handles
+// the work that used to live here.
 
 interface DrainSchedulerOpts {
   /** Min pending count to trigger a drain. Below this, scheduler is a no-op. */
@@ -530,18 +535,11 @@ async function spawnHeadlessDrainer(
   }
 
   const rawCount = await getPendingCount(state);
-  if (rawCount >= 1) {
-    const heuristicProcessed = await drainHeuristic(state);
-    if (heuristicProcessed > 0) {
-      const remaining = await getPendingCount(state);
-      if (remaining < opts.threshold) {
-        return { spawned: false, reason: `heuristic drained ${heuristicProcessed}, remaining=${remaining} < threshold=${opts.threshold}` };
-      }
-    } else if (rawCount < opts.threshold) {
-      return { spawned: false, reason: `queue=${rawCount} < threshold=${opts.threshold}` };
-    }
-  } else {
+  if (rawCount < 1) {
     return { spawned: false, reason: `queue=0 < threshold=${opts.threshold}` };
+  }
+  if (rawCount < opts.threshold) {
+    return { spawned: false, reason: `queue=${rawCount} < threshold=${opts.threshold}` };
   }
 
   // Daily-spend cap: refuse to spawn if today's count would exceed maxDaily.

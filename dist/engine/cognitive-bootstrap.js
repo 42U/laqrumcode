@@ -54,7 +54,7 @@ const IDENTITY_CHUNKS = [
         importance: 8,
     },
     {
-        text: `Graph connectivity determines recall quality. 25 edge types link nodes across the graph (26th, spawned, is deferred). Key edges: mentions (turn->concept), about_concept (memory->concept), artifact_mentions (artifact->concept), caused_by/supports/contradicts (memory<->memory), narrower/broader/related_to (concept<->concept), reflects_on (reflection->session), tool_result_of (turn->turn), part_of (turn->session), skill_from_task (skill->task). To maximize connectivity: mention specific artifact paths, reference existing concept names, describe cause-effect relationships explicitly, and note task context. Reuse existing concept names — use introspect or recall to discover what names exist.`,
+        text: `Graph connectivity determines recall quality. ~26 edge types link nodes across the graph. Key edges: mentions (turn->concept), about_concept (memory->concept), artifact_mentions (artifact->concept), caused_by/supports/contradicts (memory<->memory), narrower/broader/related_to (concept<->concept), reflects_on (reflection->session), part_of (turn->session), skill_from_task (skill->task), spawned/spawned_from (session<->subagent). To maximize connectivity: mention specific artifact paths, reference existing concept names, describe cause-effect relationships explicitly, and note task context. Reuse existing concept names — use introspect or recall to discover what names exist.`,
         importance: 8,
     },
     {

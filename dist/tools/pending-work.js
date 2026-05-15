@@ -11,7 +11,7 @@
  * a separate API call from the MCP server.
  */
 import { validateExtraction } from "../engine/daemon-types.js";
-import { buildSystemPrompt, buildCoalescedPrompt, buildTranscript, writeExtractionResults } from "../engine/memory-daemon.js";
+import { buildCoalescedPrompt, buildTranscript, writeExtractionResults } from "../engine/memory-daemon.js";
 import { createSoul, seedSoulAsCoreMemory, reviseSoul, getSoul, checkGraduation, getQualitySignals, recordGraduationEvent } from "../engine/soul.js";
 import { swallow } from "../engine/errors.js";
 import { clamp01 } from "../engine/math.js";
@@ -201,17 +201,6 @@ async function buildWorkPayload(item, state) {
                 output_format: "Return ONLY valid JSON matching the schema in the instructions. All fields are arrays — use [] if empty. handoff_note, reflection are strings. rules_compliance is a number 0.0-1.0.",
             };
         }
-        case "skill_extract": {
-            const turns = await store.getSessionTurns(item.session_id, 30);
-            const transcript = turns.map(t => `[${t.role}] ${stripStructuralTags((t.text ?? "").slice(0, 300))}`).join("\n");
-            return {
-                work_id: item.id,
-                work_type: "skill_extract",
-                instructions: `Extract a reusable skill procedure from this session. Generic patterns only (no specific file paths or variable names). Return null if no clear multi-step workflow.`,
-                data: { transcript: transcript.slice(0, 20000), turn_count: turns.length },
-                output_format: "Return JSON: " + JSON.stringify(skillSchema) + " or the word 'null' if no skill found.",
-            };
-        }
         case "causal_graduate": {
             const groups = await store.queryFirst(`SELECT chain_type, count() AS cnt, array::group(description) AS descriptions
          FROM causal_chain WHERE success = true AND confidence >= 0.7
@@ -289,20 +278,6 @@ async function buildWorkPayload(item, state) {
                     new_monologues: monologues.map(m => m.content),
                 },
                 output_format: "Return JSON with ONLY changed fields from the soul schema. Return {} if nothing changed.",
-            };
-        }
-        case "deferred_cleanup": {
-            // Same as extraction but for orphaned sessions
-            const turns = await store.getSessionTurnsRich(item.session_id, 50);
-            const transcript = buildTranscript(turns);
-            const prior = { conceptNames: [], artifactPaths: [], skillNames: [] };
-            const instructions = buildSystemPrompt(false, false, prior);
-            return {
-                work_id: item.id,
-                work_type: "deferred_cleanup",
-                instructions,
-                data: { transcript: transcript.slice(0, 30000), turn_count: turns.length },
-                output_format: "Return ONLY valid JSON matching the schema in the instructions. All fields are arrays — use [] if empty.",
             };
         }
         default: {
@@ -454,7 +429,6 @@ async function commitReflection(reflText, item, state) {
 async function commitResults(item, results, state) {
     const { store, embeddings } = state;
     switch (item.work_type) {
-        case "deferred_cleanup":
         case "coalesced_extraction": {
             if (typeof results === "string") {
                 try {
@@ -509,12 +483,6 @@ async function commitResults(item, results, state) {
                 }
             }
             return { counts };
-        }
-        case "skill_extract": {
-            const parsed = parseSkillResult(results);
-            if (!parsed)
-                return { skipped: true, reason: "no valid skill found" };
-            return await createSkillRecord(parsed, item, state);
         }
         case "causal_graduate": {
             const skills = parseCausalGraduationResult(results);

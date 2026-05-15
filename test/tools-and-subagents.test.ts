@@ -1,13 +1,17 @@
 /**
- * Tests for the 3 LLM-accessible tools (recall, core-memory, introspect)
- * and the subagent lifecycle hooks (spawned, ended).
+ * Tests for the 3 LLM-accessible tools (recall, core-memory, introspect).
+ *
+ * The subagent-lifecycle (OpenClaw gateway) describe blocks were removed in
+ * v0.7.74 along with src/engine/hooks/subagent-lifecycle.ts; that file was
+ * test-only and targeted a transport (OpenClaw gateway) not shipped from
+ * this plugin. Production subagent spawn/stop is handled by
+ * src/hook-handlers/pre-tool-use.ts and src/hook-handlers/subagent.ts.
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { SessionState } from "../src/engine/state.js";
 import { createRecallToolDef } from "../src/engine/tools/recall.js";
 import { createCoreMemoryToolDef } from "../src/engine/tools/core-memory.js";
-import { createSubagentSpawnedHandler, createSubagentEndedHandler } from "../src/engine/hooks/subagent-lifecycle.js";
 
 // ── Mock helpers ──
 
@@ -226,108 +230,5 @@ describe("core_memory tool", () => {
 
     const result = await tool.execute("call1", { action: "list" });
     expect(result.content[0].text).toContain("unavailable");
-  });
-});
-
-// ── subagent lifecycle hooks ──
-
-describe("subagent spawned handler", () => {
-  let session: SessionState;
-
-  beforeEach(() => {
-    session = new SessionState("test-session", "test-key");
-    session.surrealSessionId = "session:parent1";
-  });
-
-  it("creates subagent record and spawned edge", async () => {
-    const store = mockStore();
-    // Spawned handler now does a SELECT-then-CREATE dedup. First call returns
-    // empty (no existing row for this run_id), second call is the CREATE that
-    // returns the new row id.
-    store.queryFirst
-      .mockResolvedValueOnce([])
-      .mockResolvedValueOnce([{ id: "subagent:sa1" }]);
-    const state = mockState(session, store);
-
-    const handler = createSubagentSpawnedHandler(state);
-    await handler(
-      { runId: "run1", childSessionKey: "child-1", label: "research", mode: "run" },
-      { runId: "run1", childSessionKey: "child-1", requesterSessionKey: "test-key" },
-    );
-
-    // Existence-check SELECT fired first.
-    expect(store.queryFirst).toHaveBeenNthCalledWith(
-      1,
-      expect.stringContaining("SELECT id FROM subagent"),
-      expect.objectContaining({ rid: "run1" }),
-    );
-    // Then the CREATE.
-    expect(store.queryFirst).toHaveBeenNthCalledWith(
-      2,
-      expect.stringContaining("CREATE subagent"),
-      expect.objectContaining({ run_id: "run1", child_key: "child-1", label: "research" }),
-    );
-    expect(store.relate).toHaveBeenCalledWith("session:parent1", "spawned", "subagent:sa1");
-  });
-
-  it("handles missing parent session gracefully", async () => {
-    const store = mockStore();
-    // SELECT existence check returns empty (no prior row), CREATE returns the
-    // new row id, parent-session fallback SELECT returns empty (no active
-    // session record found).
-    store.queryFirst
-      .mockResolvedValueOnce([])
-      .mockResolvedValueOnce([{ id: "subagent:sa1" }])
-      .mockResolvedValueOnce([]);
-    const state = mockState(session, store);
-
-    const handler = createSubagentSpawnedHandler(state);
-    // Use wrong requester key so session lookup fails
-    await handler(
-      { runId: "run1", childSessionKey: "child-1" },
-      { runId: "run1", childSessionKey: "child-1", requesterSessionKey: "nonexistent" },
-    );
-
-    // Should not crash, relate called with fallback
-  });
-});
-
-describe("subagent ended handler", () => {
-  let session: SessionState;
-
-  beforeEach(() => {
-    session = new SessionState("test-session", "test-key");
-  });
-
-  it("updates subagent record with outcome", async () => {
-    const store = mockStore();
-    const state = mockState(session, store);
-
-    const handler = createSubagentEndedHandler(state);
-    await handler(
-      { runId: "run1", targetSessionKey: "child-1", outcome: "success", endedAt: "2026-04-03T12:00:00Z" },
-      { runId: "run1", childSessionKey: "child-1" },
-    );
-
-    expect(store.queryExec).toHaveBeenCalledWith(
-      expect.stringContaining("UPDATE subagent"),
-      expect.objectContaining({ run_id: "run1", status: "completed", outcome: "success" }),
-    );
-  });
-
-  it("marks spawn failures as error status", async () => {
-    const store = mockStore();
-    const state = mockState(session, store);
-
-    const handler = createSubagentEndedHandler(state);
-    await handler(
-      { runId: "run1", targetSessionKey: "child-1", reason: "spawn-failed", error: "timeout" },
-      { runId: "run1", childSessionKey: "child-1" },
-    );
-
-    expect(store.queryExec).toHaveBeenCalledWith(
-      expect.stringContaining("UPDATE subagent"),
-      expect.objectContaining({ status: "error", error: "timeout" }),
-    );
   });
 });

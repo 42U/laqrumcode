@@ -207,10 +207,19 @@ export async function handlePreToolUse(
               await state.store.relate(session.surrealSessionId, "spawned", subagentId)
                 .catch(e => swallow("preToolUse:subagent:spawned", e));
             }
-            // derived_from: subagent → task
+            // derived_from: subagent → task. When the task hasn't been
+            // resolved yet (background daemon spawns, gateway-spawned
+            // subagents that pre-date session.taskId being set), fall back
+            // to the surreal session id. The 0.7.70 schema widened
+            // `derived_from` OUT to allow `session` for exactly this case;
+            // without the fallback the subagent row gets no derived_from
+            // edge at all and provenance is lost.
             if (session.taskId) {
               await state.store.relate(subagentId, "derived_from", session.taskId)
                 .catch(e => swallow("preToolUse:subagent:derived_from", e));
+            } else if (session.surrealSessionId) {
+              await state.store.relate(subagentId, "derived_from", session.surrealSessionId)
+                .catch(e => swallow.warn("preToolUse:subagent:derived_from_session_fallback", e));
             }
             log.info(`[subagent] spawned: type=${subagentType} corr=${toolUseId.slice(0, 8)}`);
           }

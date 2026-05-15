@@ -29,7 +29,6 @@ import { join, resolve, dirname } from "node:path";
 import { homedir, platform } from "node:os";
 import { log } from "../engine/log.js";
 import { swallow } from "../engine/errors.js";
-import { drainHeuristic } from "./heuristic-drain.js";
 let schedulerStarted = false;
 let schedulerTimer = null;
 let claudeBinPath = null;
@@ -512,20 +511,11 @@ async function spawnHeadlessDrainer(state, opts, reason) {
         return { spawned: false, reason: "claude binary not found (set KONGCODE_CLAUDE_BIN)" };
     }
     const rawCount = await getPendingCount(state);
-    if (rawCount >= 1) {
-        const heuristicProcessed = await drainHeuristic(state);
-        if (heuristicProcessed > 0) {
-            const remaining = await getPendingCount(state);
-            if (remaining < opts.threshold) {
-                return { spawned: false, reason: `heuristic drained ${heuristicProcessed}, remaining=${remaining} < threshold=${opts.threshold}` };
-            }
-        }
-        else if (rawCount < opts.threshold) {
-            return { spawned: false, reason: `queue=${rawCount} < threshold=${opts.threshold}` };
-        }
-    }
-    else {
+    if (rawCount < 1) {
         return { spawned: false, reason: `queue=0 < threshold=${opts.threshold}` };
+    }
+    if (rawCount < opts.threshold) {
+        return { spawned: false, reason: `queue=${rawCount} < threshold=${opts.threshold}` };
     }
     // Daily-spend cap: refuse to spawn if today's count would exceed maxDaily.
     // 0 means unlimited (cap disabled). Resets at UTC midnight. Cheap insurance

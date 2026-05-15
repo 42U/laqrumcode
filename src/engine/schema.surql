@@ -57,6 +57,10 @@ DEFINE TABLE IF NOT EXISTS concept SCHEMALESS;
 -- only fires when legacy rows actually exist. On clean installs the inner
 -- count returns 0 and the IF block is skipped entirely; on a legacy install
 -- the one-time migration runs once, then no-ops on every subsequent connect.
+-- CLOSURE: this LET+IF gate becomes a permanent zero-cost no-op once
+-- `SELECT count() FROM concept WHERE name != NONE` returns 0 across production
+-- installs for two release cycles; at that point delete the LET+IF and keep
+-- only the DEFINE FIELD statements below.
 LET $legacy_concept_count = (SELECT count() FROM concept WHERE name != NONE GROUP ALL)[0].count ?? 0;
 IF $legacy_concept_count > 0 THEN
   UPDATE concept SET content = name WHERE content = NONE AND name != NONE;
@@ -76,6 +80,12 @@ DEFINE INDEX IF NOT EXISTS concept_vec_idx ON concept FIELDS embedding HNSW DIME
 -- Conversation turns (the workhorse table)
 -- ============================================================
 DEFINE TABLE IF NOT EXISTS turn SCHEMALESS;
+-- IMPORTANT: turn.session_id is the kc_session_id UUID string, NOT the
+-- SurrealDB Thing record id of the `session` row. To join `turn` to its
+-- parent `session`, look up via the kc_session_id bridge field:
+--   SELECT id FROM session WHERE kc_session_id = $turn.session_id
+-- Same convention applies to subagent.parent_session_id,
+-- reflection.session_id, and retrieval_outcome.session_id below.
 DEFINE FIELD IF NOT EXISTS session_id ON turn TYPE string;
 DEFINE FIELD IF NOT EXISTS role ON turn TYPE string;
 DEFINE FIELD IF NOT EXISTS text ON turn TYPE string;
@@ -90,7 +100,12 @@ DEFINE FIELD IF NOT EXISTS model ON turn TYPE option<string>;
 DEFINE FIELD IF NOT EXISTS usage ON turn TYPE option<object>;
 DEFINE INDEX IF NOT EXISTS turn_vec_idx ON turn FIELDS embedding HNSW DIMENSION 1024 DIST COSINE;
 DEFINE INDEX IF NOT EXISTS turn_session_idx ON turn FIELDS session_id;
-DEFINE INDEX IF NOT EXISTS turn_tool_name_idx ON turn FIELDS tool_name;
+-- turn.timestamp is filtered by archiveOldTurns at src/engine/surreal.ts:~1774
+-- (`SELECT id FROM turn WHERE timestamp < time::now() - 7d AND id NOT IN ...`).
+-- Without this index the archive scan does a full turn table scan each pass;
+-- with `turn` already at thousands of rows and growing this is the only
+-- on-write path that justifies an index here.
+DEFINE INDEX IF NOT EXISTS turn_timestamp_idx ON turn FIELDS timestamp;
 
 -- Identity chunks (agent persona / identity)
 DEFINE TABLE IF NOT EXISTS identity_chunk SCHEMALESS;
@@ -100,6 +115,12 @@ DEFINE FIELD IF NOT EXISTS chunk_index ON identity_chunk TYPE int;
 DEFINE FIELD IF NOT EXISTS text ON identity_chunk TYPE string;
 DEFINE FIELD IF NOT EXISTS embedding ON identity_chunk TYPE option<array<float>>;
 DEFINE FIELD IF NOT EXISTS importance ON identity_chunk TYPE float DEFAULT 0.5;
+-- identity_version is written by src/engine/identity.ts and named as a key
+-- column in the UNIQUE compound (source, identity_version, chunk_index) at
+-- schema.surql:identity_chunk_unique. Declared explicitly so INFO FOR TABLE
+-- shows it and the UNIQUE index sees a typed column rather than inferring
+-- per-row from SCHEMALESS writes.
+DEFINE FIELD IF NOT EXISTS identity_version ON identity_chunk TYPE option<string>;
 DEFINE INDEX IF NOT EXISTS identity_vec_idx ON identity_chunk FIELDS embedding HNSW DIMENSION 1024 DIST COSINE;
 
 -- Sessions (lightweight, links to task for 5-pillar integration)
@@ -161,7 +182,6 @@ DEFINE INDEX IF NOT EXISTS maintenance_runs_job_idx ON maintenance_runs FIELDS j
 -- GRAPH EDGES: Turn-level
 -- ============================================================
 DEFINE TABLE IF NOT EXISTS responds_to TYPE RELATION IN turn OUT turn;
-DEFINE TABLE IF NOT EXISTS tool_result_of TYPE RELATION IN turn OUT turn;
 DEFINE TABLE IF NOT EXISTS part_of TYPE RELATION IN turn OUT session;
 DEFINE TABLE IF NOT EXISTS mentions TYPE RELATION IN turn OUT concept;
 
@@ -182,6 +202,10 @@ DEFINE TABLE IF NOT EXISTS produced TYPE RELATION IN task OUT artifact;
 -- without an attached taskId can still anchor concept provenance to the
 -- session row instead of going un-traced. Pre-0.7.70 this fell through to
 -- a swallow.warn and left the concept derived_from-less.
+-- CLOSURE: safe to demote to IF NOT EXISTS once production installs report
+-- zero `derived_from` edges whose OUT row carries the concept-only narrow
+-- shape (i.e. no live writers depend on the widened IN/OUT after two
+-- consecutive release cycles).
 DEFINE TABLE OVERWRITE derived_from TYPE RELATION IN concept|subagent OUT task|artifact|session;
 DEFINE TABLE IF NOT EXISTS relevant_to TYPE RELATION IN concept OUT project;
 DEFINE TABLE IF NOT EXISTS used_in TYPE RELATION IN artifact OUT project;
@@ -210,6 +234,10 @@ DEFINE TABLE IF NOT EXISTS describes TYPE RELATION IN memory OUT memory;
 -- in the daemon log and silently dropping the edge. OVERWRITE so live DBs
 -- converge on next daemon start; IF NOT EXISTS would no-op against the
 -- already-narrow table.
+-- CLOSURE: safe to demote to IF NOT EXISTS once `supersedes WHERE
+-- typeof(out) = 'concept'` AND `WHERE typeof(out) = 'memory'` BOTH appear in
+-- production installs (proving the live schema reflects the widened shape
+-- everywhere it's deployed).
 DEFINE TABLE OVERWRITE supersedes TYPE RELATION IN memory OUT concept|memory;
 
 -- Cross-pillar links
@@ -221,6 +249,8 @@ DEFINE TABLE IF NOT EXISTS artifact_mentions TYPE RELATION IN artifact OUT conce
 -- ============================================================
 -- Each record captures one retrieval event and its outcome signals
 DEFINE TABLE IF NOT EXISTS retrieval_outcome SCHEMALESS;
+-- session_id carries the kc_session_id UUID string, NOT the SurrealDB Thing
+-- record id. Same convention as turn.session_id / subagent.parent_session_id.
 DEFINE FIELD IF NOT EXISTS session_id ON retrieval_outcome TYPE string;
 DEFINE FIELD IF NOT EXISTS turn_id ON retrieval_outcome TYPE string;
 DEFINE FIELD IF NOT EXISTS memory_id ON retrieval_outcome TYPE string;
@@ -335,9 +365,6 @@ DEFINE INDEX IF NOT EXISTS muc_mid_idx ON memory_utility_cache FIELDS memory_id 
 -- ============================================================
 DEFINE TABLE IF NOT EXISTS turn_archive SCHEMALESS;
 
--- Summarizes edge
-DEFINE TABLE IF NOT EXISTS summarizes TYPE RELATION;
-
 -- ============================================================
 -- COGNITIVE: Causal Chain Metadata
 -- ============================================================
@@ -380,6 +407,9 @@ DEFINE TABLE IF NOT EXISTS skill_uses_concept TYPE RELATION IN skill OUT concept
 -- COGNITIVE: Metacognitive Reflection
 -- ============================================================
 DEFINE TABLE IF NOT EXISTS reflection SCHEMALESS;
+-- session_id carries the kc_session_id UUID string, NOT the SurrealDB Thing
+-- record id. Join via `session WHERE kc_session_id = $reflection.session_id`.
+-- The `reflects_on` edge holds the typed link to the session record id.
 DEFINE FIELD IF NOT EXISTS session_id ON reflection TYPE string;
 DEFINE FIELD IF NOT EXISTS text ON reflection TYPE string;
 DEFINE FIELD IF NOT EXISTS embedding ON reflection TYPE option<array<float>>;
@@ -396,6 +426,10 @@ DEFINE TABLE IF NOT EXISTS reflects_on TYPE RELATION IN reflection OUT session;
 -- SUBAGENT: Tracking spawned subagents
 -- ============================================================
 DEFINE TABLE IF NOT EXISTS subagent SCHEMALESS;
+-- parent_session_id carries the kc_session_id UUID string of the spawning
+-- session, NOT the SurrealDB Thing record id of the `session` row. Join via
+-- `session WHERE kc_session_id = $subagent.parent_session_id`. Same UUID-
+-- vs-Thing convention as turn.session_id above.
 DEFINE FIELD IF NOT EXISTS parent_session_id ON subagent TYPE string;
 DEFINE FIELD IF NOT EXISTS child_session_id ON subagent TYPE option<string>;
 -- 0.7.23: relaxed from required string. Hook handlers (pre-tool-use, subagent-stop)
@@ -427,6 +461,18 @@ DEFINE FIELD IF NOT EXISTS correlation_key ON subagent TYPE option<string>;
 DEFINE FIELD IF NOT EXISTS run_id ON subagent TYPE option<string>
   ASSERT $value = NONE OR $value != "";
 DEFINE FIELD IF NOT EXISTS created_at ON subagent TYPE datetime DEFAULT time::now();
+-- Fields written by src/hook-handlers/pre-tool-use.ts (Q3, audit Bundle D-D2).
+-- The table is SCHEMALESS so SurrealDB accepts these writes without DEFINE FIELDs,
+-- but declaring them as option<*> normalizes storage type and lets INFO FOR TABLE
+-- document the real shape. result_summary and duration_ms are omitted because
+-- their only writer (src/engine/hooks/subagent-lifecycle.ts) was retired in v0.7.74.
+DEFINE FIELD IF NOT EXISTS agent_type ON subagent TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS prompt_preview ON subagent TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS parent_session_key ON subagent TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS child_session_key ON subagent TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS label ON subagent TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS prompt_length ON subagent TYPE option<int>;
+DEFINE FIELD IF NOT EXISTS tool_call_count ON subagent TYPE option<int>;
 DEFINE INDEX IF NOT EXISTS sub_parent_idx ON subagent FIELDS parent_session_id;
 
 DEFINE TABLE IF NOT EXISTS spawned TYPE RELATION IN session OUT subagent;
@@ -545,6 +591,9 @@ DEFINE FIELD IF NOT EXISTS payload ON pending_work TYPE option<object>;
 -- first; that script normalizes any out-of-enum status to 'failed' before
 -- this DEFINE FIELD touches the data. Clean installs have no rows so the
 -- ASSERT is a no-op.
+-- CLOSURE: safe to demote to IF NOT EXISTS once `predeploy-dedup.mjs --apply`
+-- has been run on every install for two consecutive release cycles, at which
+-- point the legacy status-normalize pass becomes redundant.
 DEFINE FIELD OVERWRITE status ON pending_work TYPE string
   ASSERT $value IN ['pending', 'processing', 'completed', 'failed']
   DEFAULT 'pending';

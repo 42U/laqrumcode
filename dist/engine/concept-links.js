@@ -35,6 +35,11 @@ export async function linkToRelevantConcepts(sourceId, edgeName, text, store, em
         for (const m of matches) {
             if (m.score < threshold)
                 break;
+            // edgeName here is a dynamic parameter (typically "mentions",
+            // "about_concept", "artifact_mentions", or "skill_uses_concept"). It's
+            // validated against the VALID_EDGES whitelist inside store.relate(), so
+            // a grep for these names against the source tree finds no literal hits
+            // here — the contract is via the caller's edgeName value.
             await store.relate(sourceId, edgeName, String(m.id))
                 .catch(e => swallow(`${logTag}:relate`, e));
         }

@@ -14,7 +14,7 @@
 import type { GlobalPluginState, SessionState } from "../engine/state.js";
 import type { PriorExtractions, TurnData } from "../engine/daemon-types.js";
 import { validateExtraction } from "../engine/daemon-types.js";
-import { buildSystemPrompt, buildCoalescedPrompt, buildTranscript, writeExtractionResults } from "../engine/memory-daemon.js";
+import { buildCoalescedPrompt, buildTranscript, writeExtractionResults } from "../engine/memory-daemon.js";
 import { createSoul, seedSoulAsCoreMemory, reviseSoul, getSoul, checkGraduation, getQualitySignals, recordGraduationEvent } from "../engine/soul.js";
 import { swallow } from "../engine/errors.js";
 import { clamp01 } from "../engine/math.js";
@@ -242,18 +242,6 @@ async function buildWorkPayload(
       };
     }
 
-    case "skill_extract": {
-      const turns = await store.getSessionTurns(item.session_id, 30);
-      const transcript = turns.map(t => `[${t.role}] ${stripStructuralTags((t.text ?? "").slice(0, 300))}`).join("\n");
-      return {
-        work_id: item.id,
-        work_type: "skill_extract",
-        instructions: `Extract a reusable skill procedure from this session. Generic patterns only (no specific file paths or variable names). Return null if no clear multi-step workflow.`,
-        data: { transcript: transcript.slice(0, 20000), turn_count: turns.length },
-        output_format: "Return JSON: " + JSON.stringify(skillSchema) + " or the word 'null' if no skill found.",
-      };
-    }
-
     case "causal_graduate": {
       const groups = await store.queryFirst<{ chain_type: string; cnt: number; descriptions: string[] }>(
         `SELECT chain_type, count() AS cnt, array::group(description) AS descriptions
@@ -331,21 +319,6 @@ async function buildWorkPayload(
           new_monologues: (monologues as any[]).map(m => m.content),
         },
         output_format: "Return JSON with ONLY changed fields from the soul schema. Return {} if nothing changed.",
-      };
-    }
-
-    case "deferred_cleanup": {
-      // Same as extraction but for orphaned sessions
-      const turns: TurnData[] = await store.getSessionTurnsRich(item.session_id, 50);
-      const transcript = buildTranscript(turns);
-      const prior: PriorExtractions = { conceptNames: [], artifactPaths: [], skillNames: [] };
-      const instructions = buildSystemPrompt(false, false, prior);
-      return {
-        work_id: item.id,
-        work_type: "deferred_cleanup",
-        instructions,
-        data: { transcript: transcript.slice(0, 30000), turn_count: turns.length },
-        output_format: "Return ONLY valid JSON matching the schema in the instructions. All fields are arrays — use [] if empty.",
       };
     }
 
@@ -517,7 +490,6 @@ async function commitResults(
   const { store, embeddings } = state;
 
   switch (item.work_type) {
-    case "deferred_cleanup":
     case "coalesced_extraction": {
       if (typeof results === "string") {
         try { results = JSON.parse(results); } catch {
@@ -582,12 +554,6 @@ async function commitResults(
         }
       }
       return { counts };
-    }
-
-    case "skill_extract": {
-      const parsed = parseSkillResult(results);
-      if (!parsed) return { skipped: true, reason: "no valid skill found" };
-      return await createSkillRecord(parsed, item, state);
     }
 
     case "causal_graduate": {

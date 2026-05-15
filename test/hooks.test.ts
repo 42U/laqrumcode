@@ -1,15 +1,15 @@
 /**
- * Tests for hook handlers: llm-output and after-tool-call.
+ * Tests for hook handlers: llm-output.
  *
- * These run on every LLM response and every tool call, respectively.
- * They track tokens, accumulate text, parse classifications, capture
- * thinking blocks, store tool results, and track file artifacts.
+ * Runs on every LLM response — tracks tokens, accumulates text, parses
+ * classifications, captures thinking blocks. (after-tool-call coverage was
+ * dropped in v0.7.74 along with its source file; the handler was never
+ * registered against the production hook bus.)
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { SessionState } from "../src/engine/state.js";
 import { createLlmOutputHandler } from "../src/engine/hooks/llm-output.js";
-import { createAfterToolCallHandler } from "../src/engine/hooks/after-tool-call.js";
 
 // ── Mock helpers ──
 
@@ -254,161 +254,5 @@ describe("createLlmOutputHandler", () => {
       runId: "r1", sessionId: "s1", provider: "anthropic", model: "claude",
       assistantTexts: ["hello"],
     }, { sessionKey: "wrong-key" });
-  });
-});
-
-// ── after-tool-call handler ──
-
-describe("createAfterToolCallHandler", () => {
-  let session: SessionState;
-
-  beforeEach(() => {
-    session = new SessionState("test-session", "test-key");
-    session.taskId = "task:t1";
-    session.projectId = "project:p1";
-  });
-
-  it("stores tool result as a turn", async () => {
-    const store = mockStore();
-    const handler = createAfterToolCallHandler(mockState(session, store));
-
-    await handler({
-      toolName: "grep",
-      params: { pattern: "foo" },
-      result: "match found at line 42",
-    }, makeCtx(session));
-
-    expect(store.upsertTurn).toHaveBeenCalledWith(
-      expect.objectContaining({
-        role: "tool",
-        text: expect.stringContaining("[grep]"),
-      }),
-    );
-  });
-
-  it("links tool result to assistant turn via tool_result_of edge", async () => {
-    const store = mockStore();
-    session.lastAssistantTurnId = "turn:assist1";
-    const handler = createAfterToolCallHandler(mockState(session, store));
-
-    await handler({
-      toolName: "read",
-      params: { path: "/foo" },
-      result: "file contents",
-    }, makeCtx(session));
-
-    expect(store.relate).toHaveBeenCalledWith(
-      "turn:abc123", "tool_result_of", "turn:assist1",
-    );
-  });
-
-  it("creates artifact for write tool", async () => {
-    const store = mockStore();
-    const state = mockState(session, store);
-    const handler = createAfterToolCallHandler(state);
-
-    await handler({
-      toolName: "write",
-      params: { path: "/src/foo.ts" },
-      result: "ok",
-    }, makeCtx(session));
-
-    // Wait for fire-and-forget artifact tracking
-    await new Promise(r => setTimeout(r, 50));
-
-    expect(store.createArtifact).toHaveBeenCalledWith(
-      "/src/foo.ts", "ts",
-      expect.stringContaining("File created"),
-      expect.any(Array),
-      undefined,
-    );
-  });
-
-  it("creates artifact for edit tool", async () => {
-    const store = mockStore();
-    const state = mockState(session, store);
-    const handler = createAfterToolCallHandler(state);
-
-    await handler({
-      toolName: "edit",
-      params: { path: "/src/bar.py" },
-      result: "ok",
-    }, makeCtx(session));
-
-    await new Promise(r => setTimeout(r, 50));
-
-    expect(store.createArtifact).toHaveBeenCalledWith(
-      "/src/bar.py", "py",
-      expect.stringContaining("File edited"),
-      expect.any(Array),
-      undefined,
-    );
-  });
-
-  it("does NOT create artifact for read tool", async () => {
-    const store = mockStore();
-    const handler = createAfterToolCallHandler(mockState(session, store));
-
-    await handler({
-      toolName: "read",
-      params: { path: "/src/foo.ts" },
-      result: "contents",
-    }, makeCtx(session));
-
-    await new Promise(r => setTimeout(r, 50));
-
-    expect(store.createArtifact).not.toHaveBeenCalled();
-  });
-
-  it("does NOT create artifact on error", async () => {
-    const store = mockStore();
-    const handler = createAfterToolCallHandler(mockState(session, store));
-
-    await handler({
-      toolName: "write",
-      params: { path: "/src/foo.ts" },
-      error: "Permission denied",
-    }, makeCtx(session));
-
-    await new Promise(r => setTimeout(r, 50));
-
-    expect(store.createArtifact).not.toHaveBeenCalled();
-  });
-
-  it("cleans up pendingToolArgs", async () => {
-    session.pendingToolArgs.set("call-1", { command: "ls" });
-    const handler = createAfterToolCallHandler(mockState(session));
-
-    await handler({
-      toolName: "bash",
-      params: { command: "ls" },
-      toolCallId: "call-1",
-      result: "files",
-    }, makeCtx(session));
-
-    expect(session.pendingToolArgs.has("call-1")).toBe(false);
-  });
-
-  it("handles missing session gracefully", async () => {
-    const handler = createAfterToolCallHandler(mockState(session));
-    await handler({
-      toolName: "read",
-      params: {},
-    }, { sessionKey: "nonexistent" });
-    // Should not throw
-  });
-
-  it("truncates long tool results to 500 chars", async () => {
-    const store = mockStore();
-    const handler = createAfterToolCallHandler(mockState(session, store));
-
-    await handler({
-      toolName: "bash",
-      params: { command: "cat bigfile" },
-      result: "x".repeat(1000),
-    }, makeCtx(session));
-
-    const turnArg = store.upsertTurn.mock.calls[0][0];
-    expect(turnArg.text.length).toBeLessThanOrEqual(510); // "[bash] " + 500
   });
 });
