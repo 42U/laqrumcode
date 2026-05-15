@@ -4,6 +4,13 @@ All notable changes to KongCode are documented here. The 0.7.x series introduced
 
 ## [Unreleased]
 
+## [0.7.82] — 2026-05-15
+
+### Fixed
+- **Cross-platform: lint guard `test/lint-auto-seal-invariant.test.ts` now normalizes Windows backslashes to forward slashes** before comparing against `APPROVED_RELATE_CALLERS`. v0.7.81 CI failed on `Build kongcode-win32-x64` because the Set contained forward-slash paths (`src/engine/concept-links.ts`) while `relative()` on Windows returned backslash paths (`src\engine\concept-links.ts`). Every approved file then flagged as a violation. Same cross-platform-path bug class as v0.7.70/v0.7.71's CRLF regex fixes; same one-line shape: `relative(REPO_ROOT, file).replace(/\\\\/g, "/")`. POSIX runners unaffected.
+
+This release re-confirms the auto-sealing campaign's CI-enforced contract — v0.7.81's lint guard logic was correct, just non-portable to Windows.
+
 ## [0.7.81] — 2026-05-15
 
 **Iteration 6 of 6 — campaign close.** The auto-sealing contract is now CI-enforced: every graph edge write in `src/` goes through `commitKnowledge` (or one of 6 explicitly-whitelisted helper / analytical / migration modules), and `test/lint-auto-seal-invariant.test.ts` will fail the build on any new `store.relate(...)` outside the whitelist.
