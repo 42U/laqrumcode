@@ -16,7 +16,7 @@
  * migrated off their bespoke paths.
  */
 import { linkToRelevantConcepts, linkConceptHierarchy, } from "./concept-links.js";
-import { swallow } from "./errors.js";
+import { swallow, isUniqueViolation } from "./errors.js";
 import { log } from "./log.js";
 import { classifyReflection } from "./reflection-filter.js";
 // ── Entry point ───────────────────────────────────────────────────────────
@@ -30,6 +30,8 @@ export async function commitKnowledge(deps, data) {
             return commitArtifact(deps, data);
         case "reflection":
             return commitReflection(deps, data);
+        case "subagent":
+            return commitSubagent(deps, data);
         default: {
             // Exhaustiveness check — new kinds must add a case here.
             const _exhaustive = data;
@@ -240,4 +242,118 @@ async function commitReflection(deps, data) {
     // 6. Invalidate the reflection cache used by retrieval injection.
     store.clearReflectionCache();
     return { id: reflectionId, edges };
+}
+async function commitSubagent(deps, data) {
+    const { store } = deps;
+    const logTag = `commit:subagent:${data.agent_type ?? "default"}`;
+    // 0. Validate required fields. The architectural anchor that makes
+    //    orphan subagent rows + missing provenance impossible at the API
+    //    boundary. Without surrealSessionId none of the three edges can be
+    //    sealed; without correlation_key / run_id the UNIQUE indexes
+    //    collapse multiple NONE values into one bucket and a second CREATE
+    //    collides.
+    if (!data.parent_session_id)
+        throw new Error("commitSubagent: parent_session_id is required");
+    if (!data.surrealSessionId)
+        throw new Error("commitSubagent: surrealSessionId is required");
+    if (!data.correlation_key)
+        throw new Error("commitSubagent: correlation_key is required (schema UNIQUE-on-NONE)");
+    if (!data.run_id)
+        throw new Error("commitSubagent: run_id is required (schema UNIQUE-on-NONE)");
+    // 1. Build CONTENT object, omitting undefined keys so SurrealDB
+    //    schema-default and OVERWRITE-relaxed fields aren't shadowed.
+    const record = {
+        parent_session_id: data.parent_session_id,
+        correlation_key: data.correlation_key,
+        run_id: data.run_id,
+    };
+    if (data.child_session_id !== undefined)
+        record.child_session_id = data.child_session_id;
+    if (data.mode !== undefined)
+        record.mode = data.mode;
+    if (data.task !== undefined)
+        record.task = data.task;
+    if (data.status !== undefined)
+        record.status = data.status;
+    if (data.description !== undefined)
+        record.description = data.description;
+    if (data.incognito_id !== undefined)
+        record.incognito_id = data.incognito_id;
+    if (data.summary !== undefined)
+        record.summary = data.summary;
+    if (data.outcome !== undefined)
+        record.outcome = data.outcome;
+    if (data.agent_type !== undefined)
+        record.agent_type = data.agent_type;
+    if (data.prompt_preview !== undefined)
+        record.prompt_preview = data.prompt_preview;
+    if (data.parent_session_key !== undefined)
+        record.parent_session_key = data.parent_session_key;
+    if (data.child_session_key !== undefined)
+        record.child_session_key = data.child_session_key;
+    if (data.label !== undefined)
+        record.label = data.label;
+    if (data.prompt_length !== undefined)
+        record.prompt_length = data.prompt_length;
+    if (data.tool_call_count !== undefined)
+        record.tool_call_count = data.tool_call_count;
+    // 2. CREATE the subagent row. UNIQUE-violation on correlation_key or
+    //    run_id is recoverable: a sibling already exists for this spawn,
+    //    return its id with edges=0 (idempotent dedup).
+    let subagentId = "";
+    try {
+        const rows = await store.queryFirst(`CREATE subagent CONTENT $record RETURN id`, { record });
+        subagentId = String(rows[0]?.id ?? "");
+    }
+    catch (createErr) {
+        if (isUniqueViolation(createErr)) {
+            const existing = await store.queryFirst(`SELECT id FROM subagent WHERE correlation_key = $cid OR run_id = $rid LIMIT 1`, { cid: data.correlation_key, rid: data.run_id });
+            const existingId = String(existing[0]?.id ?? "");
+            if (existingId)
+                return { id: existingId, edges: 0 };
+        }
+        throw createErr;
+    }
+    if (!subagentId) {
+        swallow.warn(`${logTag}:create`, new Error("CREATE subagent returned no id"));
+        return { id: "", edges: 0 };
+    }
+    // 3. Auto-seal edges sequentially. Non-transactional matches existing
+    //    pre-tool-use.ts behavior (asymmetric writes are tolerated under
+    //    transient DB blips). Each edge has its own swallow tag for
+    //    observability.
+    let edges = 0;
+    if (data.linkSpawned !== false) {
+        try {
+            await store.relate(data.surrealSessionId, "spawned", subagentId);
+            edges++;
+        }
+        catch (e) {
+            swallow.warn(`${logTag}:spawned`, e);
+        }
+    }
+    if (data.linkSpawnedFrom !== false) {
+        try {
+            await store.relate(subagentId, "spawned_from", data.surrealSessionId);
+            edges++;
+        }
+        catch (e) {
+            swallow.warn(`${logTag}:spawned_from`, e);
+        }
+    }
+    if (data.linkDerivedFrom !== false) {
+        const target = data.taskId ?? data.surrealSessionId;
+        // The v0.7.74 fallback: when taskId is unset we anchor derived_from
+        // to the session row, using a distinct swallow tag so production log
+        // alerts keying on 'derived_from_session_fallback' still fire.
+        const tag = data.taskId ? `${logTag}:derived_from` : `${logTag}:derived_from_session_fallback`;
+        try {
+            await store.relate(subagentId, "derived_from", target);
+            edges++;
+        }
+        catch (e) {
+            swallow.warn(tag, e);
+        }
+    }
+    return { id: subagentId, edges };
 }

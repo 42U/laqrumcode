@@ -103,40 +103,18 @@ async function flushMicrotasks(): Promise<void> {
 // 1. SUBAGENT CREATE DEDUP — three call sites
 // ────────────────────────────────────────────────────────────────────────────
 
-describe("subagent CREATE dedup — pre-tool-use.ts PreToolUse(Agent|Task)", () => {
-  it("SKIPS the CREATE when SELECT finds a row for the same correlation_key", async () => {
-    const session = mockSession();
-    const { state, store, queryFirst } = mockStateForHooks(session);
-    // First (and only) queryFirst call is the SELECT — return a hit.
-    queryFirst.mockResolvedValueOnce([{ id: "subagent:existing-1" }]);
-
-    await handlePreToolUse(state, {
-      session_id: session.sessionId,
-      tool_name: "Task",
-      tool_use_id: "tool-use-dupe",
-      tool_input: { subagent_type: "general-purpose", prompt: "do a thing" },
-    });
-    await flushMicrotasks();
-
-    // SELECT ran first with the correlation key.
-    expect(queryFirst).toHaveBeenCalledWith(
-      expect.stringContaining("SELECT id FROM subagent"),
-      expect.objectContaining({ cid: "tool-use-dupe" }),
-    );
-    // CREATE was skipped — no second queryFirst call (which is the CREATE
-    // RETURN id), no queryExec write.
-    expect(queryFirst).toHaveBeenCalledTimes(1);
-    expect(store.queryExec).not.toHaveBeenCalled();
-    // Existing row id stashed for SubagentStop correlation.
-    expect(session._activeSubagents.get("tool-use-dupe")).toBe("subagent:existing-1");
-  });
-
-  it("PROCEEDS with the CREATE when SELECT finds nothing", async () => {
+describe("subagent CREATE dedup — pre-tool-use.ts PreToolUse(Agent|Task) [v0.7.77 migration]", () => {
+  // v0.7.77 moved subagent CREATE+edges into commitKnowledge({ kind: "subagent" }).
+  // The old SELECT-then-CREATE dedup pattern is gone — commitSubagent goes
+  // straight to CREATE and recovers from UNIQUE violations via post-error
+  // SELECT. Detailed unit coverage of that path lives in
+  // test/commit.test.ts (commitKnowledge — subagent kind). The 3 tests
+  // previously at this location asserted the SELECT-first ordering, which
+  // no longer holds; removed in v0.7.77.
+  it("happy path: CREATE goes through commitKnowledge and stashes the new id", async () => {
     const session = mockSession();
     const { state, queryFirst } = mockStateForHooks(session);
-    queryFirst
-      .mockResolvedValueOnce([])                              // SELECT → no existing
-      .mockResolvedValueOnce([{ id: "subagent:new-1" }]);     // CREATE returns new id
+    queryFirst.mockResolvedValueOnce([{ id: "subagent:new-1" }]);  // CREATE returns
 
     await handlePreToolUse(state, {
       session_id: session.sessionId,
@@ -146,32 +124,10 @@ describe("subagent CREATE dedup — pre-tool-use.ts PreToolUse(Agent|Task)", () 
     });
     await flushMicrotasks();
 
-    // Two queryFirst calls: SELECT then CREATE.
-    expect(queryFirst).toHaveBeenCalledTimes(2);
-    expect(queryFirst.mock.calls[0][0]).toContain("SELECT id FROM subagent");
-    expect(queryFirst.mock.calls[1][0]).toContain("CREATE subagent");
-    expect(session._activeSubagents.get("tool-use-fresh")).toBe("subagent:new-1");
-  });
-
-  it("SELECT runs FIRST, then CREATE — call order verified", async () => {
-    const session = mockSession();
-    const { state, queryFirst } = mockStateForHooks(session);
-    queryFirst
-      .mockResolvedValueOnce([])
-      .mockResolvedValueOnce([{ id: "subagent:order-1" }]);
-
-    await handlePreToolUse(state, {
-      session_id: session.sessionId,
-      tool_name: "Agent",
-      tool_use_id: "ord-1",
-      tool_input: { subagent_type: "x", prompt: "p" },
-    });
-    await flushMicrotasks();
-
+    // No pre-SELECT — commitSubagent goes straight to CREATE.
     const sqls = queryFirst.mock.calls.map(c => String(c[0]));
-    // Strict ordering: SELECT precedes CREATE.
-    expect(sqls[0]).toMatch(/SELECT/);
-    expect(sqls[1]).toMatch(/CREATE/);
+    expect(sqls.some(s => s.includes("CREATE subagent"))).toBe(true);
+    expect(session._activeSubagents.get("tool-use-fresh")).toBe("subagent:new-1");
   });
 });
 

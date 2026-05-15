@@ -209,3 +209,117 @@ describe("commitKnowledge — artifact kind", () => {
     expect(state.store.queryFirst).not.toHaveBeenCalled();
   });
 });
+
+describe("commitKnowledge — subagent kind", () => {
+  function mockSubagentState(opts: { createError?: unknown; siblingId?: string } = {}): GlobalPluginState {
+    const { createError, siblingId } = opts;
+    const store = {
+      isAvailable: () => true,
+      upsertConcept: vi.fn(async () => "concept:c1"),
+      createMemory: vi.fn(async () => "memory:m1"),
+      createArtifact: vi.fn(async () => "artifact:a1"),
+      relate: vi.fn(async () => {}),
+      queryFirst: vi.fn(async (sql: string) => {
+        if (sql.includes("CREATE subagent")) {
+          if (createError) throw createError;
+          return [{ id: "subagent:s1" }];
+        }
+        if (sql.includes("SELECT id FROM subagent")) {
+          return siblingId ? [{ id: siblingId }] : [];
+        }
+        return [];
+      }),
+    };
+    const embeddings = {
+      isAvailable: () => true,
+      embed: vi.fn(async () => new Array(1024).fill(0.1)),
+    };
+    return { store, embeddings } as unknown as GlobalPluginState;
+  }
+
+  const baseData = {
+    kind: "subagent" as const,
+    parent_session_id: "kc-uuid-1",
+    surrealSessionId: "session:abc",
+    correlation_key: "tool-use-1",
+    run_id: "tool-use-1",
+  };
+
+  it("happy path: CREATEs row and seals all three edges (spawned, spawned_from, derived_from)", async () => {
+    const state = mockSubagentState();
+    const result = await commitKnowledge(state, {
+      ...baseData,
+      taskId: "task:t1",
+      agent_type: "general-purpose",
+    });
+    expect(result.id).toBe("subagent:s1");
+    expect(result.edges).toBe(3);
+    const calls = (state.store as any).relate.mock.calls;
+    expect(calls).toContainEqual(["session:abc", "spawned", "subagent:s1"]);
+    expect(calls).toContainEqual(["subagent:s1", "spawned_from", "session:abc"]);
+    expect(calls).toContainEqual(["subagent:s1", "derived_from", "task:t1"]);
+  });
+
+  it("derived_from falls back to surrealSessionId when taskId is unset (v0.7.74 fallback)", async () => {
+    const state = mockSubagentState();
+    const result = await commitKnowledge(state, baseData);
+    expect(result.edges).toBe(3);
+    const calls = (state.store as any).relate.mock.calls;
+    expect(calls).toContainEqual(["subagent:s1", "derived_from", "session:abc"]);
+  });
+
+  it("recovers from UNIQUE collision by returning the sibling id with edges=0", async () => {
+    const uniqueErr = Object.assign(new Error("Database index `subagent_corr_unique` already contains 'tool-use-1'"), { name: "Error" });
+    const state = mockSubagentState({ createError: uniqueErr, siblingId: "subagent:existing-1" });
+    const result = await commitKnowledge(state, baseData);
+    expect(result.id).toBe("subagent:existing-1");
+    expect(result.edges).toBe(0);
+    expect((state.store as any).relate).not.toHaveBeenCalled();
+  });
+
+  it("rethrows non-UNIQUE errors from CREATE", async () => {
+    const otherErr = new Error("connection refused");
+    const state = mockSubagentState({ createError: otherErr });
+    await expect(commitKnowledge(state, baseData)).rejects.toThrow(/connection refused/);
+  });
+
+  it("throws when parent_session_id is missing", async () => {
+    const state = mockSubagentState();
+    await expect(
+      // @ts-expect-error testing runtime guard
+      commitKnowledge(state, { ...baseData, parent_session_id: "" }),
+    ).rejects.toThrow(/parent_session_id/);
+  });
+
+  it("throws when surrealSessionId is missing", async () => {
+    const state = mockSubagentState();
+    await expect(
+      // @ts-expect-error testing runtime guard
+      commitKnowledge(state, { ...baseData, surrealSessionId: "" }),
+    ).rejects.toThrow(/surrealSessionId/);
+  });
+
+  it("throws when correlation_key or run_id is missing (schema UNIQUE-on-NONE collision risk)", async () => {
+    const state = mockSubagentState();
+    await expect(
+      // @ts-expect-error testing runtime guard
+      commitKnowledge(state, { ...baseData, correlation_key: "" }),
+    ).rejects.toThrow(/correlation_key/);
+    await expect(
+      // @ts-expect-error testing runtime guard
+      commitKnowledge(state, { ...baseData, run_id: "" }),
+    ).rejects.toThrow(/run_id/);
+  });
+
+  it("link* opt-outs skip individual edges", async () => {
+    const state = mockSubagentState();
+    const result = await commitKnowledge(state, {
+      ...baseData,
+      linkSpawned: false,
+      linkSpawnedFrom: false,
+      linkDerivedFrom: false,
+    });
+    expect(result.edges).toBe(0);
+    expect((state.store as any).relate).not.toHaveBeenCalled();
+  });
+});

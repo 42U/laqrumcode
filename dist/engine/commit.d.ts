@@ -121,7 +121,64 @@ export interface CommitReflectionData {
      *  disable dedup entirely. */
     dedupCosineThreshold?: number | null;
 }
-export type CommitData = CommitConceptData | CommitMemoryData | CommitArtifactData | CommitReflectionData;
+export interface CommitSubagentData {
+    kind: "subagent";
+    /** kc_session_id UUID of the spawning session. Written to
+     *  subagent.parent_session_id. NOT the SurrealDB Thing record id —
+     *  that goes in surrealSessionId below. */
+    parent_session_id: string;
+    /** SurrealDB Thing record id (e.g. "session:abc123"). Used as IN for
+     *  `spawned`, OUT for `spawned_from`, and the fallback OUT for
+     *  `derived_from` when taskId is unset. REQUIRED: without it, none of
+     *  the three edges can be sealed and v0.7.74's provenance guarantee is
+     *  lost. */
+    surrealSessionId: string;
+    /** Natural key for upsert dedup. UNIQUE-indexed at schema.surql:668.
+     *  REQUIRED because the schema UNIQUE collapses NONE values into one
+     *  bucket — a second NONE-key CREATE collides. */
+    correlation_key: string;
+    /** Second UNIQUE-indexed natural key at schema.surql:669. ASSERT
+     *  non-empty when set. REQUIRED for the same reason as correlation_key.
+     *  Round-2 caller contract: PreToolUse sets run_id = correlation_key as
+     *  a placeholder when the real run_id isn't yet known; SubagentStop
+     *  overwrites it later via UPDATE. */
+    run_id: string;
+    child_session_id?: string;
+    /** "full" | "incognito" | "unset". Schema OVERWRITE relaxed to option
+     *  in v0.7.23 because PreToolUse creates rows before mode is known. */
+    mode?: string;
+    /** Free-text task description. Schema OVERWRITE relaxed in v0.7.33. */
+    task?: string;
+    /** "running" | "completed" | "error". Schema DEFAULT "running". */
+    status?: string;
+    description?: string;
+    incognito_id?: string;
+    summary?: string;
+    /** Subagent execution outcome at CREATE time (e.g. "in_progress"). The
+     *  same field is overwritten on SubagentStop; commitKnowledge only
+     *  handles the CREATE path. */
+    outcome?: string;
+    agent_type?: string;
+    prompt_preview?: string;
+    parent_session_key?: string;
+    child_session_key?: string;
+    label?: string;
+    prompt_length?: number;
+    tool_call_count?: number;
+    /** SurrealDB Thing record id of the parent task. When defined,
+     *  derived_from is sealed to taskId. When undefined, derived_from
+     *  falls back to surrealSessionId — the v0.7.74 fallback baked into
+     *  the type signature so future callers can't accidentally omit it. */
+    taskId?: string;
+    /** Auto-seal `spawned` edge (session → subagent). Default true. */
+    linkSpawned?: boolean;
+    /** Auto-seal `spawned_from` edge (subagent → session). Default true. */
+    linkSpawnedFrom?: boolean;
+    /** Auto-seal `derived_from` edge with task-or-session fallback.
+     *  Default true. */
+    linkDerivedFrom?: boolean;
+}
+export type CommitData = CommitConceptData | CommitMemoryData | CommitArtifactData | CommitReflectionData | CommitSubagentData;
 export interface CommitResult {
     /** The record ID written (e.g. "concept:abc123"). */
     id: string;
