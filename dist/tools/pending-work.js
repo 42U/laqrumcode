@@ -18,7 +18,6 @@ import { clamp01 } from "../engine/math.js";
 import { log } from "../engine/log.js";
 import { stripStructuralTags } from "../engine/sanitize.js";
 import { commitKnowledge } from "../engine/commit.js";
-import { supersedeOldSkills } from "../engine/skills.js";
 import { assertRecordId } from "../engine/surreal.js";
 // ── Helpers ──────────────────────────────────────────────────────────────────
 /**
@@ -859,39 +858,22 @@ function parseSoulResult(results) {
     return (results && typeof results === "object") ? results : null;
 }
 async function createSkillRecord(parsed, item, state) {
-    const { store, embeddings } = state;
-    let skillEmb = null;
-    if (embeddings.isAvailable()) {
-        try {
-            skillEmb = await embeddings.embed(`${parsed.name}: ${parsed.description}`);
-        }
-        catch { /* ok */ }
-    }
-    const record = {
+    // v0.7.79: migrated to commitKnowledge({ kind: "skill" }). Behavior change:
+    // commitSkill auto-seals skill_uses_concept via linkToRelevantConcepts
+    // similarity scan (no conceptIds passed). Pre-v0.7.79 this writer SKIPPED
+    // skill_uses_concept entirely — that was the load-bearing gap closed by
+    // this iteration.
+    const result = await commitKnowledge(state, {
+        kind: "skill",
         name: String(parsed.name).slice(0, 100),
         description: String(parsed.description).slice(0, 200),
         preconditions: parsed.preconditions ? String(parsed.preconditions).slice(0, 200) : undefined,
         steps: parsed.steps.slice(0, 8).map(s => ({ tool: String(s.tool ?? "unknown"), description: String(s.description ?? "").slice(0, 200) })),
         postconditions: parsed.postconditions ? String(parsed.postconditions).slice(0, 200) : undefined,
-        confidence: 1.0,
-        active: true,
-    };
-    if (skillEmb?.length)
-        record.embedding = skillEmb;
-    // 0.7.29: persist project_id on the row for fast project-scoped retrieval.
-    if (item.project_id)
-        record.project_id = item.project_id;
-    const rows = await store.queryFirst(`CREATE skill CONTENT $record RETURN id`, { record });
-    const skillId = String(rows[0]?.id ?? "");
-    if (skillId && item.task_id) {
-        await store.relate(skillId, "skill_from_task", item.task_id)
-            .catch(e => swallow.warn("pending-work:skill_from_task", e));
-    }
-    if (skillId && skillEmb?.length) {
-        await supersedeOldSkills(skillId, skillEmb, store)
-            .catch(e => swallow.warn("pending-work:supersedeSkills", e));
-    }
-    return { skill_id: skillId, name: parsed.name };
+        taskId: item.task_id,
+        projectId: item.project_id,
+    });
+    return { skill_id: result.id, name: parsed.name };
 }
 // 0.7.32: file-internal parser exposure for the test harness only. Do not
 // import from production code — the canonical entry points are

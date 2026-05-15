@@ -192,7 +192,48 @@ export interface CommitSubagentData {
      *  Default true. */
     linkDerivedFrom?: boolean;
 }
-export type CommitData = CommitConceptData | CommitMemoryData | CommitArtifactData | CommitReflectionData | CommitSubagentData;
+export interface CommitSkillData {
+    kind: "skill";
+    name: string;
+    description: string;
+    /** Step list. Permissive shape covers all three current writers:
+     *    - memory-daemon writes `string[]` from extraction.
+     *    - workspace-migrate writes `string[]` from markdown parsing.
+     *    - pending-work normalizes to `{tool, description}` shape via
+     *      `coerceSkill` before this layer ever sees it.
+     *  No normalization in commitSkill; downstream readers handle both. */
+    steps: (string | {
+        tool?: string;
+        description?: string;
+        argsPattern?: string;
+    })[];
+    preconditions?: string;
+    postconditions?: string;
+    /** Override the default `${name}: ${description}` embed target. Three
+     *  current writers use three different embed strings; preserved here via
+     *  this field rather than forced-unifying at the API boundary. */
+    embeddingText?: string;
+    precomputedVec?: number[] | null;
+    /** Task record id. When set, auto-seals `skill_from_task`. */
+    taskId?: string;
+    /** Pre-resolved concept ids to wire `skill_uses_concept` against. When
+     *  empty/absent, linkToRelevantConcepts runs a similarity scan against
+     *  the skill description (preserves memory-daemon's existing behavior). */
+    conceptIds?: string[];
+    linkFromTask?: boolean;
+    linkUsesConcepts?: boolean;
+    /** Call supersedeOldSkills(skillId, embedding) to mark prior similar
+     *  skills as superseded. Field-on-row, not edge. */
+    supersede?: boolean;
+    sessionId?: string;
+    projectId?: string;
+    /** SCHEMALESS fields written by individual callers (e.g. memory-daemon's
+     *  `content` / `trigger_context` / `tags` / `session_id`; pending-work's
+     *  `confidence`; workspace-migrate's `source` / `source_path`
+     *  / `full_content`). Merged into the CREATE record. */
+    extras?: Record<string, unknown>;
+}
+export type CommitData = CommitConceptData | CommitMemoryData | CommitArtifactData | CommitReflectionData | CommitSubagentData | CommitSkillData;
 export interface CommitResult {
     /** The record ID written (e.g. "concept:abc123"). */
     id: string;

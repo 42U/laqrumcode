@@ -438,6 +438,9 @@ async function ingestSkill(
   // Extract steps from markdown body
   const steps = extractSteps(body);
 
+  // Compute embedding once: shared between the skill row (via precomputedVec
+  // on commitKnowledge) and the artifact row CREATE below. Same text feeds
+  // both so retrieval surfaces them coherently.
   let embedding: number[] | null = null;
   if (embeddings.isAvailable()) {
     const textToEmbed = `${skillName}: ${description}\n${steps.join("\n")}`.slice(0, 6000);
@@ -453,26 +456,30 @@ async function ingestSkill(
   const os = fm?.metadata?.openclaw?.os;
   if (os?.length) preconditions.push(`Supported OS: ${os.join(", ")}`);
 
-  await store.queryExec(
-    `CREATE skill CONTENT $record`,
-    {
-      record: {
-        name: skillName,
-        description,
-        embedding,
-        preconditions: preconditions.length > 0 ? preconditions.join("; ") : null,
-        steps: steps.length > 0 ? steps : null,
-        postconditions: null,
-        success_count: 1,
-        failure_count: 0,
-        avg_duration_ms: 0,
-        last_used: null,
-        source: "workspace-migration",
-        source_path: file.relPath,
-        full_content: file.content,
-      },
+  // v0.7.79: migrated to commitKnowledge({ kind: "skill" }). Workspace
+  // migration has no task or session context, so the three link knobs are
+  // all disabled. supersede is disabled because workspace-migrate seeds
+  // history (its skills are meant to coexist with prior runs).
+  await commitKnowledge({ store, embeddings }, {
+    kind: "skill",
+    name: skillName,
+    description,
+    precomputedVec: embedding,
+    preconditions: preconditions.length > 0 ? preconditions.join("; ") : undefined,
+    steps,
+    linkFromTask: false,
+    linkUsesConcepts: false,
+    supersede: false,
+    extras: {
+      success_count: 1,
+      failure_count: 0,
+      avg_duration_ms: 0,
+      last_used: null,
+      source: "workspace-migration",
+      source_path: file.relPath,
+      full_content: file.content,
     },
-  );
+  });
 
   // Also create artifact record so it shows up in artifact search
   await store.queryExec(

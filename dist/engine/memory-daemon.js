@@ -1,7 +1,7 @@
 import { swallow } from "./errors.js";
 import { assertRecordId } from "./surreal.js";
 import { linkConceptHierarchy, linkToRelevantConcepts } from "./concept-links.js";
-import { supersedeOldSkills } from "./skills.js";
+import { commitKnowledge } from "./commit.js";
 import { stripStructuralTags } from "./sanitize.js";
 import { clamp01 } from "./math.js";
 /** Local-narrow record-id regex: only accept ids in the `memory:` table. */
@@ -369,43 +369,27 @@ export async function writeExtractionResults(result, sessionId, store, embedding
             priorState.skillNames.push(s.name);
             const content = `${s.name}\nTrigger: ${String(s.trigger_context ?? "").slice(0, 150)}\nSteps:\n${s.steps.map((st, i) => `${i + 1}. ${String(st).slice(0, 200)}`).join("\n")}`;
             writeOps.push((async () => {
-                let emb = null;
-                if (embeddings.isAvailable()) {
-                    try {
-                        emb = await embeddings.embed(content);
-                    }
-                    catch (e) {
-                        swallow("daemon:embedSkill", e);
-                    }
-                }
+                // v0.7.79: migrated to commitKnowledge({ kind: "skill" }). The
+                // helper handles embedding (with embeddingText override for the
+                // multi-line content blob), CREATE, skill_from_task auto-seal,
+                // skill_uses_concept via linkToRelevantConcepts (default behavior
+                // when conceptIds not provided), and supersedeOldSkills.
                 try {
-                    const rows = await store.queryFirst(`CREATE skill CONTENT $record RETURN id`, {
-                        record: {
-                            name: String(s.name).slice(0, 100),
-                            description: content,
+                    await commitKnowledge({ store, embeddings }, {
+                        kind: "skill",
+                        name: String(s.name).slice(0, 100),
+                        description: content,
+                        steps: s.steps.map((st) => String(st).slice(0, 200)),
+                        embeddingText: content,
+                        taskId: taskId,
+                        sessionId: sessionId,
+                        projectId: projectId,
+                        extras: {
                             content,
-                            steps: s.steps.map((st) => String(st).slice(0, 200)),
                             trigger_context: String(s.trigger_context ?? "").slice(0, 200),
                             tags: ["auto-extracted"],
-                            session_id: sessionId,
-                            ...(projectId ? { project_id: projectId } : {}),
-                            ...(emb ? { embedding: emb } : {}),
                         },
                     });
-                    const skillId = rows[0]?.id ? String(rows[0].id) : null;
-                    if (skillId) {
-                        // skill_from_task: skill → task
-                        if (taskId) {
-                            await store.relate(skillId, "skill_from_task", taskId)
-                                .catch(e => swallow.warn("daemon:skill:skill_from_task", e));
-                        }
-                        // skill_uses_concept: skill → concept
-                        await linkToRelevantConcepts(skillId, "skill_uses_concept", content, store, embeddings, "daemon:skill:concepts", 5, 0.65, emb);
-                        if (emb?.length) {
-                            await supersedeOldSkills(skillId, emb, store)
-                                .catch(e => swallow.warn("daemon:skill:supersede", e));
-                        }
-                    }
                 }
                 catch (e) {
                     swallow.warn("daemon:createSkill", e);

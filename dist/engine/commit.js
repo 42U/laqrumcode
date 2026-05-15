@@ -19,6 +19,7 @@ import { linkToRelevantConcepts, linkConceptHierarchy, } from "./concept-links.j
 import { swallow, isUniqueViolation } from "./errors.js";
 import { log } from "./log.js";
 import { classifyReflection } from "./reflection-filter.js";
+import { supersedeOldSkills } from "./skills.js";
 // ── Entry point ───────────────────────────────────────────────────────────
 export async function commitKnowledge(deps, data) {
     switch (data.kind) {
@@ -32,6 +33,8 @@ export async function commitKnowledge(deps, data) {
             return commitReflection(deps, data);
         case "subagent":
             return commitSubagent(deps, data);
+        case "skill":
+            return commitSkill(deps, data);
         default: {
             // Exhaustiveness check — new kinds must add a case here.
             const _exhaustive = data;
@@ -424,4 +427,112 @@ async function commitSubagent(deps, data) {
         }
     }
     return { id: subagentId, edges };
+}
+async function commitSkill(deps, data) {
+    const { store, embeddings } = deps;
+    const logTag = `commit:skill:${data.name.slice(0, 30)}`;
+    // 0. Validate required fields. `steps` must be an array (empty is allowed
+    //    because workspace-migrate produces skills from docs that occasionally
+    //    have no extractable step list — the row is still useful for retrieval).
+    if (!data.name)
+        throw new Error("commitSkill: name is required");
+    if (!data.description)
+        throw new Error("commitSkill: description is required");
+    if (!Array.isArray(data.steps))
+        throw new Error("commitSkill: steps must be an array (use [] for skills with no documented steps)");
+    // 1. Embed. Default target is `${name}: ${description}`; callers can
+    //    override via embeddingText (memory-daemon uses a multi-line content
+    //    blob; workspace-migrate uses a different format).
+    let embedding = data.precomputedVec ?? null;
+    if (!embedding && embeddings.isAvailable()) {
+        try {
+            embedding = await embeddings.embed(data.embeddingText ?? `${data.name}: ${data.description}`);
+        }
+        catch (e) {
+            swallow(`${logTag}:embed`, e);
+        }
+    }
+    // 2. Build CREATE record. Schema-default fields (confidence=1.0,
+    //    active=true) match what pending-work.ts:createSkillRecord wrote
+    //    today. Caller-supplied extras merge in for SCHEMALESS columns
+    //    without trampling declared fields.
+    const record = {
+        name: data.name,
+        description: data.description,
+        steps: data.steps,
+        confidence: 1.0,
+        active: true,
+    };
+    if (data.preconditions !== undefined)
+        record.preconditions = data.preconditions;
+    if (data.postconditions !== undefined)
+        record.postconditions = data.postconditions;
+    if (embedding?.length)
+        record.embedding = embedding;
+    if (data.projectId)
+        record.project_id = data.projectId;
+    if (data.extras) {
+        for (const [k, v] of Object.entries(data.extras)) {
+            if (record[k] === undefined)
+                record[k] = v;
+        }
+    }
+    // 3. CREATE skill.
+    const rows = await store.queryFirst(`CREATE skill CONTENT $record RETURN id`, { record });
+    const skillId = String(rows[0]?.id ?? "");
+    if (!skillId) {
+        swallow.warn(`${logTag}:create`, new Error("CREATE skill returned no id"));
+        return { id: "", edges: 0 };
+    }
+    let edges = 0;
+    // 4. Auto-seal `skill_from_task` when taskId provided.
+    if (data.taskId && data.linkFromTask !== false) {
+        try {
+            await store.relate(skillId, "skill_from_task", data.taskId);
+            edges++;
+        }
+        catch (e) {
+            swallow.warn(`${logTag}:skill_from_task`, e);
+        }
+    }
+    // 5. Auto-seal `skill_uses_concept`. Two paths:
+    //    (a) Caller supplies conceptIds — wire each explicitly.
+    //    (b) Caller doesn't — fall back to similarity scan via
+    //        linkToRelevantConcepts (matches memory-daemon's existing
+    //        behavior). pending-work.ts:createSkillRecord currently skips
+    //        this entirely; post-migration it starts writing these edges,
+    //        which is a deliberate behavior improvement.
+    if (data.linkUsesConcepts !== false) {
+        if (data.conceptIds?.length) {
+            for (const cid of data.conceptIds) {
+                try {
+                    await store.relate(skillId, "skill_uses_concept", cid);
+                    edges++;
+                }
+                catch (e) {
+                    swallow.warn(`${logTag}:skill_uses_concept`, e);
+                }
+            }
+        }
+        else if (embedding?.length) {
+            try {
+                await linkToRelevantConcepts(skillId, "skill_uses_concept", data.description, store, embeddings, logTag, 5, 0.65, embedding);
+                edges += 1;
+            }
+            catch (e) {
+                swallow.warn(`${logTag}:skill_uses_concept_dynamic`, e);
+            }
+        }
+    }
+    // 6. Supersede prior similar skills (field-on-row, not edge). Existing
+    //    supersedeOldSkills logic kept intact.
+    if (data.supersede !== false && embedding?.length) {
+        try {
+            await supersedeOldSkills(skillId, embedding, store);
+        }
+        catch (e) {
+            swallow.warn(`${logTag}:supersede`, e);
+        }
+    }
+    return { id: skillId, edges };
 }

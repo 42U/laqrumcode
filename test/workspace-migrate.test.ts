@@ -10,10 +10,17 @@ function mockStore(available = true) {
   const records: Record<string, unknown>[] = [];
   return {
     isAvailable: () => available,
-    queryFirst: async () => [] as unknown[],
+    queryFirst: async (_sql: string, params?: { record?: Record<string, unknown> }) => {
+      // v0.7.79: commitKnowledge writes via queryFirst (returns id) for
+      // commit-time CREATEs. The test mock tracks both paths so assertions
+      // on `_records` stay agnostic to which write API the writer uses.
+      if (params?.record) records.push(params.record);
+      return [] as unknown[];
+    },
     queryExec: async (_sql: string, params?: { record?: Record<string, unknown> }) => {
       if (params?.record) records.push(params.record);
     },
+    relate: async () => {},
     createMemory: async () => "memory:test",
     _records: records,
   };

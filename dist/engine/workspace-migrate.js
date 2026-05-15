@@ -355,6 +355,9 @@ async function ingestSkill(file, store, embeddings) {
     const description = fm?.description ?? body.split("\n").find(l => l.trim().length > 10)?.trim() ?? `Skill: ${skillName}`;
     // Extract steps from markdown body
     const steps = extractSteps(body);
+    // Compute embedding once: shared between the skill row (via precomputedVec
+    // on commitKnowledge) and the artifact row CREATE below. Same text feeds
+    // both so retrieval surfaces them coherently.
     let embedding = null;
     if (embeddings.isAvailable()) {
         const textToEmbed = `${skillName}: ${description}\n${steps.join("\n")}`.slice(0, 6000);
@@ -375,14 +378,21 @@ async function ingestSkill(file, store, embeddings) {
     const os = fm?.metadata?.openclaw?.os;
     if (os?.length)
         preconditions.push(`Supported OS: ${os.join(", ")}`);
-    await store.queryExec(`CREATE skill CONTENT $record`, {
-        record: {
-            name: skillName,
-            description,
-            embedding,
-            preconditions: preconditions.length > 0 ? preconditions.join("; ") : null,
-            steps: steps.length > 0 ? steps : null,
-            postconditions: null,
+    // v0.7.79: migrated to commitKnowledge({ kind: "skill" }). Workspace
+    // migration has no task or session context, so the three link knobs are
+    // all disabled. supersede is disabled because workspace-migrate seeds
+    // history (its skills are meant to coexist with prior runs).
+    await commitKnowledge({ store, embeddings }, {
+        kind: "skill",
+        name: skillName,
+        description,
+        precomputedVec: embedding,
+        preconditions: preconditions.length > 0 ? preconditions.join("; ") : undefined,
+        steps,
+        linkFromTask: false,
+        linkUsesConcepts: false,
+        supersede: false,
+        extras: {
             success_count: 1,
             failure_count: 0,
             avg_duration_ms: 0,
