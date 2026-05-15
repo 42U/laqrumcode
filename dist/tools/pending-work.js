@@ -413,58 +413,28 @@ async function commitHandoffNote(noteText, item, state) {
         }
     }
 }
-// Reflection content filter — belt-and-braces gate. Primary defense is the
-// prompt at memory-daemon.ts buildCoalescedPrompt. This catches anything the
-// LLM emits anyway. Three pathology classes from the 2026-05-14 audit.
-// Anti-thoroughness reflections are DROPPED (founder rule: thoroughness is
-// non-negotiable). Save-summary and work-completion are DOWNGRADED to
-// importance 3 with no embedding so they neither rank in retrieval nor
-// compete in dedup. Loose variants ('over-engineered', 'too verbose',
-// 'burned tool calls') extend the user's original strict regex set because
-// the manual sweep on 2026-05-14 found multiple rows that bypassed the
-// strict set with these synonyms.
-const REFLECTION_ANTI_THOROUGHNESS_RE = /should have (moved on faster|just acknowledged|rushed|skipped|moved faster)|overthinking it|too detailed|too thorough|rushed it less|acknowledge and move on|over-engineered|too verbose|more concise|shorter, punchier|burned (too many|most of the) tool|keep responses tighter/i;
-const REFLECTION_SAVE_SUMMARY_RE = /\ball saved\.|quoted ids from this turn|session totals:|\d+\s+concept gems across|edges_created\s*=\s*\d+/i;
-const REFLECTION_WORK_COMPLETION_RE = /fix verified end-to-end:|final loop summary|final state:|\d+\/\d+\s*tests|\d+\/\d+\s*postdeploy|calling it done/i;
+// Reflection writer migrated in v0.7.76 to commitKnowledge({ kind: "reflection" }).
+// The canonical regex filter set lives in src/engine/reflection-filter.ts; the
+// row creation, dedup, edge seal, and cache invalidation live in
+// src/engine/commit.ts. This wrapper just adapts the existing PendingWorkItem
+// shape to the new CommitKnowledge API.
 async function commitReflection(reflText, item, state) {
-    const { store, embeddings } = state;
-    if (REFLECTION_ANTI_THOROUGHNESS_RE.test(reflText)) {
-        log.warn(`[pending-work:reflection] dropped anti-thoroughness reflection for ${item.session_id}: ${reflText.slice(0, 120)}`);
+    // Without a SurrealDB session record id, commitKnowledge would refuse the
+    // write (the v0.7.76 architectural anchor closing the orphan-reflection bug
+    // class). Skip rather than throw — this matches the prior behavior of
+    // pending-work.ts where missing surreal_session_id meant the edge was simply
+    // not wired and the row went through.
+    if (!item.surreal_session_id)
         return;
-    }
-    const isAuditLog = REFLECTION_SAVE_SUMMARY_RE.test(reflText) || REFLECTION_WORK_COMPLETION_RE.test(reflText);
-    if (isAuditLog) {
-        log.warn(`[pending-work:reflection] downgrading audit-log-style reflection for ${item.session_id}: ${reflText.slice(0, 120)}`);
-    }
-    let reflEmb = null;
-    if (embeddings.isAvailable() && !isAuditLog) {
-        try {
-            reflEmb = await embeddings.embed(reflText);
-        }
-        catch { /* ok */ }
-    }
-    if (reflEmb?.length) {
-        const existing = await store.queryFirst(`SELECT vector::similarity::cosine(embedding, $vec) AS score FROM reflection WHERE embedding != NONE ORDER BY score DESC LIMIT 1`, { vec: reflEmb });
-        if (existing[0]?.score > 0.85)
-            return;
-    }
-    const record = {
-        session_id: item.session_id,
+    await commitKnowledge(state, {
+        kind: "reflection",
         text: reflText,
+        sessionId: item.session_id,
+        surrealSessionId: item.surreal_session_id,
         category: "session_review",
         severity: "minor",
-        importance: isAuditLog ? 3.0 : 7.0,
-    };
-    if (reflEmb?.length)
-        record.embedding = reflEmb;
-    if (item.project_id)
-        record.project_id = item.project_id;
-    const rows = await store.queryFirst(`CREATE reflection CONTENT $record RETURN id`, { record });
-    if (rows[0]?.id && item.surreal_session_id) {
-        await store.relate(String(rows[0].id), "reflects_on", item.surreal_session_id)
-            .catch(e => swallow.warn("pending-work:reflects_on", e));
-    }
-    store.clearReflectionCache();
+        projectId: item.project_id,
+    });
 }
 async function commitResults(item, results, state) {
     const { store, embeddings } = state;

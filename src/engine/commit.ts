@@ -23,6 +23,8 @@ import {
   linkConceptHierarchy,
 } from "./concept-links.js";
 import { swallow } from "./errors.js";
+import { log } from "./log.js";
+import { classifyReflection } from "./reflection-filter.js";
 
 /**
  * Minimal dependency shape commitKnowledge needs. GlobalPluginState satisfies
@@ -98,14 +100,50 @@ export interface CommitArtifactData {
   projectId?: string;
 }
 
+export interface CommitReflectionData {
+  kind: "reflection";
+  /** The reflection text. Stored payload AND embedding target. */
+  text: string;
+  /** kc_session_id UUID. Written to reflection.session_id column. */
+  sessionId: string;
+  /** SurrealDB Thing record id (e.g. "session:abc123") for the session row.
+   *  REQUIRED: the reflects_on edge cannot be sealed without it. If a caller
+   *  cannot supply this, commitReflection refuses the write rather than
+   *  silently producing an orphan row. This is the architectural anchor that
+   *  makes orphan reflection writes impossible at the API boundary, closing
+   *  the bug class fixed in v0.7.73-v0.7.74. */
+  surrealSessionId: string;
+  /** Schema categories: "failure_pattern" | "efficiency" | "approach_strategy".
+   *  Live data also uses "session_review". Falls through to schema DEFAULT
+   *  ("efficiency") when omitted. */
+  category?: string;
+  /** "minor" | "moderate" | "critical". Falls through to schema DEFAULT
+   *  ("minor") when omitted. */
+  severity?: string;
+  /** 1-10. Schema DEFAULT is 7.0 when omitted. */
+  importance?: number;
+  /** Precomputed embedding vector. Skip embed() if provided. */
+  precomputedVec?: number[] | null;
+  /** SCHEMALESS shadow column (no DEFINE FIELD on reflection.project_id
+   *  yet; formalisation deferred to a later release). */
+  projectId?: string;
+  /** Run the v0.7.73 content filter: anti-thoroughness DROP +
+   *  save-summary/work-completion DOWNGRADE (importance=3, no embedding).
+   *  Default true. Setting false bypasses the filter (tests, migrations). */
+  applyContentFilter?: boolean;
+  /** Cosine-similarity dedup threshold against existing reflections.
+   *  undefined → 0.85 (matches pre-v0.7.76 commitReflection). Set null to
+   *  disable dedup entirely. */
+  dedupCosineThreshold?: number | null;
+}
+
 // Future kinds will extend this union:
 // | CommitSkillData
-// | CommitReflectionData
 // | CommitMonologueData
 // | CommitCorrectionData
 // | CommitPreferenceData
 // | CommitDecisionData
-export type CommitData = CommitConceptData | CommitMemoryData | CommitArtifactData;
+export type CommitData = CommitConceptData | CommitMemoryData | CommitArtifactData | CommitReflectionData;
 
 export interface CommitResult {
   /** The record ID written (e.g. "concept:abc123"). */
@@ -127,6 +165,8 @@ export async function commitKnowledge(
       return commitMemory(deps, data);
     case "artifact":
       return commitArtifact(deps, data);
+    case "reflection":
+      return commitReflection(deps, data);
     default: {
       // Exhaustiveness check — new kinds must add a case here.
       const _exhaustive: never = data;
@@ -293,4 +333,96 @@ async function commitArtifact(
   }
 
   return { id: artifactId, edges };
+}
+
+async function commitReflection(
+  deps: CommitDeps,
+  data: CommitReflectionData,
+): Promise<CommitResult> {
+  const { store, embeddings } = deps;
+  const logTag = `commit:reflection:${data.category ?? "default"}`;
+
+  // 0. Validate: the architectural anchor making orphan reflects_on writes
+  //    impossible at the API boundary. surrealSessionId is required by the
+  //    interface (no `?`), TypeScript enforces at compile time. Runtime
+  //    check is defense-in-depth for JS callers / type erasure paths.
+  if (!data.surrealSessionId) {
+    throw new Error(
+      "commitReflection: surrealSessionId is required; reflects_on edge cannot be sealed without it",
+    );
+  }
+
+  // 1. Content filter — v0.7.73 regex set, extracted to reflection-filter.ts.
+  let importance = data.importance ?? 7.0;
+  let allowEmbedding = true;
+  if (data.applyContentFilter !== false) {
+    const verdict = classifyReflection(data.text);
+    if (verdict === "drop") {
+      log.warn(`${logTag}: dropped anti-thoroughness reflection: ${data.text.slice(0, 120)}`);
+      return { id: "", edges: 0 };
+    }
+    if (verdict === "downgrade") {
+      log.warn(`${logTag}: downgrading audit-log style reflection: ${data.text.slice(0, 120)}`);
+      importance = 3.0;
+      allowEmbedding = false;
+    }
+  }
+
+  // 2. Embed text (or reuse precomputedVec). Downgraded rows skip embedding
+  //    so they neither rank in retrieval nor compete in dedup.
+  let embedding: number[] | null = data.precomputedVec ?? null;
+  if (!embedding && allowEmbedding && embeddings.isAvailable()) {
+    try { embedding = await embeddings.embed(data.text); }
+    catch (e) { swallow(`${logTag}:embed`, e); }
+  }
+
+  // 3. Cosine-similarity dedup. undefined → 0.85 (matches pre-v0.7.76).
+  //    null → disable.
+  const threshold = data.dedupCosineThreshold === undefined ? 0.85 : data.dedupCosineThreshold;
+  if (threshold !== null && embedding?.length) {
+    const existing = await store.queryFirst<{ score: number }>(
+      `SELECT vector::similarity::cosine(embedding, $vec) AS score
+       FROM reflection WHERE embedding != NONE
+       ORDER BY score DESC LIMIT 1`,
+      { vec: embedding },
+    );
+    if ((existing[0]?.score ?? 0) > threshold) {
+      return { id: "", edges: 0 };
+    }
+  }
+
+  // 4. CREATE the reflection row.
+  const record: Record<string, unknown> = {
+    session_id: data.sessionId,
+    text: data.text,
+    category: data.category ?? "efficiency",
+    severity: data.severity ?? "minor",
+    importance,
+  };
+  if (embedding?.length) record.embedding = embedding;
+  if (data.projectId) record.project_id = data.projectId;
+  const rows = await store.queryFirst<{ id: string }>(
+    `CREATE reflection CONTENT $record RETURN id`,
+    { record },
+  );
+  const reflectionId = String(rows[0]?.id ?? "");
+  if (!reflectionId) {
+    swallow.warn(`${logTag}:create`, new Error("CREATE reflection returned no id"));
+    return { id: "", edges: 0 };
+  }
+
+  // 5. Auto-seal the reflects_on edge. Failure is logged but doesn't bubble;
+  //    the row exists with an observable edges=0 orphan canary in the result.
+  let edges = 0;
+  try {
+    await store.relate(reflectionId, "reflects_on", data.surrealSessionId);
+    edges = 1;
+  } catch (e) {
+    swallow.warn(`${logTag}:reflects_on`, e);
+  }
+
+  // 6. Invalidate the reflection cache used by retrieval injection.
+  store.clearReflectionCache();
+
+  return { id: reflectionId, edges };
 }

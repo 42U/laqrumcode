@@ -85,7 +85,43 @@ export interface CommitArtifactData {
     /** 0.7.26: project scope — see CommitConceptData.projectId. */
     projectId?: string;
 }
-export type CommitData = CommitConceptData | CommitMemoryData | CommitArtifactData;
+export interface CommitReflectionData {
+    kind: "reflection";
+    /** The reflection text. Stored payload AND embedding target. */
+    text: string;
+    /** kc_session_id UUID. Written to reflection.session_id column. */
+    sessionId: string;
+    /** SurrealDB Thing record id (e.g. "session:abc123") for the session row.
+     *  REQUIRED: the reflects_on edge cannot be sealed without it. If a caller
+     *  cannot supply this, commitReflection refuses the write rather than
+     *  silently producing an orphan row. This is the architectural anchor that
+     *  makes orphan reflection writes impossible at the API boundary, closing
+     *  the bug class fixed in v0.7.73-v0.7.74. */
+    surrealSessionId: string;
+    /** Schema categories: "failure_pattern" | "efficiency" | "approach_strategy".
+     *  Live data also uses "session_review". Falls through to schema DEFAULT
+     *  ("efficiency") when omitted. */
+    category?: string;
+    /** "minor" | "moderate" | "critical". Falls through to schema DEFAULT
+     *  ("minor") when omitted. */
+    severity?: string;
+    /** 1-10. Schema DEFAULT is 7.0 when omitted. */
+    importance?: number;
+    /** Precomputed embedding vector. Skip embed() if provided. */
+    precomputedVec?: number[] | null;
+    /** SCHEMALESS shadow column (no DEFINE FIELD on reflection.project_id
+     *  yet; formalisation deferred to a later release). */
+    projectId?: string;
+    /** Run the v0.7.73 content filter: anti-thoroughness DROP +
+     *  save-summary/work-completion DOWNGRADE (importance=3, no embedding).
+     *  Default true. Setting false bypasses the filter (tests, migrations). */
+    applyContentFilter?: boolean;
+    /** Cosine-similarity dedup threshold against existing reflections.
+     *  undefined → 0.85 (matches pre-v0.7.76 commitReflection). Set null to
+     *  disable dedup entirely. */
+    dedupCosineThreshold?: number | null;
+}
+export type CommitData = CommitConceptData | CommitMemoryData | CommitArtifactData | CommitReflectionData;
 export interface CommitResult {
     /** The record ID written (e.g. "concept:abc123"). */
     id: string;
