@@ -1,7 +1,7 @@
 /**
- * Auto-seal invariant — v0.7.81.
+ * Auto-seal invariant — v0.7.81 (cross-platform fix v0.7.82).
  *
- * Enforces the contract the v0.7.76–v0.7.80 auto-sealing campaign exists
+ * Enforces the contract the v0.7.76-v0.7.81 auto-sealing campaign exists
  * to establish: every graph edge write goes through `commitKnowledge`
  * (the canonical write path) or through one of the explicitly whitelisted
  * helper / analytical / context-assembly modules. Any new `store.relate(...)`
@@ -93,7 +93,14 @@ describe("auto-seal invariant (v0.7.81)", () => {
     const violations: Array<{ file: string; line: number; text: string }> = [];
 
     for (const file of files) {
-      const rel = relative(REPO_ROOT, file);
+      // v0.7.82: normalize Windows backslashes to forward slashes so the
+      // APPROVED_RELATE_CALLERS Set (which uses forward-slash paths) matches
+      // on both POSIX and Windows runners. Without this, Windows CI returned
+      // "src\engine\concept-links.ts" while the whitelist contained
+      // "src/engine/concept-links.ts" — every approved file flagged as a
+      // violation. Same cross-platform-path bug class as the v0.7.70/v0.7.71
+      // CRLF regex fixes.
+      const rel = relative(REPO_ROOT, file).replace(/\\/g, "/");
       const content = readFileSync(file, "utf8");
       const lines = content.split("\n");
       for (let i = 0; i < lines.length; i++) {
