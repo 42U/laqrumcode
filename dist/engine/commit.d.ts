@@ -233,11 +233,63 @@ export interface CommitSkillData {
      *  / `full_content`). Merged into the CREATE record. */
     extras?: Record<string, unknown>;
 }
-export type CommitData = CommitConceptData | CommitMemoryData | CommitArtifactData | CommitReflectionData | CommitSubagentData | CommitSkillData;
+export interface CommitCorrectionData {
+    kind: "correction";
+    /** The new (correct) text. Stored as the memory's text and used as the
+     *  default embedding target. */
+    text: string;
+    /** Memory importance (1-10). */
+    importance: number;
+    /** Session id (kc_session_id UUID) owning the correction memory. */
+    sessionId: string;
+    /** Direct record id of the supersession target. Skips cosine resolution.
+     *  Kind inferred from the record-id prefix (`memory:xxx` → memory,
+     *  `concept:xxx` → concept) unless oldKind is set. */
+    oldId?: string;
+    /** Text describing the OLD (incorrect) belief. commitCorrection resolves
+     *  the best-matching concept and/or memory via cosine similarity against
+     *  this text. */
+    oldText?: string;
+    /** Optional hint when oldId's prefix is ambiguous or oldText resolution
+     *  should be restricted to one kind. */
+    oldKind?: "concept" | "memory";
+    /** Override the default embed target (which is `text`). Used when the
+     *  stored text has prefixes/rationale that dilute embedding quality for
+     *  short query matching. */
+    embeddingText?: string;
+    projectId?: string;
+    precomputedVec?: number[] | null;
+    /** Optional turn id for trace provenance. Stored as part of the memory's
+     *  category if set. */
+    sourceTurnId?: string;
+    /** Auto-seal `supersedes` edge to the resolved target. Default true.
+     *  When false, commitCorrection just writes the memory and skips
+     *  resolution + decay. */
+    linkSupersedes?: boolean;
+    /** Run stability decay on the target (concept) or status flip (memory).
+     *  Default true. */
+    runDecay?: boolean;
+    /** Pass through to commitMemory's linkConcepts knob (about_concept
+     *  similarity scan against the correction text). Default true. */
+    linkConcepts?: boolean;
+}
+export type CommitData = CommitConceptData | CommitMemoryData | CommitArtifactData | CommitReflectionData | CommitSubagentData | CommitSkillData | CommitCorrectionData;
 export interface CommitResult {
     /** The record ID written (e.g. "concept:abc123"). */
     id: string;
     /** Number of auto-seal edges created for this write. Observable for verification. */
     edges: number;
+    /** v0.7.80: ids of concepts/memories superseded by this correction write.
+     *  Only populated by commitKnowledge({ kind: "correction" }); undefined for
+     *  other kinds. */
+    supersededIds?: string[];
+    /** v0.7.80: decay applied per superseded target. Only populated for
+     *  correction writes. For concepts, records stability transition; for
+     *  memories, records status flip (oldStability=1.0, newStability=0.0). */
+    decayApplied?: Array<{
+        id: string;
+        oldStability: number;
+        newStability: number;
+    }>;
 }
 export declare function commitKnowledge(deps: CommitDeps, data: CommitData): Promise<CommitResult>;

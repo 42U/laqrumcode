@@ -272,18 +272,74 @@ export interface CommitSkillData {
   extras?: Record<string, unknown>;
 }
 
+export interface CommitCorrectionData {
+  kind: "correction";
+
+  // ── Required ───────────────────────────────────────────────────────────
+  /** The new (correct) text. Stored as the memory's text and used as the
+   *  default embedding target. */
+  text: string;
+  /** Memory importance (1-10). */
+  importance: number;
+  /** Session id (kc_session_id UUID) owning the correction memory. */
+  sessionId: string;
+
+  // ── Target (exactly one of oldId | oldText when linkSupersedes !== false)
+  /** Direct record id of the supersession target. Skips cosine resolution.
+   *  Kind inferred from the record-id prefix (`memory:xxx` → memory,
+   *  `concept:xxx` → concept) unless oldKind is set. */
+  oldId?: string;
+  /** Text describing the OLD (incorrect) belief. commitCorrection resolves
+   *  the best-matching concept and/or memory via cosine similarity against
+   *  this text. */
+  oldText?: string;
+  /** Optional hint when oldId's prefix is ambiguous or oldText resolution
+   *  should be restricted to one kind. */
+  oldKind?: "concept" | "memory";
+
+  // ── Optional ───────────────────────────────────────────────────────────
+  /** Override the default embed target (which is `text`). Used when the
+   *  stored text has prefixes/rationale that dilute embedding quality for
+   *  short query matching. */
+  embeddingText?: string;
+  projectId?: string;
+  precomputedVec?: number[] | null;
+  /** Optional turn id for trace provenance. Stored as part of the memory's
+   *  category if set. */
+  sourceTurnId?: string;
+
+  // ── Linking knobs (default true) ───────────────────────────────────────
+  /** Auto-seal `supersedes` edge to the resolved target. Default true.
+   *  When false, commitCorrection just writes the memory and skips
+   *  resolution + decay. */
+  linkSupersedes?: boolean;
+  /** Run stability decay on the target (concept) or status flip (memory).
+   *  Default true. */
+  runDecay?: boolean;
+  /** Pass through to commitMemory's linkConcepts knob (about_concept
+   *  similarity scan against the correction text). Default true. */
+  linkConcepts?: boolean;
+}
+
 // Future kinds will extend this union:
 // | CommitMonologueData
-// | CommitCorrectionData
 // | CommitPreferenceData
 // | CommitDecisionData
-export type CommitData = CommitConceptData | CommitMemoryData | CommitArtifactData | CommitReflectionData | CommitSubagentData | CommitSkillData;
+export type CommitData = CommitConceptData | CommitMemoryData | CommitArtifactData | CommitReflectionData | CommitSubagentData | CommitSkillData | CommitCorrectionData;
 
 export interface CommitResult {
   /** The record ID written (e.g. "concept:abc123"). */
   id: string;
   /** Number of auto-seal edges created for this write. Observable for verification. */
   edges: number;
+  /** v0.7.80: ids of concepts/memories superseded by this correction write.
+   *  Only populated by commitKnowledge({ kind: "correction" }); undefined for
+   *  other kinds. */
+  supersededIds?: string[];
+  /** v0.7.80: decay applied per superseded target. Only populated for
+   *  correction writes. For concepts, records stability transition; for
+   *  memories, records status flip (oldStability=1.0, newStability=0.0). */
+  decayApplied?: Array<{ id: string; oldStability: number; newStability: number }>;
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────
@@ -305,6 +361,8 @@ export async function commitKnowledge(
       return commitSubagent(deps, data);
     case "skill":
       return commitSkill(deps, data);
+    case "correction":
+      return commitCorrection(deps, data);
     default: {
       // Exhaustiveness check — new kinds must add a case here.
       const _exhaustive: never = data;
@@ -847,4 +905,163 @@ async function commitSkill(
   }
 
   return { id: skillId, edges };
+}
+
+// ── Supersede constants (mirror of src/engine/supersedes.ts) ─────────────
+/** Minimum cosine similarity to consider a candidate the target of a correction. */
+const COMMIT_SUPERSEDE_THRESHOLD = 0.70;
+/** Multiplicative decay applied to a superseded concept's stability score. */
+const COMMIT_STABILITY_DECAY_FACTOR = 0.4;
+/** Floor: don't decay below this so the concept remains discoverable. */
+const COMMIT_STABILITY_FLOOR = 0.15;
+
+async function commitCorrection(
+  deps: CommitDeps,
+  data: CommitCorrectionData,
+): Promise<CommitResult> {
+  const { store, embeddings } = deps;
+  const logTag = "commit:correction";
+
+  // 0. Validate.
+  if (!data.text) throw new Error("commitCorrection: text is required");
+  if (data.importance == null) throw new Error("commitCorrection: importance is required");
+  if (!data.sessionId) throw new Error("commitCorrection: sessionId is required");
+  if (data.linkSupersedes !== false && !data.oldId && !data.oldText) {
+    throw new Error("commitCorrection: oldId or oldText is required when linkSupersedes is true");
+  }
+
+  // 1. Write the correction memory via commitMemory. Composes the existing
+  //    about_concept auto-seal + project scope + embed.
+  const memResult = await commitMemory(deps, {
+    kind: "memory",
+    text: data.text,
+    importance: data.importance,
+    category: "correction",
+    sessionId: data.sessionId,
+    embeddingText: data.embeddingText,
+    precomputedVec: data.precomputedVec,
+    projectId: data.projectId,
+    linkConcepts: data.linkConcepts,
+  });
+  const memoryId = memResult.id;
+  if (!memoryId) {
+    return { id: "", edges: 0, supersededIds: [], decayApplied: [] };
+  }
+
+  let edges = memResult.edges;
+  const supersededIds: string[] = [];
+  const decayApplied: Array<{ id: string; oldStability: number; newStability: number }> = [];
+
+  if (data.linkSupersedes === false) {
+    return { id: memoryId, edges, supersededIds, decayApplied };
+  }
+
+  // 2. Resolve targets. Two paths:
+  //    (a) oldId provided → direct, kind inferred from id prefix or oldKind.
+  //    (b) oldText provided → cosine match against concept + memory tables.
+  //        Resolution runs AFTER memory write but the candidate query
+  //        explicitly excludes the correction memory's id, so self-edges
+  //        cannot happen by this path. Stage 2 of v0.7.80 also adds a
+  //        belt-and-suspenders id-equality check below to handle the 7
+  //        existing self-edges' pattern (which had `in == out` historically
+  //        for reasons that remain UNCONFIRMED at audit time).
+  type ResolvedTarget = { id: string; kind: "concept" | "memory"; stability?: number };
+  const targets: ResolvedTarget[] = [];
+
+  if (data.oldId) {
+    const inferred: "concept" | "memory" = data.oldId.startsWith("memory:") ? "memory" : "concept";
+    targets.push({ id: data.oldId, kind: data.oldKind ?? inferred });
+  } else if (data.oldText) {
+    try {
+      const vec = await embeddings.embed(data.oldText);
+      if (vec?.length) {
+        const [conceptCandidates, memoryCandidates] = await Promise.all([
+          store.queryFirst<{ id: string; score: number; stability: number }>(
+            `SELECT id, vector::similarity::cosine(embedding, $vec) AS score, stability
+             FROM concept
+             WHERE embedding != NONE AND array::len(embedding) > 0
+               AND superseded_at IS NONE
+               AND stability > $floor
+             ORDER BY score DESC LIMIT 5`,
+            { vec, floor: COMMIT_STABILITY_FLOOR },
+          ),
+          store.queryFirst<{ id: string; score: number }>(
+            `SELECT id, vector::similarity::cosine(embedding, $vec) AS score
+             FROM memory
+             WHERE embedding != NONE AND array::len(embedding) > 0
+               AND (status = 'active' OR status IS NONE)
+               AND id != $correctionId
+             ORDER BY score DESC LIMIT 5`,
+            { vec, correctionId: memoryId },
+          ),
+        ]);
+        for (const c of conceptCandidates) {
+          if (c.score < COMMIT_SUPERSEDE_THRESHOLD) break;
+          targets.push({ id: String(c.id), kind: "concept", stability: c.stability });
+        }
+        for (const m of memoryCandidates) {
+          if (m.score < COMMIT_SUPERSEDE_THRESHOLD) break;
+          targets.push({ id: String(m.id), kind: "memory" });
+        }
+      }
+    } catch (e) {
+      swallow.warn(`${logTag}:resolve`, e);
+    }
+  }
+
+  if (targets.length === 0) {
+    swallow.warn(`${logTag}:no_target`, new Error(`oldText="${(data.oldText ?? "").slice(0, 80)}" did not resolve to any concept/memory above threshold ${COMMIT_SUPERSEDE_THRESHOLD}`));
+    return { id: memoryId, edges, supersededIds, decayApplied };
+  }
+
+  // 3. For each target: relate supersedes, decay (if enabled), record.
+  for (const target of targets) {
+    // Belt-and-suspenders against the 7 historical self-edges. The candidate
+    // query already excludes the correction memory id, so this should never
+    // fire, but it's cheap insurance.
+    if (target.id === memoryId) continue;
+    try {
+      await store.relate(memoryId, "supersedes", target.id);
+      edges++;
+      supersededIds.push(target.id);
+    } catch (e) {
+      swallow.warn(`${logTag}:relate`, e);
+      continue;
+    }
+    if (data.runDecay !== false) {
+      if (target.kind === "concept") {
+        const oldStability = target.stability ?? 1.0;
+        const newStability = Math.max(COMMIT_STABILITY_FLOOR, oldStability * COMMIT_STABILITY_DECAY_FACTOR);
+        try {
+          assertRecordIdLocal(target.id);
+          assertRecordIdLocal(memoryId);
+          await store.queryExec(
+            `UPDATE ${target.id} SET stability = $s, superseded_at = time::now(), superseded_by = type::record($cid)`,
+            { s: newStability, cid: memoryId },
+          );
+          decayApplied.push({ id: target.id, oldStability, newStability });
+        } catch (e) { swallow.warn(`${logTag}:decay`, e); }
+      } else {
+        try {
+          assertRecordIdLocal(target.id);
+          await store.queryExec(
+            `UPDATE ${target.id} SET status = 'superseded', resolved_at = time::now(), resolved_by = $cid`,
+            { cid: memoryId },
+          );
+          decayApplied.push({ id: target.id, oldStability: 1.0, newStability: 0.0 });
+        } catch (e) { swallow.warn(`${logTag}:decay-memory`, e); }
+      }
+    }
+  }
+
+  return { id: memoryId, edges, supersededIds, decayApplied };
+}
+
+// Inline assertion to avoid the cross-import; mirrors src/engine/surreal.ts's
+// assertRecordId but kept here so commit.ts doesn't acquire a new surreal
+// dependency.
+function assertRecordIdLocal(id: string): void {
+  if (!/^[a-z_][a-z0-9_]*:[a-zA-Z0-9_]+$/i.test(id)) {
+    throw new Error(`commitCorrection: invalid record id: ${id}`);
+  }
 }
