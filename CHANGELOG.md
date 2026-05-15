@@ -4,6 +4,25 @@ All notable changes to KongCode are documented here. The 0.7.x series introduced
 
 ## [Unreleased]
 
+## [0.7.77] — 2026-05-15
+
+Iteration 2 of 6 in the auto-sealing campaign.
+
+### Added
+- **`subagent` kind in `commitKnowledge`** (`src/engine/commit.ts`). Subagent spawn writes now auto-seal three edges atomically with the row CREATE: `spawned` (session→subagent), `spawned_from` (subagent→session), and `derived_from` (subagent→task|session with v0.7.74 task-or-session fallback baked into the type signature via optional `taskId`). Four required fields enforce the architectural anchor: `parent_session_id` (kc UUID), `surrealSessionId` (SurrealDB Thing record id, needed for all three edges), `correlation_key` and `run_id` (both UNIQUE-indexed at schema, must-set per the round-2 caller contract so NONE values don't collapse into the same UNIQUE bucket). Sequential non-transactional edge writes match prior pre-tool-use.ts behavior; UNIQUE-violation on CREATE recovers via post-error SELECT returning the sibling's id with `edges: 0`. The `derived_from_session_fallback` swallow tag is preserved verbatim so production log alerts keep firing.
+- **8 new tests in `test/commit.test.ts`** under `describe("commitKnowledge — subagent kind")`: happy path (3 edges), `derived_from` session-fallback, UNIQUE collision recovery, rethrow non-UNIQUE errors, missing-required-field guards (parent_session_id, surrealSessionId, correlation_key, run_id), `link*` opt-outs.
+
+### Changed
+- **`src/hook-handlers/pre-tool-use.ts:117-231` migrated** to call `commitKnowledge({ kind: "subagent", ... })`. ~100 LOC of inline pre-SELECT dedup, CREATE, three relate calls, and UNIQUE-violation recovery deleted from the file — replaced with a ~30-line wrapper that delegates everything to commitKnowledge. The pre-SELECT dedup pattern is retired: commitSubagent goes straight to CREATE and recovers from UNIQUE violations via post-error SELECT (simpler control flow, same dedup guarantee).
+- New behavior: when `session.surrealSessionId` is missing, `pre-tool-use.ts` skips the spawn entirely with a warn log instead of writing an orphan row. This is the auto-sealing campaign's intended behavior change — orphan subagent rows were a bug class the campaign exists to close.
+
+### Removed (test maintenance)
+- **3 tests in `test/dedup-writers.test.ts:106-176`** asserted SELECT-then-CREATE ordering, which no longer holds after the migration. Replaced with 1 test verifying the new flow (CREATE without pre-SELECT, stash the returned id). Detailed unit coverage of UNIQUE-violation recovery now lives in `test/commit.test.ts` under the subagent describe block.
+
+### Verified
+- `npm run build` clean.
+- `npm test` 968/968 passing across 58 test files (was 962/962; net +6: -3 retired dedup tests, +1 replacement, +8 new commit-subagent tests).
+
 ## [0.7.76] — 2026-05-15
 
 Iteration 1 of 6 in the auto-sealing campaign: route every graph edge write through `commitKnowledge` so callers cannot omit schema-required edges. Each release covers one or two kinds; v0.7.81 closes with a build-time lint guard that fails CI on any new `store.relate(...)` outside the canonical write paths.
