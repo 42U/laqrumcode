@@ -4,6 +4,33 @@ All notable changes to KongCode are documented here. The 0.7.x series introduced
 
 ## [Unreleased]
 
+## [0.7.81] — 2026-05-15
+
+**Iteration 6 of 6 — campaign close.** The auto-sealing contract is now CI-enforced: every graph edge write in `src/` goes through `commitKnowledge` (or one of 6 explicitly-whitelisted helper / analytical / migration modules), and `test/lint-auto-seal-invariant.test.ts` will fail the build on any new `store.relate(...)` outside the whitelist.
+
+### Added
+- **`linkConceptCrossLink(deps, fromId, toId, edge)` helper** in `src/engine/commit.ts`. Wraps `store.relate` with a `VALID_GEM_EDGES`-style whitelist (`broader` | `narrower` | `related_to`) and `swallow.warn` error handling. Returns 1 on success, 0 on failure. Used by the gem cross-link writer.
+- **`test/lint-auto-seal-invariant.test.ts`**: Vitest invariant test that walks `src/`, matches `store.relate(...)` calls via a statement-start-anchored regex (avoids JSDoc/comment false positives) plus a raw-RELATE regex for SurrealQL template literals, asserts every match's file is in `APPROVED_RELATE_CALLERS`. 7-file whitelist with inline justifications: `commit.ts`, `concept-links.ts`, `causal.ts`, `recovery.ts`, `context-assembler.ts`, `link-hierarchy.ts`, `surreal.ts`. Failure message tells the developer how to use `commitKnowledge` or extend the whitelist with rationale.
+
+### Changed (caller migrations — 7 hand-wires retired)
+- **`src/tools/supersede.ts`** (the MCP `supersede` tool): now calls `commitKnowledge({ kind: "correction", oldText, text, importance, sessionId })`. The two-step (commitKnowledge memory + linkSupersedesEdges) is gone. Tool's public JSON shape preserved byte-for-byte (`correction_memory_id` + `superseded_concepts` map back from the new `CommitResult.supersededIds.length`).
+- **`src/engine/memory-daemon.ts` concept extraction**: `upsertConcept` + `linkConceptHierarchy` + 3 hand-wired relates (`derived_from→task`, `derived_from→session` fallback, `relevant_to→project`) collapsed to a single `commitKnowledge({ kind: "concept", ..., derivedFromTargetId: taskId ?? sessionId, projectId, precomputedVec: emb })` call. `commitConcept` runs hierarchy + related_to + project edges internally so the explicit calls are no longer needed.
+- **`src/engine/memory-daemon.ts` artifact extraction**: `createArtifact` + `linkToRelevantConcepts` + hand-wired `used_in` collapsed to a single `commitKnowledge({ kind: "artifact", ..., projectId, precomputedVec: emb })` call. `commitArtifact` runs artifact_mentions + used_in via `linkToProject` internally.
+- **`src/tools/pending-work.ts:789`** (gem cross-link writer in `create_knowledge_gems`): now calls `linkConceptCrossLink(deps, fromId, toId, link.edge)`. Failure mode preserved: edge failures roll into the existing `edge_failures` response array.
+
+### Removed
+- **`src/engine/supersedes.ts`** (157 LOC) — its `linkSupersedesEdges` function had two hand-wired `store.relate(_, "supersedes", _)` sites that violated the lint guard. Functionality fully absorbed by `commitCorrection` in v0.7.80. No callers remain post-migration of supersede.ts.
+- **`test/supersedes.test.ts`** (12 tests) — covered the now-deleted module. Tests for `commitCorrection`'s resolve-and-decay flow can be added in a follow-up; the integration-level path is exercised by the migrated MCP tool.
+- **Orphan `linkSupersedesEdges` import in `src/engine/memory-daemon.ts:17`** — was imported but never invoked.
+
+### Verified
+- `npm run build` clean.
+- `npm test` **957/957** passing across 58 test files (was 968 pre-v0.7.81; net -11 = -12 from `supersedes.test.ts` deletion + 1 from the new `lint-auto-seal-invariant.test.ts`).
+- **Lint guard passes**: zero unapproved `store.relate(...)` call sites in `src/`. The auto-sealing contract the v0.7.76-v0.7.81 campaign exists to establish is now enforced by CI.
+
+### Campaign summary
+6 releases (v0.7.76-v0.7.81), 6 CommitKnowledge kinds added (reflection, subagent, concept+artifact expansion, skill, correction, plus the helper layer + lint guard), 17 hand-wired `store.relate(...)` sites retired, 1 dist artifact orphan cleaned, 14 pathological reflection rows cleaned earlier in the chain. Every graph edge write now flows through `commitKnowledge` or an explicitly-whitelisted module. The orphan-edge bug class that drove v0.7.73-v0.7.75 is structurally closed at the API boundary.
+
 ## [0.7.80] — 2026-05-15
 
 Iteration 5 of 6 in the auto-sealing campaign. Foundation lands now; caller migration of the MCP `supersede` tool and retirement of `src/engine/supersedes.ts`'s hand-wires move to v0.7.81 alongside the lint guard.
