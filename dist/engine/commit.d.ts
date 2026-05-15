@@ -43,6 +43,17 @@ export interface CommitConceptData {
     linkHierarchy?: boolean;
     /** Run linkToRelevantConcepts against other concepts — default true. */
     linkRelated?: boolean;
+    /** Auto-seal `relevant_to` edge (concept → project) when projectId is set.
+     *  Default true. Set false to opt out (e.g. for tests, or to retrofit an
+     *  existing concept without writing the project edge). */
+    linkProject?: boolean;
+    /** Outgoing `derived_from` edge target (task | artifact | session record id
+     *  per the schema's widened OUT type at schema.surql:209). When set,
+     *  auto-seals `concept → derived_from → derivedFromTargetId`. Distinct from
+     *  sourceId+edgeName which wires an INCOMING edge (source → concept).
+     *  v0.7.78 added so concept-extract.ts and the gem flow can stop hand-wiring
+     *  this edge after commitKnowledge returns. */
+    derivedFromTargetId?: string;
     /** Precomputed embedding vector. Skip embed() if provided. */
     precomputedVec?: number[] | null;
     /** 0.7.26: project this concept belongs to (denormalized for fast retrieval
@@ -84,6 +95,9 @@ export interface CommitArtifactData {
     precomputedVec?: number[] | null;
     /** 0.7.26: project scope — see CommitConceptData.projectId. */
     projectId?: string;
+    /** Auto-seal `used_in` edge (artifact → project) when projectId is set.
+     *  Default true. */
+    linkProject?: boolean;
 }
 export interface CommitReflectionData {
     kind: "reflection";

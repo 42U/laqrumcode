@@ -733,6 +733,11 @@ export async function handleCreateKnowledgeGems(
           skill_name: "create_knowledge_gems",
         },
         precomputedVec: gemEmb,
+        // v0.7.78: route the concept→artifact derived_from edge through
+        // commitKnowledge's auto-seal instead of hand-wiring after. The
+        // edge is what links a gem to the source artifact (PDF / doc / etc.)
+        // it was extracted from.
+        derivedFromTargetId: artifactId,
       });
       if (!conceptId) {
         skipped++;
@@ -740,13 +745,6 @@ export async function handleCreateKnowledgeGems(
       }
       nameToId.set(gem.name, conceptId);
       conceptIds.push(conceptId);
-
-      // derived_from edge: concept -> source artifact
-      if (artifactId) {
-        await store.relate(conceptId, "derived_from", artifactId).catch(e => {
-          log.warn(`[gems] derived_from failed for ${gem.name}:`, e);
-        });
-      }
     }
 
     // 3. Create cross-link edges between gems. Surface why each skip happened

@@ -139,19 +139,12 @@ export async function upsertAndLinkConcepts(sourceId, edgeName, text, store, emb
                 edgeName,
                 source: logTag,
                 projectId: opts?.projectId,
+                // v0.7.78: derived_from→task and relevant_to→project are now
+                // auto-sealed inside commitConcept (via derivedFromTargetId +
+                // projectId/linkToProject). The two hand-wired writes that used
+                // to live here have been retired.
+                derivedFromTargetId: opts?.taskId,
             });
-            if (conceptId) {
-                // Outgoing task/project relations aren't part of generic auto-seal;
-                // they're route-specific semantics that callers opt into.
-                if (opts?.taskId) {
-                    await store.relate(conceptId, "derived_from", opts.taskId)
-                        .catch(e => swallow(`${logTag}:derived_from`, e));
-                }
-                if (opts?.projectId) {
-                    await store.relate(conceptId, "relevant_to", opts.projectId)
-                        .catch(e => swallow(`${logTag}:relevant_to`, e));
-                }
-            }
         }
         catch (e) {
             swallow(`${logTag}:upsert`, e);

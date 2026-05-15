@@ -55,6 +55,17 @@ export interface CommitConceptData {
   linkHierarchy?: boolean;
   /** Run linkToRelevantConcepts against other concepts — default true. */
   linkRelated?: boolean;
+  /** Auto-seal `relevant_to` edge (concept → project) when projectId is set.
+   *  Default true. Set false to opt out (e.g. for tests, or to retrofit an
+   *  existing concept without writing the project edge). */
+  linkProject?: boolean;
+  /** Outgoing `derived_from` edge target (task | artifact | session record id
+   *  per the schema's widened OUT type at schema.surql:209). When set,
+   *  auto-seals `concept → derived_from → derivedFromTargetId`. Distinct from
+   *  sourceId+edgeName which wires an INCOMING edge (source → concept).
+   *  v0.7.78 added so concept-extract.ts and the gem flow can stop hand-wiring
+   *  this edge after commitKnowledge returns. */
+  derivedFromTargetId?: string;
   /** Precomputed embedding vector. Skip embed() if provided. */
   precomputedVec?: number[] | null;
   /** 0.7.26: project this concept belongs to (denormalized for fast retrieval
@@ -98,6 +109,9 @@ export interface CommitArtifactData {
   precomputedVec?: number[] | null;
   /** 0.7.26: project scope — see CommitConceptData.projectId. */
   projectId?: string;
+  /** Auto-seal `used_in` edge (artifact → project) when projectId is set.
+   *  Default true. */
+  linkProject?: boolean;
 }
 
 export interface CommitReflectionData {
@@ -247,6 +261,44 @@ export async function commitKnowledge(
 
 // ── Per-kind implementations ──────────────────────────────────────────────
 
+/**
+ * Auto-seal the concept→project (`relevant_to`) or artifact→project
+ * (`used_in`) edge for a freshly-written or existing row.
+ *
+ * SurrealQL has no UNIQUE on `relevant_to` or `used_in`, and `store.relate()`
+ * is a bare RELATE with no idempotency guard. On this workstation pre-v0.7.78
+ * the top duplicate count was 139 edges on a single (concept, project) pair
+ * because a hand-wired writer hit the same source-project pair every turn.
+ * Pre-check via SELECT before RELATE collapses the writer's intent to "at
+ * most one edge per (source, project) pair from this code path." It does
+ * NOT clean up existing duplicates — that's a separate migration.
+ *
+ * Returns the number of edges added (0 if already present or on error,
+ * 1 if newly written) so callers can compose with `edges +=`.
+ */
+async function linkToProject(
+  deps: CommitDeps,
+  sourceId: string,
+  sourceKind: "concept" | "artifact",
+  projectId: string,
+): Promise<number> {
+  const { store } = deps;
+  const edgeTable = sourceKind === "concept" ? "relevant_to" : "used_in";
+  const logTag = `commit:linkToProject:${sourceKind}`;
+  try {
+    const existing = await store.queryFirst<{ id: string }>(
+      `SELECT id FROM ${edgeTable} WHERE in = $sid AND out = $pid LIMIT 1`,
+      { sid: sourceId, pid: projectId },
+    );
+    if (existing[0]?.id) return 0;
+    await store.relate(sourceId, edgeTable, projectId);
+    return 1;
+  } catch (e) {
+    swallow.warn(`${logTag}:relate`, e);
+    return 0;
+  }
+}
+
 async function commitConcept(
   deps: CommitDeps,
   data: CommitConceptData,
@@ -303,6 +355,39 @@ async function commitConcept(
       swallow(`${logTag}:related`, e);
       edges = before;
     }
+  }
+
+  // 6. Auto-seal: concept → project (`relevant_to`). v0.7.78 expansion.
+  //    Previously this edge was hand-wired by callers (concept-extract.ts,
+  //    memory-daemon.ts, pending-work.ts gem flow); v0.7.78 centralizes it
+  //    here so callers can't omit it. Dedup pre-check inside linkToProject.
+  if (data.projectId && data.linkProject !== false) {
+    edges += await linkToProject(deps, conceptId, "concept", data.projectId);
+  }
+
+  // 6b. Auto-seal: concept → task|artifact|session (`derived_from`) when
+  //     caller provides derivedFromTargetId. Mirrors the v0.7.74 task-or-
+  //     session fallback pattern from CommitSubagentData — the caller
+  //     decides which target makes sense for their route. Hand-wired today
+  //     in concept-extract.ts:174 (→task) and pending-work.ts gem flow
+  //     (→artifact); v0.7.78 collapses both into this auto-seal.
+  if (data.derivedFromTargetId) {
+    try {
+      await store.relate(conceptId, "derived_from", data.derivedFromTargetId);
+      edges++;
+    } catch (e) {
+      swallow.warn(`${logTag}:derived_from`, e);
+    }
+  }
+
+  // 7. SOFT tightening (v0.7.78): warn when a concept is written with no
+  //    sourceId+edgeName AND no projectId. Such concepts are floating
+  //    islands — retrievable by vector search but unreachable via the
+  //    schema-defined provenance / project paths. The warn is observable
+  //    in logs; HARD enforcement (TypeScript discriminated union) is
+  //    deferred until the gem migration has shipped one clean release.
+  if (!data.sourceId && !data.projectId) {
+    log.warn(`${logTag}: orphan_concept created with no provenance (sourceId/edgeName) and no projectId. name="${data.name.slice(0, 80)}"`);
   }
 
   return { id: conceptId, edges };
@@ -400,6 +485,13 @@ async function commitArtifact(
       swallow(`${logTag}:artifact_mentions`, e);
       edges = before;
     }
+  }
+
+  // Auto-seal: artifact → project (`used_in`). v0.7.78 expansion. Mirrors
+  // commitConcept's relevant_to wiring; same dedup pre-check inside
+  // linkToProject.
+  if (artifactId && data.projectId && data.linkProject !== false) {
+    edges += await linkToProject(deps, artifactId, "artifact", data.projectId);
   }
 
   return { id: artifactId, edges };
