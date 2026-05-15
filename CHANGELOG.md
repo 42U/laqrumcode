@@ -4,6 +4,25 @@ All notable changes to KongCode are documented here. The 0.7.x series introduced
 
 ## [Unreleased]
 
+## [0.7.76] — 2026-05-15
+
+Iteration 1 of 6 in the auto-sealing campaign: route every graph edge write through `commitKnowledge` so callers cannot omit schema-required edges. Each release covers one or two kinds; v0.7.81 closes with a build-time lint guard that fails CI on any new `store.relate(...)` outside the canonical write paths.
+
+### Added
+- **`reflection` kind in `commitKnowledge`** (`src/engine/commit.ts`). Reflection writes auto-seal the `reflects_on` edge atomically with the row CREATE. `surrealSessionId` is REQUIRED on `CommitReflectionData` — without it, the helper throws rather than producing an orphan row, closing the orphan-reflection bug class structurally at the API boundary (the bug class that drove v0.7.73's prompt fix and v0.7.74's cleanup of 17 orphan rows). The v0.7.73 regex content filter is preserved.
+- **`src/engine/reflection-filter.ts`** (new module): centralised filter regex set (`REFLECTION_ANTI_THOROUGHNESS_RE`, `REFLECTION_SAVE_SUMMARY_RE`, `REFLECTION_WORK_COMPLETION_RE`) plus a `classifyReflection(text)` helper returning `"drop" | "downgrade" | "ok"`. Extracted from `pending-work.ts` so any future writer can share one source of truth.
+- **`test/commit-reflection.test.ts`** (new file): 7 cases covering happy path, anti-thoroughness drop, save-summary downgrade, cosine dedup skip, missing-`surrealSessionId` throw, `applyContentFilter` opt-out, `dedupCosineThreshold: null` opt-out.
+
+### Changed
+- `src/tools/pending-work.ts:commitReflection` is now a thin wrapper that calls `commitKnowledge({ kind: "reflection", ... })`. ~50 LOC of inline regex constants, embed, dedup, CREATE, and relate logic deleted from the file. Skip-on-missing-`surreal_session_id` semantics preserved.
+
+### Removed (dist hygiene)
+- `dist/daemon/heuristic-drain.{js,d.ts}` — stale build artifacts retained from before v0.7.74 deleted their source. The running daemon does not import them; cleanup keeps the dist tree consistent with src.
+
+### Verified
+- `npm run build` clean.
+- `npm test` 962/962 passing across 58 test files (up from 955/955 / 57; +7 new commit-reflection tests). The new test suite verifies that orphan writes are impossible from the API boundary.
+
 ## [0.7.75] — 2026-05-15
 
 ### Fixed
