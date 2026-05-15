@@ -293,3 +293,29 @@ export interface CommitResult {
     }>;
 }
 export declare function commitKnowledge(deps: CommitDeps, data: CommitData): Promise<CommitResult>;
+/**
+ * Auto-seal the concept→project (`relevant_to`) or artifact→project
+ * (`used_in`) edge for a freshly-written or existing row.
+ *
+ * SurrealQL has no UNIQUE on `relevant_to` or `used_in`, and `store.relate()`
+ * is a bare RELATE with no idempotency guard. On this workstation pre-v0.7.78
+ * the top duplicate count was 139 edges on a single (concept, project) pair
+ * because a hand-wired writer hit the same source-project pair every turn.
+ * Pre-check via SELECT before RELATE collapses the writer's intent to "at
+ * most one edge per (source, project) pair from this code path." It does
+ * NOT clean up existing duplicates — that's a separate migration.
+ *
+ * Returns the number of edges added (0 if already present or on error,
+ * 1 if newly written) so callers can compose with `edges +=`.
+ */
+/**
+ * Auto-seal an explicit concept→concept cross-link edge (broader / narrower
+ * / related_to). v0.7.81 added so the create_knowledge_gems flow at
+ * `pending-work.ts:linkConceptCrossLink` (gem cross-links between concepts
+ * created in the same call) can route through a canonical helper instead of
+ * hand-wiring store.relate directly. The edge is gated by the
+ * `VALID_GEM_EDGES` whitelist so callers can't accidentally write a
+ * non-concept-to-concept edge name. Returns 1 on success, 0 on failure or
+ * invalid edge.
+ */
+export declare function linkConceptCrossLink(deps: CommitDeps, fromId: string, toId: string, edge: "broader" | "narrower" | "related_to"): Promise<number>;

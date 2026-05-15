@@ -14,7 +14,6 @@ import type { EmbeddingService } from "./embeddings.js";
 import { swallow } from "./errors.js";
 import { assertRecordId } from "./surreal.js";
 import { linkConceptHierarchy, linkToRelevantConcepts } from "./concept-links.js";
-import { linkSupersedesEdges } from "./supersedes.js";
 import { supersedeOldSkills } from "./skills.js";
 import { commitKnowledge } from "./commit.js";
 import { stripStructuralTags } from "./sanitize.js";
@@ -202,32 +201,29 @@ export async function writeExtractionResults(
             : c.content;
           try { emb = await embeddings.embed(embeddingText); } catch (e) { swallow("daemon:embedConcept", e); }
         }
-        const conceptId = await store.upsertConcept(c.content, emb, `daemon:${sessionId}`, undefined, projectId);
+        // v0.7.81: migrated from upsertConcept + 3 hand-wired relates to a
+        // single commitKnowledge call. derivedFromTargetId encodes the
+        // 0.7.70 task-or-session fallback (taskId preferred, sessionId as
+        // backup). projectId auto-seals relevant_to via linkToProject.
+        // commitConcept also runs linkConceptHierarchy + linkToRelevantConcepts
+        // internally so we no longer call those here.
+        const targetForProvenance = taskId || sessionId || undefined;
+        if (!targetForProvenance) {
+          swallow.warn(
+            "daemon:concept:derived_from_skipped",
+            new Error(`taskId and sessionId both empty when extracting concept "${c.name}" — concept will lack derived_from edge`),
+          );
+        }
+        const { id: conceptId } = await commitKnowledge({ store, embeddings }, {
+          kind: "concept",
+          name: c.content,
+          source: `daemon:${sessionId}`,
+          projectId,
+          derivedFromTargetId: targetForProvenance,
+          precomputedVec: emb,
+        });
         if (conceptId) {
           extractedConceptIds.push(conceptId);
-          await linkConceptHierarchy(conceptId, c.name, store, embeddings, "daemon:concept", emb);
-          if (taskId) {
-            await store.relate(conceptId, "derived_from", taskId)
-              .catch(e => swallow("daemon:concept:derived_from", e));
-          } else if (sessionId) {
-            // 0.7.70: when no task is in scope (e.g. coalesced extraction
-            // queued before a task was attached), fall back to the session
-            // for provenance. Better some traceability than none — keeps
-            // concepts out of the "orphan" bucket in introspect. The session
-            // row is always knowable here since we created it upstream.
-            await store.relate(conceptId, "derived_from", sessionId)
-              .catch(e => swallow("daemon:concept:derived_from_session", e));
-          } else {
-            // Both task and session missing — truly orphan, log loudly.
-            swallow.warn(
-              "daemon:concept:derived_from_skipped",
-              new Error(`taskId and sessionId both empty when extracting concept "${c.name}" — concept will lack derived_from edge`),
-            );
-          }
-          if (projectId) {
-            await store.relate(conceptId, "relevant_to", projectId)
-              .catch(e => swallow("daemon:concept:relevant_to", e));
-          }
         }
       } catch (e) {
         swallow.warn("daemon:upsertConcept", e);
@@ -356,15 +352,18 @@ export async function writeExtractionResults(
         if (embeddings.isAvailable()) {
           try { emb = await embeddings.embed(`${a.path} ${desc}`); } catch (e) { swallow("daemon:embedArtifact", e); }
         }
-        const artId = await store.createArtifact(a.path, a.action ?? "modified", desc, emb, projectId);
-        if (artId) {
-          await linkToRelevantConcepts(artId, "artifact_mentions", `${a.path} ${desc}`, store, embeddings, "daemon:artifact:artifact_mentions", 5, 0.65, emb);
-          // used_in: artifact → project
-          if (projectId) {
-            await store.relate(artId, "used_in", projectId)
-              .catch(e => swallow("daemon:artifact:used_in", e));
-          }
-        }
+        // v0.7.81: migrated from createArtifact + linkToRelevantConcepts +
+        // hand-wired used_in to a single commitKnowledge({kind:"artifact"})
+        // call. commitArtifact runs artifact_mentions linking internally and
+        // auto-seals used_in via linkToProject when projectId is set.
+        await commitKnowledge({ store, embeddings }, {
+          kind: "artifact",
+          path: a.path,
+          type: a.action ?? "modified",
+          description: desc,
+          precomputedVec: emb,
+          projectId,
+        });
       })());
     }
   }

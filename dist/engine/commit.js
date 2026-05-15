@@ -60,6 +60,31 @@ export async function commitKnowledge(deps, data) {
  * Returns the number of edges added (0 if already present or on error,
  * 1 if newly written) so callers can compose with `edges +=`.
  */
+/**
+ * Auto-seal an explicit concept→concept cross-link edge (broader / narrower
+ * / related_to). v0.7.81 added so the create_knowledge_gems flow at
+ * `pending-work.ts:linkConceptCrossLink` (gem cross-links between concepts
+ * created in the same call) can route through a canonical helper instead of
+ * hand-wiring store.relate directly. The edge is gated by the
+ * `VALID_GEM_EDGES` whitelist so callers can't accidentally write a
+ * non-concept-to-concept edge name. Returns 1 on success, 0 on failure or
+ * invalid edge.
+ */
+export async function linkConceptCrossLink(deps, fromId, toId, edge) {
+    const { store } = deps;
+    if (edge !== "broader" && edge !== "narrower" && edge !== "related_to") {
+        swallow.warn("commit:linkConceptCrossLink:invalid-edge", new Error(`unsupported edge "${edge}"`));
+        return 0;
+    }
+    try {
+        await store.relate(fromId, edge, toId);
+        return 1;
+    }
+    catch (e) {
+        swallow.warn("commit:linkConceptCrossLink:relate", e);
+        return 0;
+    }
+}
 async function linkToProject(deps, sourceId, sourceKind, projectId) {
     const { store } = deps;
     const edgeTable = sourceKind === "concept" ? "relevant_to" : "used_in";

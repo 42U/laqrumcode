@@ -16,12 +16,23 @@ import type { PriorExtractions } from "../src/engine/daemon-types.js";
 function mockStore() {
   return {
     isAvailable: () => true,
-    queryFirst: vi.fn(async () => [{ id: "skill:new1" }]),
+    queryFirst: vi.fn(async (sql?: string) => {
+      // v0.7.81: commitKnowledge auto-seal helpers (linkToProject,
+      // linkToRelevantConcepts) do SELECT-before-RELATE dedup pre-checks.
+      // Return [] for those so the relate path executes — otherwise the
+      // mock's default truthy return would short-circuit auto-seals and
+      // existing assertions about store.relate calls would silently fail.
+      if (typeof sql === "string" && /SELECT\s+id\s+FROM\s+(relevant_to|used_in|skill_uses_concept|about_concept|artifact_mentions|mentions)\b/i.test(sql)) {
+        return [];
+      }
+      return [{ id: "skill:new1" }];
+    }),
     queryExec: vi.fn(async () => {}),
     upsertConcept: vi.fn(async () => "concept:c1"),
     createMemory: vi.fn(async () => "memory:m1"),
     createMonologue: vi.fn(async () => "monologue:m1"),
     createArtifact: vi.fn(async () => "artifact:a1"),
+    clearReflectionCache: vi.fn(() => {}),
     relate: vi.fn(async () => {}),
   } as any;
 }

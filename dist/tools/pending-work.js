@@ -17,7 +17,7 @@ import { swallow } from "../engine/errors.js";
 import { clamp01 } from "../engine/math.js";
 import { log } from "../engine/log.js";
 import { stripStructuralTags } from "../engine/sanitize.js";
-import { commitKnowledge } from "../engine/commit.js";
+import { commitKnowledge, linkConceptCrossLink } from "../engine/commit.js";
 import { assertRecordId } from "../engine/surreal.js";
 // ── Helpers ──────────────────────────────────────────────────────────────────
 /**
@@ -664,16 +664,21 @@ export async function handleCreateKnowledgeGems(state, session, args) {
                 });
                 continue;
             }
-            try {
-                await store.relate(fromId, link.edge, toId);
+            // v0.7.81: migrated from hand-wired store.relate to linkConceptCrossLink
+            // helper in commit.ts so this writer lives behind the canonical
+            // write-path module. VALID_GEM_EDGES has already gated link.edge to
+            // broader|narrower|related_to so the helper's internal whitelist is a
+            // redundant safety check.
+            const added = await linkConceptCrossLink({ store, embeddings }, fromId, toId, link.edge);
+            if (added > 0) {
                 edgesCreated++;
             }
-            catch (e) {
+            else {
                 edgeFailures.push({
                     from: link.from,
                     to: link.to,
                     edge: link.edge,
-                    reason: `relate failed: ${serializeError(e)}`,
+                    reason: "linkConceptCrossLink returned 0 (see daemon log for swallow.warn detail)",
                 });
             }
         }

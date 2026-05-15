@@ -19,8 +19,6 @@
 
 import type { GlobalPluginState, SessionState } from "../engine/state.js";
 import { commitKnowledge } from "../engine/commit.js";
-import { linkSupersedesEdges } from "../engine/supersedes.js";
-import { swallow } from "../engine/errors.js";
 
 export async function handleSupersede(
   state: GlobalPluginState,
@@ -34,38 +32,27 @@ export async function handleSupersede(
     return { content: [{ type: "text", text: "Error: both `old_text` (stale belief) and `new_text` (correction) are required." }] };
   }
 
-  const { store, embeddings } = state;
   const importance = typeof args.importance === "number" ? args.importance : 9;
 
-  // 1. Write the correction as a memory node via commitKnowledge so it
-  //    auto-seals about_concept edges to the concept graph.
-  const { id: correctionMemId } = await commitKnowledge(
-    { store, embeddings },
-    {
-      kind: "memory",
-      text: `CORRECTION: ${newText} (replaces: ${oldText})`,
-      importance,
-      category: "correction",
-      sessionId: session.sessionId,
-    },
-  );
+  // v0.7.81: migrated to commitKnowledge({ kind: "correction" }) — one
+  // helper now writes the correction memory, resolves the target by
+  // cosine on oldText, seals the supersedes edge, and runs decay. The
+  // previous two-step (commitKnowledge memory + linkSupersedesEdges) is
+  // retired along with src/engine/supersedes.ts in this release.
+  const result = await commitKnowledge(state, {
+    kind: "correction",
+    text: `CORRECTION: ${newText} (replaces: ${oldText})`,
+    oldText,
+    importance,
+    sessionId: session.sessionId,
+  });
 
+  const correctionMemId = result.id;
   if (!correctionMemId) {
     return { content: [{ type: "text", text: "Error: failed to write correction memory." }] };
   }
 
-  // 2. Link supersedes edges from correction memory → stale concepts.
-  //    linkSupersedesEdges handles the embedding search + stability decay.
-  let superseded = 0;
-  try {
-    superseded = await linkSupersedesEdges(
-      correctionMemId, oldText, newText,
-      store, embeddings,
-    );
-  } catch (e) {
-    swallow("supersede:linkEdges", e);
-  }
-
+  const superseded = result.supersededIds?.length ?? 0;
   return {
     content: [{
       type: "text",
