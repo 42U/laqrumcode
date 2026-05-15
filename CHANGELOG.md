@@ -4,6 +4,21 @@ All notable changes to KongCode are documented here. The 0.7.x series introduced
 
 ## [Unreleased]
 
+## [0.7.83] — 2026-05-15
+
+### Added (backup skills)
+Three new skills for exporting the kongcode database, each tuned to a different destination shape. The agent (or the user via slash command) picks whichever matches the receiving system.
+
+- **`kongcode-backup-native`** — invokes `surreal export` against the kongcode DB for lossless SurrealDB-to-SurrealDB transfer. Preserves vector embeddings + edge provenance + schema. One-command operation, no script required.
+- **`kongcode-backup-jsonl`** — dumps every table to one `.jsonl` file per table under a timestamped output directory. For non-SurrealDB targets (pgvector, Neo4j, OpenSearch, custom stores). Script at `scripts/backup-jsonl.mjs`. Smoke-tested against the live DB.
+- **`kongcode-backup-semantic`** — exports only the 9 knowledge node tables (concept, memory, skill, reflection, artifact, monologue, causal_chain, soul, identity_chunk) and 12 knowledge edges (mentions, about_concept, artifact_mentions, broader, narrower, related_to, derived_from, relevant_to, used_in, supersedes, skill_from_task, skill_uses_concept). Excludes transcripts (`turn`), retrieval telemetry (`retrieval_outcome`), orchestrator metrics, and runtime caches. Script at `scripts/backup-semantic.mjs`. Live smoke-test on this workstation exported 234,088 rows + an `IMPORT.md` guide for the receiving system.
+
+Each script reads env-var overrides for source DB (SURREAL_URL/USER/PASS/NS/DB) and output directory (KONGCODE_BACKUP_DIR). Each emits a `metadata.json` with per-table row counts, timestamp, source DB, and (for semantic) the embedding-model spec.
+
+### Known follow-up
+- `backup-semantic.mjs`'s `collectProjectRefs` helper uses SurrealQL UNION which doesn't return the expected result shape; in the smoke test it reported 0 project ids referenced when 9523 relevant_to + 101 used_in edges exist. Functional impact: `project_ids` in metadata.json is always empty in this release. Workaround: receiving systems map projects manually. Fix planned for v0.7.84.
+- The hardcoded `node_modules/surrealdb` import paths in both scripts assume the plugin is checked out at `/home/zero/voidorigin/kongcode`. Plugin installs at other paths would break the scripts. Matches the existing pattern in `migrate-orphan-reflections.mjs` etc.; portability fix planned as a separate sweep.
+
 ## [0.7.82] — 2026-05-15
 
 ### Fixed
