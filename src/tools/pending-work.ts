@@ -130,18 +130,26 @@ export async function handleFetchPendingWork(
 
   try {
     // Reset stale items stuck in "processing" > 10 min. The compound UNIQUE on
-    // (session_id, work_type, status) means we can't blindly UPDATE status →
-    // "pending" — if a sibling pending row already exists for the same
-    // (session_id, work_type), the UPDATE collides and the stuck row stays
-    // "processing" forever (test-0768 soul_evolve hit this exact bug). So:
-    //  1. find stuck rows
-    //  2. for each, check for a sibling pending row → DELETE the stuck duplicate
-    //     (it'll naturally re-queue) or UPDATE to pending if none exists.
+    // (session_id, work_type, status) means we can't blindly UPDATE status to
+    // "pending" because that revives a duplicate when a sibling row for the
+    // same (session_id, work_type) already exists in ANY status. A revived
+    // row would later collide at commit_work_results time when it transitions
+    // to "completed" (or "failed") and the sibling terminal row already
+    // occupies that triple. Canonical symptom 2026-05-15: fetch_pending_work
+    // returning "Database index pw_session_worktype_status_unique already
+    // contains [262f8e79-..., soul_evolve, completed]" on every call, blocking
+    // the entire claim path. So:
+    //   1. find stuck rows
+    //   2. for each, check for ANY sibling row (excluding self) → DELETE the
+    //      stuck row if any exists; otherwise UPDATE to pending so a sole
+    //      stuck row can still recover. Pre-0.7.75 this check only matched
+    //      sibling "pending" rows, which left completed/failed-sibling cases
+    //      as future collision bombs at commit time.
     try {
-      // ORDER BY created_at ASC: without this, the sibling-pending SELECT
-      // below picks at random. Under multi-stuck conditions that can DELETE
-      // the wrong row. Stable ordering ensures the oldest stuck row is
-      // recovered first, matching FIFO intuition.
+      // ORDER BY created_at ASC: without this, the sibling SELECT below
+      // picks at random. Under multi-stuck conditions that can DELETE the
+      // wrong row. Stable ordering ensures the oldest stuck row is recovered
+      // first, matching FIFO intuition.
       const stuck = await store.queryFirst<{ id: string; session_id: string; work_type: string }>(
         `SELECT id, session_id, work_type FROM pending_work
            WHERE status = "processing" AND created_at < time::now() - 10m
@@ -150,16 +158,16 @@ export async function handleFetchPendingWork(
       for (const row of stuck as { id: string; session_id: string; work_type: string }[]) {
         try {
           assertRecordId(String(row.id));
-          // BEGIN/COMMIT around the (sibling-check + DELETE-or-UPDATE) so
-          // the check-and-act is atomic. Without the transaction, a sibling
-          // pending row could be CREATEd between our SELECT and our UPDATE,
-          // causing the UPDATE to leave two pending rows for the same
-          // (session_id, work_type) — which then collides with the schema
-          // UNIQUE constraint on the next claim attempt.
+          // BEGIN/COMMIT around the (sibling-check + DELETE-or-UPDATE) so the
+          // check-and-act is atomic. The sibling SELECT is unfiltered by
+          // status (widened in v0.7.75 from "pending"-only): any other row
+          // for the same (session_id, work_type) triggers DELETE of the
+          // stuck row. AND id != ${row.id} excludes self from the check so
+          // we don't see ourselves as our own sibling.
           await store.queryExec(
             `BEGIN TRANSACTION;
              LET $siblings = (SELECT id FROM pending_work
-               WHERE session_id = $sid AND work_type = $wt AND status = "pending" LIMIT 1);
+               WHERE session_id = $sid AND work_type = $wt AND id != ${row.id} LIMIT 1);
              IF array::len($siblings) > 0 THEN
                DELETE ${row.id}
              ELSE
@@ -210,6 +218,47 @@ export async function handleFetchPendingWork(
   }
 }
 
+/**
+ * Atomically transition a pending_work row to a terminal status.
+ *
+ * The compound UNIQUE index pw_session_worktype_status_unique on
+ * (session_id, work_type, status) means a naive UPDATE-to-terminal collides
+ * when a sibling row already occupies the target triple. Canonical
+ * pre-v0.7.75 symptom: fetch_pending_work returns "Database index
+ * pw_session_worktype_status_unique already contains
+ * [..., soul_evolve, completed]" when an early-exit UPDATE...SET
+ * status="completed" runs against a row whose (session, work_type) already
+ * has a completed sibling. Resolution: pre-check for a sibling row at
+ * (session_id, work_type, target_status) excluding self. If one exists,
+ * DELETE this row (the sibling is canonical). Otherwise UPDATE to terminal.
+ *
+ * Use this for every UPDATE-to-terminal call site (early-exits in
+ * buildWorkPayload and the success/failure paths in handleCommitWorkResults).
+ * The stale-recovery transaction in handleFetchPendingWork above uses the
+ * same pattern for stuck-processing rows.
+ */
+async function markTerminal(
+  state: GlobalPluginState,
+  workId: string,
+  sessionId: string,
+  workType: string,
+  status: "completed" | "failed",
+): Promise<void> {
+  assertRecordId(workId);
+  await state.store.queryExec(
+    `BEGIN TRANSACTION;
+     LET $siblings = (SELECT id FROM pending_work
+       WHERE session_id = $sid AND work_type = $wt AND status = $st AND id != ${workId} LIMIT 1);
+     IF array::len($siblings) > 0 THEN
+       DELETE ${workId}
+     ELSE
+       UPDATE ${workId} SET status = $st, completed_at = time::now()
+     END;
+     COMMIT TRANSACTION;`,
+    { sid: sessionId, wt: workType, st: status },
+  );
+}
+
 async function buildWorkPayload(
   item: PendingWorkItem,
   state: GlobalPluginState,
@@ -251,7 +300,7 @@ async function buildWorkPayload(
       const eligible = groups.filter(g => g.cnt >= 3);
       if (eligible.length === 0) {
         // No chains to graduate — mark complete immediately
-        assertRecordId(item.id); await store.queryExec(`UPDATE ${item.id} SET status = "completed", completed_at = time::now()`);
+        await markTerminal(state, item.id, item.session_id, item.work_type, "completed");
         return { work_id: item.id, work_type: "causal_graduate", empty: true, message: "No causal chains ready for graduation. Already marked complete." };
       }
       return {
@@ -266,7 +315,7 @@ async function buildWorkPayload(
     case "soul_generate": {
       const report = await checkGraduation(store);
       if (!report.ready) {
-        assertRecordId(item.id); await store.queryExec(`UPDATE ${item.id} SET status = "completed", completed_at = time::now()`);
+        await markTerminal(state, item.id, item.session_id, item.work_type, "completed");
         return { work_id: item.id, work_type: "soul_generate", empty: true, message: "Not ready for graduation yet. Already marked complete." };
       }
       const [reflections, causalChains, monologues] = await Promise.all([
@@ -296,7 +345,7 @@ async function buildWorkPayload(
     case "soul_evolve": {
       const soul = await getSoul(store);
       if (!soul) {
-        assertRecordId(item.id); await store.queryExec(`UPDATE ${item.id} SET status = "completed", completed_at = time::now()`);
+        await markTerminal(state, item.id, item.session_id, item.work_type, "completed");
         return { work_id: item.id, work_type: "soul_evolve", empty: true, message: "No soul exists yet. Already marked complete." };
       }
       const [reflections, causalChains, monologues] = await Promise.all([
@@ -305,7 +354,7 @@ async function buildWorkPayload(
         store.queryFirst<{ content: string }>(`SELECT content FROM monologue WHERE timestamp > $since ORDER BY timestamp DESC LIMIT 10`, { since: soul.updated_at }).catch(() => []),
       ]);
       if (reflections.length === 0 && causalChains.length === 0 && monologues.length === 0) {
-        assertRecordId(item.id); await store.queryExec(`UPDATE ${item.id} SET status = "completed", completed_at = time::now()`);
+        await markTerminal(state, item.id, item.session_id, item.work_type, "completed");
         return { work_id: item.id, work_type: "soul_evolve", empty: true, message: "No new experience since last soul update. Already marked complete." };
       }
       return {
@@ -354,19 +403,20 @@ export async function handleCommitWorkResults(
 
   try {
     const outcome = await commitResults(item, results, state);
-    // Mark completed (workId already validated above)
-    await store.queryExec(
-      `UPDATE ${workId} SET status = "completed", completed_at = time::now()`,
-    );
+    // Mark completed. Uses markTerminal so a sibling completed row for the
+    // same (session, work_type) doesn't collide on pw_session_worktype_status_unique;
+    // in that case this row is DELETEd instead.
+    await markTerminal(state, workId, item.session_id, item.work_type, "completed");
     log.info(`[pending_work] Completed ${item.work_type} (${workId})`);
     return text(JSON.stringify({ success: true, work_type: item.work_type, ...outcome }));
   } catch (e) {
-    // Mark failed (workId already validated above). If THIS update also fails
+    // Mark failed. Uses markTerminal so a sibling failed row for the same
+    // (session, work_type) doesn't collide on pw_session_worktype_status_unique;
+    // in that case this row is DELETEd instead. If markTerminal itself fails
     // (e.g. DB unreachable), the row stays in "processing" until stale-recovery
     // catches it. Surface the failure to logs so it's not silently lost.
-    await store.queryExec(
-      `UPDATE ${workId} SET status = "failed", completed_at = time::now()`,
-    ).catch(e => swallow.warn("pending-work:mark-failed", e));
+    await markTerminal(state, workId, item.session_id, item.work_type, "failed")
+      .catch(e => swallow.warn("pending-work:mark-failed", e));
     log.error(`[pending_work] Failed ${item.work_type} (${workId}):`, e);
     return text(JSON.stringify({ success: false, error: serializeError(e) }));
   }
