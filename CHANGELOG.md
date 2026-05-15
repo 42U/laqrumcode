@@ -4,6 +4,29 @@ All notable changes to KongCode are documented here. The 0.7.x series introduced
 
 ## [Unreleased]
 
+## [0.7.78] — 2026-05-15
+
+Iteration 3 of 6 in the auto-sealing campaign.
+
+### Added
+- **`linkToProject` helper** in `src/engine/commit.ts`: SELECT-before-RELATE dedup pre-check for the project edge, returns the number of edges added (0 if already present or on error, 1 if newly written). Addresses the 139-duplicate-edge case the v0.7.78 Stage 1 audit found on one (concept, project) pair where a hand-wired writer was hitting RELATE every turn.
+- **`linkProject?` knob on `CommitConceptData` and `CommitArtifactData`** (default true). When `projectId` is set, commitKnowledge now auto-seals `relevant_to` (concept→project) or `used_in` (artifact→project) via linkToProject. Caller can opt out for tests or retrofit-without-edge.
+- **`derivedFromTargetId?` on `CommitConceptData`**: optional outgoing `derived_from` target (task | artifact | session record id per schema). When set, auto-seals `concept → derived_from → derivedFromTargetId`. Distinct from `sourceId+edgeName` which wires an INCOMING edge. Mirrors the v0.7.74 task-or-session pattern from CommitSubagentData — caller picks the target.
+- **SOFT tightening warn in `commitConcept`**: when a concept is written with no `sourceId+edgeName` and no `projectId`, emit `log.warn` with the concept name. Observable in logs without breaking existing callers; HARD enforcement (TypeScript discriminated union) deferred until the gem migration ships one clean release.
+
+### Changed (caller migrations — 3 hand-wires retired)
+- **`src/engine/concept-extract.ts:170-180`**: deleted the manual `concept → derived_from → task` and `concept → relevant_to → project` writes. Both are now auto-sealed by commitKnowledge via the new `derivedFromTargetId` field and the `projectId` → linkToProject path.
+- **`src/tools/pending-work.ts:726-749` (gem flow)**: deleted the manual `concept → derived_from → artifact` write at `pending-work.ts:746`. The edge is now auto-sealed via `derivedFromTargetId: artifactId` on the commitKnowledge call.
+
+### Out of scope (deferred to follow-up release)
+- **`src/tools/pending-work.ts:821` (gem cross-link edges)** — concept→concept broader/narrower/related_to writes inside `create_knowledge_gems`. Requires a `crossLinks: { from, to, edge }[]` parameter or a small `linkConceptCrossLink` helper, both bigger design moves than v0.7.78 scope.
+- **`src/engine/memory-daemon.ts:204/227/358/363`** — daemon-path hand-wires. Deferred per Stage 2 risk register; combining daemon-path migration with commitKnowledge expansion concentrates too much risk in one release.
+- **Cleanup of the existing 9520 `relevant_to` rows + the 139-duplicate-on-one-pair case** — separate migration script, not a code change.
+
+### Verified
+- `npm run build` clean.
+- `npm test` 968/968 passing across 58 test files (unchanged — additive expansion with no test regressions; existing tests don't pass projectId or derivedFromTargetId so the new auto-seals are no-ops on those mocks).
+
 ## [0.7.77] — 2026-05-15
 
 Iteration 2 of 6 in the auto-sealing campaign.
