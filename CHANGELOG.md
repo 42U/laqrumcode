@@ -4,6 +4,15 @@ All notable changes to KongCode are documented here. The 0.7.x series introduced
 
 ## [Unreleased]
 
+## [0.7.75] — 2026-05-15
+
+### Fixed
+- **`fetch_pending_work` no longer surfaces UNIQUE violations from sibling rows that already occupy the target triple (`src/tools/pending-work.ts`).** The compound UNIQUE index `pw_session_worktype_status_unique` on `(session_id, work_type, status)` forbids two rows from sharing the same triple. Pre-fix, every UPDATE that transitioned a row to a terminal status (`completed`/`failed`) collided when a sibling row for the same `(session_id, work_type)` already occupied that triple. The canonical symptom was `fetch_pending_work` returning `"Database index pw_session_worktype_status_unique already contains [..., soul_evolve, completed]"` on every call, blocking the entire claim path. Stage 4 verifier confirmed the original v0.7.75 stale-recovery widening did not resolve the immediate symptom because the failing path was actually `buildWorkPayload`'s early-exit `UPDATE...SET status="completed"`, not stale-recovery. This release covers ALL eight call sites in one helper:
+  - New `markTerminal(state, workId, sessionId, workType, status)` helper runs an atomic transaction: if a sibling row exists at `(sessionId, workType, status)` excluding self, DELETE this row; otherwise UPDATE to terminal as normal.
+  - Replaced the five inline early-exit UPDATEs in `buildWorkPayload` (causal_graduate, soul_generate, two soul_evolve branches, default unknown-type) with `markTerminal` calls.
+  - Replaced the success and failure UPDATEs in `handleCommitWorkResults` with `markTerminal` calls.
+  - Widened the stale-recovery transaction's sibling SELECT to match ANY row for the same `(session_id, work_type)` excluding self (rather than only `status = "pending"`), so a stuck `processing` row whose `(session_id, work_type)` had a terminal-status sibling is treated as a duplicate and DELETEd rather than revived to pending and then colliding at the next commit_work_results call.
+
 ## [0.7.74] — 2026-05-15
 
 Graph-integrity sweep: 4-stage QA waterfall (AUDITOR / VALIDATOR / IMPLEMENTER / VERIFIER) found and remediated ~55 half-wired graph surface issues. Live DB on the dev workstation: 17 orphan reflections healed/deleted (now 0), `tool_result_of` and `summarizes` tables removed (the latter held 55 rows from a pre-fork ancestor with no writer in repo history), ~470 LOC of dead source + ~155 LOC of dead test code deleted.
