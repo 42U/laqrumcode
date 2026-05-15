@@ -4,6 +4,27 @@ All notable changes to KongCode are documented here. The 0.7.x series introduced
 
 ## [Unreleased]
 
+## [0.7.80] — 2026-05-15
+
+Iteration 5 of 6 in the auto-sealing campaign. Foundation lands now; caller migration of the MCP `supersede` tool and retirement of `src/engine/supersedes.ts`'s hand-wires move to v0.7.81 alongside the lint guard.
+
+### Added
+- **`correction` kind in `commitKnowledge`** (`src/engine/commit.ts`). A correction write composes `commitMemory` for the new (correct) text, then resolves the OLD (incorrect) target by cosine match on `oldText` (or accepts a direct `oldId` for skip-resolution), and atomically seals the `supersedes` edge with decay logic baked in — concept stability decay via `STABILITY_DECAY_FACTOR=0.4` floored at `0.15`, memory `status='superseded'` flip. Returns a wider `CommitResult` carrying `supersededIds[]` and `decayApplied[]` (per-target `oldStability`/`newStability`).
+- **`CommitCorrectionData` interface**: required `text`/`importance`/`sessionId`; target via `oldId` (prefix-inferred kind) OR `oldText` (cosine-resolved); optional `oldKind` hint, `embeddingText`/`projectId`/`precomputedVec`/`sourceTurnId`; three linking knobs `linkSupersedes`/`runDecay`/`linkConcepts` default true.
+- **`CommitResult` extended** with optional `supersededIds?: string[]` and `decayApplied?: Array<{id, oldStability, newStability}>` populated by correction writes (undefined for other kinds; non-breaking for existing callers).
+- **Structural fix for the 7 self-edge bug** (`supersedes WHERE in == out` count was 7 historically): resolution candidate query excludes the correction memory id explicitly, AND a belt-and-suspenders id-equality check sits in the relate loop before any `store.relate(memoryId, "supersedes", target.id)` call.
+
+### Deferred to v0.7.81 (final-sweep release)
+- Migration of `src/tools/supersede.ts` (the MCP tool) to call `commitKnowledge({ kind: "correction" })`.
+- Migration of `record_finding(finding_type="correction")` to the same.
+- Retirement of `src/engine/supersedes.ts` (deletes 2 hand-wired `store.relate(_, "supersedes", _)` sites at `supersedes.ts:97` and `:135`).
+- Cleanup of the orphan import at `memory-daemon.ts:17` (`linkSupersedesEdges` imported but never called).
+- Cleanup of the 7 existing self-edge rows in the live DB (separate one-off DELETE; not a code change).
+
+### Verified
+- `npm run build` clean.
+- `npm test` 968/968 passing across 58 test files (unchanged; correction kind is additive — no existing test calls commitKnowledge with `kind: "correction"` yet).
+
 ## [0.7.79] — 2026-05-15
 
 Iteration 4 of 6 in the auto-sealing campaign.
