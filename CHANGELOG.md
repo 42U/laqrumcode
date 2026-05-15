@@ -4,6 +4,42 @@ All notable changes to KongCode are documented here. The 0.7.x series introduced
 
 ## [Unreleased]
 
+## [0.7.74] — 2026-05-15
+
+Graph-integrity sweep: 4-stage QA waterfall (AUDITOR / VALIDATOR / IMPLEMENTER / VERIFIER) found and remediated ~55 half-wired graph surface issues. Live DB on the dev workstation: 17 orphan reflections healed/deleted (now 0), `tool_result_of` and `summarizes` tables removed (the latter held 55 rows from a pre-fork ancestor with no writer in repo history), ~470 LOC of dead source + ~155 LOC of dead test code deleted.
+
+### Fixed
+- **Reflection orphans (`src/daemon/heuristic-drain.ts:processShortReflection`).** The writer created `reflection` rows but never wrote the schema-required `reflects_on` edge (`schema.surql:393` declares `RELATION IN reflection OUT session`). The writer was also dead code: commit `cab768f` removed the matching enqueuer for `work_type='reflection'` when the coalesced_extraction path replaced it. Deleted the file. Created `scripts/migrate-orphan-reflections.mjs` which healed 6 orphans by resolving `session.kc_session_id = reflection.session_id` and deleted 11 unrecoverable rows. Final reflection orphan count: 0.
+- **Subagent provenance fallback (`src/hook-handlers/pre-tool-use.ts`).** Now writes `derived_from -> session` when `taskId` is empty, using the 0.7.70 schema widening (`derived_from IN concept|subagent OUT task|artifact|session`). Previously, taskless subagents had no provenance edge. New swallow.warn tag: `preToolUse:subagent:derived_from_session_fallback`.
+- **Bare `summarizes` RELATION removed (`schema.surql:339`).** Had no IN/OUT constraint; 55 live rows from a pre-fork ancestor existed but no writer was ever in repo history. Dropped the table, removed traversal-list references in `src/engine/surreal.ts` (VALID_EDGES + forwardEdgeList), deleted 55 legacy rows via `scripts/cleanup-summarizes-legacy.mjs`.
+
+### Removed (dead code)
+- `src/engine/hooks/after-tool-call.ts` (135 LOC) plus the `tool_result_of` RELATION from schema, its references in `src/engine/surreal.ts` (VALID_EDGES + forwardEdgeList), and the bootstrap blurb at `src/engine/cognitive-bootstrap.ts:76`. Handler was scaffolded ~14 months ago but never registered on the production hook bus; live `tool_result_of` count was 0.
+- `src/engine/hooks/subagent-lifecycle.ts` (179 LOC). OpenClaw-gateway transport that this plugin does not ship. Production subagent spawn path is `src/hook-handlers/pre-tool-use.ts:198-216`.
+- `src/daemon/heuristic-drain.ts` (159 LOC). Consumer for retired work_types `handoff_note` and `reflection`; enqueuers were removed in commit `cab768f` and the consumer was left behind. Replaced with a one-line gravestone comment in `src/daemon/auto-drain.ts`.
+- `case "skill_extract":` and `case "deferred_cleanup":` from both `buildWorkPayload` and `commitResults` switches in `src/tools/pending-work.ts`. Consumer-only — no enqueuer in repo history. Also dropped unused `buildSystemPrompt` import.
+- ~155 LOC of associated test code. Test count: 970 -> 955; all passing.
+
+### Added (schema typing)
+- `DEFINE FIELD identity_chunk.identity_version TYPE option<string>`. Was implicitly required by the UNIQUE compound index at `schema.surql:635` but had no DEFINE FIELD.
+- Seven typed fields on `subagent`: `agent_type`, `prompt_preview`, `parent_session_key`, `child_session_key`, `label` (`option<string>`); `prompt_length`, `tool_call_count` (`option<int>`). The table is SCHEMALESS so behaviour is unchanged; the win is documentation + `INFO FOR TABLE` coverage.
+- `DEFINE INDEX turn_timestamp_idx ON turn FIELDS timestamp` for the archive hot-path scan. Turn table at 2278 rows today and growing.
+
+### Removed (schema)
+- `DEFINE INDEX turn_tool_name_idx ON turn FIELDS tool_name`. No `WHERE tool_name = ...` query exists; projection-only usage does not benefit. Pure write overhead.
+
+### Changed
+- **`src/engine/edge-vocabulary.ts CANONICAL_EDGES` rewritten.** All 22 aspirational entries (`decomposes_into`, `mechanism_for`, `contrasts_with`, etc.) had zero usage in code. Replaced with the 26 real edges actually used (5-pillar relations, hierarchy, memory causality, evolution, cross-pillar, turn-level, skill, subagent, reflection), each with a one-line IN→OUT-shape description matching schema enforcement. `supersedes` description corrected to reflect schema-enforced shape (memory-anchored, not concept-to-concept).
+
+### Documented (no behaviour change)
+- UUID-vs-Thing-id identity convention comment block above `turn.session_id` in `schema.surql`, with the `session.kc_session_id` bridge field called out. Replicated at `subagent.parent_session_id`, `reflection.session_id`, `retrieval_outcome.session_id`.
+- Closure-criterion sentences appended to the three `OVERWRITE` blocks (`schema.surql:185, 213, 548`) so future maintainers know when each migration window can be safely demoted to `IF NOT EXISTS`.
+- Closure-criterion sentence appended to the concept-name legacy migration gate (`schema.surql:60-63`). The gate still finds 105 legacy rows on this dev install; it stays load-bearing until production installs report zero.
+- One-line contract comment at `src/engine/concept-links.ts:52` for `linkToRelevantConcepts`'s dynamic edge name parameter (used for `mentions`, `about_concept`, `artifact_mentions`, `skill_uses_concept` writes that bypass `grep -F "edgename"` discovery).
+
+### Known follow-up
+- `src/engine/cognitive-check.ts` is still in tree. The audit Stage 2 incorrectly claimed no callers; in fact `src/engine/graph-context.ts:15` uses `getPendingDirectives`, `clearPendingDirectives`, `getSessionContinuity`, `getSuppressedNodeIds` and `test/pure-functions.test.ts:15` has 4 active test blocks. Per the audit's own "fail loudly, do not guess-delete" rule, the implementer retained the file and flagged the deviation. A future cleanup could port the WeakMap state-accessor helpers into `state.ts` and `graph-context.ts`, then retire `cognitive-check.ts`.
+
 ## [0.7.73] — 2026-05-14
 
 ### Fixed
