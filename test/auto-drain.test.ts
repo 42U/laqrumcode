@@ -22,6 +22,7 @@ const {
   writeDaemonInterimMarker,
   writeChildMarker,
   cmdlineLooksLikeDrainer,
+  buildDrainEnv,
   SPENDING_PRUNE_THRESHOLD_BYTES,
 } = __testing;
 
@@ -813,5 +814,59 @@ describe("auto-drain: pruneStaleSpending", () => {
     pruneStaleSpending(tmp);
     expect(existsSync(spendingFilePath(tmp))).toBe(true);
     expect(readFileSync(spendingFilePath(tmp), "utf-8")).toBe("");
+  });
+});
+
+// Wave 2 Fix A1: drain subprocess must get a UNIQUE KONGCODE_SESSION_ID each
+// spawn so it never collides with the parent's (or a sibling drain's) entry
+// in the session cache. Inheriting the parent's value re-uses the parent's
+// SessionState — including its surrealSessionId race window — which then
+// surfaces downstream as "Invalid record ID format" on commit. Also: the
+// allowlist must include CLAUDE_PLUGIN_ROOT so the subprocess can find the
+// kongcode plugin.
+describe("auto-drain: buildDrainEnv (Wave 2 Fix A1)", () => {
+  const savedKongcode = process.env.KONGCODE_SESSION_ID;
+  const savedClaudePlugin = process.env.CLAUDE_PLUGIN_ROOT;
+  afterEach(() => {
+    if (savedKongcode === undefined) delete process.env.KONGCODE_SESSION_ID;
+    else process.env.KONGCODE_SESSION_ID = savedKongcode;
+    if (savedClaudePlugin === undefined) delete process.env.CLAUDE_PLUGIN_ROOT;
+    else process.env.CLAUDE_PLUGIN_ROOT = savedClaudePlugin;
+  });
+
+  it("always sets a non-empty KONGCODE_SESSION_ID even when parent has none", () => {
+    delete process.env.KONGCODE_SESSION_ID;
+    const env = buildDrainEnv();
+    expect(env.KONGCODE_SESSION_ID).toBeTruthy();
+    expect(typeof env.KONGCODE_SESSION_ID).toBe("string");
+    expect((env.KONGCODE_SESSION_ID as string).length).toBeGreaterThan(0);
+  });
+
+  it("OVERRIDES inherited KONGCODE_SESSION_ID from the parent (does not reuse)", () => {
+    process.env.KONGCODE_SESSION_ID = "parent-session-fixed";
+    const env = buildDrainEnv();
+    expect(env.KONGCODE_SESSION_ID).toBeTruthy();
+    expect(env.KONGCODE_SESSION_ID).not.toBe("parent-session-fixed");
+  });
+
+  it("generates a different KONGCODE_SESSION_ID on each call (no sibling collisions)", () => {
+    const a = buildDrainEnv().KONGCODE_SESSION_ID;
+    const b = buildDrainEnv().KONGCODE_SESSION_ID;
+    expect(a).toBeTruthy();
+    expect(b).toBeTruthy();
+    expect(a).not.toBe(b);
+  });
+
+  it("propagates CLAUDE_PLUGIN_ROOT to the drain subprocess (Wave 2 validator note)", () => {
+    process.env.CLAUDE_PLUGIN_ROOT = "/some/plugin/root";
+    const env = buildDrainEnv();
+    expect(env.CLAUDE_PLUGIN_ROOT).toBe("/some/plugin/root");
+  });
+
+  it("still propagates other allowed CLAUDE_* env vars", () => {
+    process.env.CLAUDE_CODE_ENTRYPOINT = "test-entrypoint";
+    const env = buildDrainEnv();
+    expect(env.CLAUDE_CODE_ENTRYPOINT).toBe("test-entrypoint");
+    delete process.env.CLAUDE_CODE_ENTRYPOINT;
   });
 });

@@ -122,37 +122,50 @@ export async function handlePreToolUse(state, payload) {
             // are auto-sealed together. UNIQUE-violation recovery on
             // (correlation_key, run_id) is internal to commitSubagent — caller
             // just trusts the returned id whether it's a new row or a sibling
-            // recovered from the TOCTOU race. Fire-and-forget per existing pattern.
-            (async () => {
-                try {
-                    const result = await commitKnowledge(state, {
-                        kind: "subagent",
-                        parent_session_id: session.sessionId,
-                        surrealSessionId: session.surrealSessionId,
-                        correlation_key: toolUseId,
-                        // Placeholder run_id = correlation_key; schema UNIQUE on run_id
-                        // collides when multiple rows share NONE. SubagentStop UPDATEs
-                        // run_id later if a real value shows up; otherwise the placeholder
-                        // stays — fine because correlation_key is already globally unique
-                        // per spawn.
-                        run_id: toolUseId,
-                        agent_type: subagentType,
-                        description,
-                        prompt_preview: prompt.slice(0, 500),
-                        prompt_length: prompt.length,
-                        outcome: "in_progress",
-                        tool_call_count: 0,
-                        taskId: session.taskId,
-                    });
-                    if (result.id) {
-                        session._activeSubagents.set(toolUseId, result.id);
-                        log.info(`[subagent] spawned: type=${subagentType} corr=${toolUseId.slice(0, 8)} edges=${result.edges}`);
-                    }
+            // recovered from the TOCTOU race.
+            //
+            // v0.7.78 Bug A validator: capture surrealSessionId into a const
+            // BEFORE any further work so the value that passed the guard above
+            // is the value we write. With the prior fire-and-forget IIFE the
+            // `session.surrealSessionId!` non-null assertion at the call site was
+            // re-read at await time, allowing the field to be cleared by a
+            // concurrent SessionEnd between guard and write (would crash on `!`
+            // for a nulled-out field).
+            //
+            // v0.7.78 Bug B validator: await this CREATE inline. The previous
+            // fire-and-forget IIFE raced against SubagentStop — the Stop hook's
+            // SELECT on correlation_key could fire before the CREATE landed,
+            // producing the spurious "orphan stop: no spawn row matched" rows.
+            // The await adds ~50ms to the hook return but eliminates the race.
+            const surrealSessionId = session.surrealSessionId;
+            try {
+                const result = await commitKnowledge(state, {
+                    kind: "subagent",
+                    parent_session_id: session.sessionId,
+                    surrealSessionId,
+                    correlation_key: toolUseId,
+                    // Placeholder run_id = correlation_key; schema UNIQUE on run_id
+                    // collides when multiple rows share NONE. SubagentStop UPDATEs
+                    // run_id later if a real value shows up; otherwise the placeholder
+                    // stays — fine because correlation_key is already globally unique
+                    // per spawn.
+                    run_id: toolUseId,
+                    agent_type: subagentType,
+                    description,
+                    prompt_preview: prompt.slice(0, 500),
+                    prompt_length: prompt.length,
+                    outcome: "in_progress",
+                    tool_call_count: 0,
+                    taskId: session.taskId,
+                });
+                if (result.id) {
+                    session._activeSubagents.set(toolUseId, result.id);
+                    log.info(`[subagent] spawned: type=${subagentType} corr=${toolUseId.slice(0, 8)} edges=${result.edges}`);
                 }
-                catch (e) {
-                    swallow.warn("preToolUse:subagent:create", e);
-                }
-            })();
+            }
+            catch (e) {
+                swallow.warn("preToolUse:subagent:create", e);
+            }
         }
     }
     return {};

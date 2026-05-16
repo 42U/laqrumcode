@@ -83,12 +83,13 @@ describe("handleSubagentStop", () => {
     );
   });
 
-  it("writes a bare orphan row when no stash and no DB match", async () => {
+  it("writes a bare orphan row when payload has tool_use_id but no stash and no DB match", async () => {
     const session = mockSession();
     const state = mockState(session, []); // fallback query returns []
 
     await handleSubagentStop(state, {
       session_id: session.sessionId,
+      tool_use_id: "tool-use-ghost",
       agent_type: "general-purpose",
       result: "some result text",
       outcome: "error",
@@ -106,6 +107,29 @@ describe("handleSubagentStop", () => {
         }),
       }),
     );
+  });
+
+  // v0.7.78 Bug B auditor: when SubagentStop fires with no correlation key
+  // at all (neither tool_use_id nor agent_id) the prior orphan-write path
+  // created a "correlation_key: orphan" row that collided with itself on
+  // every subsequent uncorrelated Stop. The fix returns cleanly with a
+  // debug log instead. This test pins that contract.
+  it("skips cleanly when no correlation key is present (no tool_use_id, no agent_id)", async () => {
+    const session = mockSession();
+    const state = mockState(session, []);
+
+    const result = await handleSubagentStop(state, {
+      session_id: session.sessionId,
+      agent_type: "general-purpose",
+      result: "some result text",
+      outcome: "error",
+    });
+
+    expect(result).toEqual({});
+    // No SELECT fallback — the early-return fires BEFORE the SELECT.
+    expect(state.store.queryFirst).not.toHaveBeenCalled();
+    // And critically: no orphan-row CREATE.
+    expect(state.store.queryExec).not.toHaveBeenCalled();
   });
 
   it("uses ?? coalesce for spawned_at to avoid time::unix(NONE)", async () => {
@@ -131,6 +155,99 @@ describe("handleSubagentStop", () => {
 
     const result = await handleSubagentStop(state, {
       session_id: session.sessionId,
+    });
+
+    expect(result).toEqual({});
+    expect(state.store.queryExec).not.toHaveBeenCalled();
+  });
+
+  // Wave 2: auto-drain internal subprocess agents (kongcode:memory-extractor
+  // and kongcode:memory-extractor-lite) live outside the PreToolUse →
+  // SubagentStop lifecycle. The daemon spawn()s them directly, so no
+  // spawn row ever exists. SubagentStop for these agent_types must be
+  // SILENTLY skipped — never an orphan-row write, never a warn-channel log.
+  it("silently skips stop events for kongcode:memory-extractor (auto-drain internal)", async () => {
+    const session = mockSession();
+    const state = mockState(session, []);
+
+    const result = await handleSubagentStop(state, {
+      session_id: session.sessionId,
+      tool_use_id: "tool-use-internal-drain",
+      agent_type: "kongcode:memory-extractor",
+      result: "extracted 7 gems",
+      outcome: "completed",
+    });
+
+    expect(result).toEqual({});
+    // No fallback SELECT and no orphan CREATE — internal drains aren't
+    // tracked in the subagent table at all.
+    expect(state.store.queryFirst).not.toHaveBeenCalled();
+    expect(state.store.queryExec).not.toHaveBeenCalled();
+  });
+
+  it("silently skips stop events for kongcode:memory-extractor-lite (auto-drain internal)", async () => {
+    const session = mockSession();
+    const state = mockState(session, []);
+
+    const result = await handleSubagentStop(state, {
+      session_id: session.sessionId,
+      tool_use_id: "tool-use-internal-drain-lite",
+      agent_type: "kongcode:memory-extractor-lite",
+      outcome: "completed",
+    });
+
+    expect(result).toEqual({});
+    expect(state.store.queryFirst).not.toHaveBeenCalled();
+    expect(state.store.queryExec).not.toHaveBeenCalled();
+  });
+
+  // Wave 3 fix: SubagentStop arrives from Claude Code with `agent_id` (a hex
+  // string) instead of the original PreToolUse(Task).tool_use_id. Falling
+  // back to agent_id as a SELECT key always misses (correlation_key in the
+  // subagent table was written as `toolu_*` by PreToolUse). Resolve via the
+  // session's in-flight stash instead — when exactly one spawn row is
+  // outstanding, that's the row we're closing.
+  it("resolves agent_id-only stop via single-in-flight stash (Wave 3)", async () => {
+    const session = mockSession();
+    // Simulate PreToolUse having stashed one in-flight subagent under its
+    // tool_use_id key. Claude Code's SubagentStop ships agent_id (hex), not
+    // tool_use_id.
+    session._activeSubagents.set("toolu_01ABC", "subagent:wave3target");
+    const state = mockState(session);
+
+    await handleSubagentStop(state, {
+      session_id: session.sessionId,
+      agent_id: "a87d8ea828b72b05d", // 17-char hex, the agent_id-only shape
+      agent_type: "general-purpose",
+      result: "done",
+      outcome: "completed",
+    });
+
+    // Must UPDATE the in-flight row — NOT write an orphan.
+    expect(state.store.queryExec).toHaveBeenCalledWith(
+      expect.stringContaining("UPDATE subagent:wave3target"),
+      expect.objectContaining({ outcome: "completed", result: "done" }),
+    );
+    // Critically: no CREATE subagent (no orphan write).
+    const createCall = (state.store.queryExec as ReturnType<typeof vi.fn>).mock.calls
+      .find(c => typeof c[0] === "string" && c[0].includes("CREATE subagent"));
+    expect(createCall).toBeUndefined();
+    // The matched stash entry was deleted so subsequent stops don't re-close
+    // the same row.
+    expect(session._activeSubagents.size).toBe(0);
+  });
+
+  it("honors subagent_type field when present (Claude Code's documented key)", async () => {
+    // Claude Code's SubagentStop hook may send `subagent_type` rather than
+    // `agent_type`. The guard must match on either. This pins both paths.
+    const session = mockSession();
+    const state = mockState(session, []);
+
+    const result = await handleSubagentStop(state, {
+      session_id: session.sessionId,
+      tool_use_id: "tool-use-st",
+      subagent_type: "kongcode:memory-extractor",
+      outcome: "completed",
     });
 
     expect(result).toEqual({});

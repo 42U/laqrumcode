@@ -94,6 +94,9 @@ export async function handleSessionEnd(
       data: {
         work_type: "causal_graduate",
         session_id: session.sessionId,
+        surreal_session_id: session.surrealSessionId,
+        task_id: session.taskId,
+        project_id: session.projectId,
         priority: 7,
       },
     }),
@@ -106,6 +109,9 @@ export async function handleSessionEnd(
       data: {
         work_type: soulExists ? "soul_evolve" : "soul_generate",
         session_id: session.sessionId,
+        surreal_session_id: session.surrealSessionId,
+        task_id: session.taskId,
+        project_id: session.projectId,
         priority: 9,
       },
     }),

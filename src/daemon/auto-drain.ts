@@ -26,6 +26,7 @@
 import { spawn } from "node:child_process";
 import { existsSync, openSync, closeSync, writeSync, readFileSync, unlinkSync, statSync, appendFileSync, mkdirSync, ftruncateSync, renameSync, writeFileSync, constants as fsConstants } from "node:fs";
 import { execFileSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { join, resolve, dirname } from "node:path";
 import { homedir, platform } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -89,12 +90,23 @@ function buildDrainEnv(): Record<string, string | undefined> {
     LANG: process.env.LANG,
     XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR,
   };
-  const ALLOWED_CLAUDE = new Set(["CLAUDE_CODE_ENTRYPOINT", "CLAUDE_WORKSPACE"]);
+  const ALLOWED_CLAUDE = new Set(["CLAUDE_CODE_ENTRYPOINT", "CLAUDE_WORKSPACE", "CLAUDE_PLUGIN_ROOT"]);
   for (const [k, v] of Object.entries(process.env)) {
     if (k.startsWith("KONGCODE_") || k.startsWith("NODE_") || ALLOWED_CLAUDE.has(k)) {
       env[k] = v;
     }
   }
+  // Force a unique session id for the drain subprocess so it never collides
+  // with the parent or any sibling spawn in the session cache map. Overrides
+  // any KONGCODE_SESSION_ID inherited from the parent (which would re-use
+  // the parent's SessionState entry — including the parent's surrealSessionId
+  // race window). Without this, the drain subprocess defaults to
+  // "mcp-default" (see src/mcp-server.ts) which collides with sibling
+  // drains and re-enters with the same key after the parent's SessionEnd
+  // clears the entry — yielding a fresh SessionState with empty
+  // surrealSessionId that downstream commits then reject with
+  // "Invalid record ID format".
+  env.KONGCODE_SESSION_ID = randomUUID();
   return env;
 }
 
@@ -760,5 +772,6 @@ export const __testing = {
   writeDaemonInterimMarker,
   writeChildMarker,
   cmdlineLooksLikeDrainer,
+  buildDrainEnv,
   SPENDING_PRUNE_THRESHOLD_BYTES,
 };

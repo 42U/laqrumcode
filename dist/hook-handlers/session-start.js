@@ -39,6 +39,17 @@ export async function handleSessionStart(state, payload) {
             await store.linkTaskToProject(session.taskId, session.projectId)
                 .catch(e => swallow("sessionStart:linkTaskToProject", e));
             session.surrealSessionId = await store.createSession(session.agentId, session.sessionId, session.projectId);
+            // Loud-fail if createSession resolved to an empty string. SurrealDB
+            // returning NONE that gets coerced silently leaves this field empty
+            // and downstream commits (commit:subagent:*:derived_from_session_fallback)
+            // then reject with "Invalid record ID format" far away from the actual
+            // origin. We log.error here so the failure surfaces at the point of
+            // origin; we do NOT throw — the session proceeds in degraded mode
+            // rather than killing all hooks for the session. The error is the
+            // diagnostic signal.
+            if (!session.surrealSessionId) {
+                log.error(`[session-start] store.createSession returned empty surrealSessionId for session=${sessionId}; downstream commits will fail`);
+            }
             await store.markSessionActive(session.surrealSessionId)
                 .catch(e => swallow("sessionStart:markActive", e));
             await store.linkSessionToTask(session.surrealSessionId, session.taskId)

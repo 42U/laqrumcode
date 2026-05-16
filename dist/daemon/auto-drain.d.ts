@@ -36,6 +36,10 @@ interface DrainSchedulerOpts {
      *  date changes (state persisted to <cacheDir>/auto-drain-spending.json). */
     maxDaily: number;
 }
+/** Build a minimal environment for the drain subprocess.
+ *  The subprocess talks to the daemon over IPC — it never needs DB
+ *  credentials, API keys, or other secrets from the parent. */
+declare function buildDrainEnv(): Record<string, string | undefined>;
 /** Look up the claude binary — env override, then PATH, then known locations.
  *  Cached after first lookup. Returns null if not findable; caller should
  *  log once and self-disable. */
@@ -154,6 +158,7 @@ export declare const __testing: {
     writeDaemonInterimMarker: typeof writeDaemonInterimMarker;
     writeChildMarker: typeof writeChildMarker;
     cmdlineLooksLikeDrainer: typeof cmdlineLooksLikeDrainer;
+    buildDrainEnv: typeof buildDrainEnv;
     SPENDING_PRUNE_THRESHOLD_BYTES: number;
 };
 export {};

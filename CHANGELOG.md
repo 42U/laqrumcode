@@ -4,6 +4,39 @@ All notable changes to KongCode are documented here. The 0.7.x series introduced
 
 ## [Unreleased]
 
+## [0.7.87] — 2026-05-16
+
+### Fixed (3-wave QA waterfall)
+
+Three waves of independent audit + validate + implement + verify cleaned up the daemon-log error spam that had been firing on every Task agent stop for weeks. Final tests: **972 passed (972)**, up from 962. Eight new tests added across `test/subagent.test.ts` and `test/auto-drain.test.ts` pinning the corrected contracts.
+
+**Wave 1 (4 fixes):**
+
+- `src/hook-handlers/session-end.ts`: added `surreal_session_id`, `task_id`, `project_id` fields to the `causal_graduate` and `soul_evolve`/`soul_generate` `pending_work` CREATEs. Without these, downstream consumers (e.g. the drain extractor) had no session anchor to thread provenance through.
+- `src/hook-handlers/pre-tool-use.ts`: capture `session.surrealSessionId` into a local `const` BEFORE the spawn-write IIFE so the value validated by the truthy guard is the value written into `commitKnowledge`. Closes a read-tear that the `!` non-null assertion was masking.
+- `src/hook-handlers/subagent.ts`: early-exit when `toolUseId` is empty. Stop events with no correlation key no longer write spurious "orphan" rows; they skip cleanly with a `log.debug`.
+- `src/hook-handlers/pre-tool-use.ts`: removed the fire-and-forget IIFE wrapping the spawn `commitKnowledge` and made it an inline `await`. Eliminates the TOCTOU window where Stop's SELECT runs before Spawn's CREATE commits.
+
+**Wave 2 (3 fixes):**
+
+- `src/daemon/auto-drain.ts` `buildDrainEnv`: force `env.KONGCODE_SESSION_ID = randomUUID()` for every drain subprocess so it never collides with the parent's `"mcp-default"` SessionState in the daemon's session map. Also added `CLAUDE_PLUGIN_ROOT` to `ALLOWED_CLAUDE` so the subprocess's hook-proxy can locate the daemon socket without falling back to its own `__dirname`.
+- `src/hook-handlers/session-start.ts`: log loudly if `await store.createSession(...)` returns an empty string, surfacing the originating failure at its actual point instead of letting it propagate downstream as "Invalid record ID format" hundreds of frames away.
+- `src/hook-handlers/subagent.ts`: silent-skip Stop events whose `agent_type` starts with `kongcode:memory-extractor`. These are auto-drain subprocesses that live outside the PreToolUse → SubagentStop hook lifecycle (the daemon spawns them directly via `node:child_process.spawn`, so no PreToolUse fires and no spawn row exists by design). Returns `{}` with `log.debug` instead of writing orphan rows and warn-logging.
+
+**Wave 3 (1 fix):**
+
+- `src/hook-handlers/subagent.ts`: distinguish `payload.tool_use_id` (real correlation key) from `payload.agent_id` (Claude Code's internal agent identifier — DIFFERENT namespace). When only `agent_id` is present, resolve via `session._activeSubagents` stash: exactly-one-in-flight → match it and clean up the stash entry by value-lookup; zero-in-flight → fall through to debug-demoted orphan-write; multiple-in-flight → silently skip (ambiguous, deferred-cleanup pass reaps later). Real `tool_use_id` mismatches still warn (genuine bug signal). Discovered during Wave 3 audit: session 262f8e79... had 94 real spawn rows (`outcome=in_progress`) and 177 orphan rows because every Stop was matching the wrong key namespace.
+
+### Verified
+
+- `npm test`: 972 passed (972).
+- Wave 2 verifier ran against the live daemon (PID 2540071 v0.7.86 at the time) and confirmed `0` occurrences of `orphan stop.*kongcode:memory-extractor` and `0` occurrences of `store.createSession returned empty surrealSessionId` in the post-respawn log window.
+- Wave 3 audit cited live DB rows from the actual broken state (94 in-progress real spawns + 177 orphans for one session) as the load-bearing receipt for the agent_id-vs-tool_use_id root cause.
+
+### Known follow-ups
+
+- `commit:subagent:<agent_type>:derived_from_session_fallback: Invalid record ID format:` may still occasionally fire for non-`kongcode:memory-extractor` agent types when `commitSubagent` is called with a `surrealSessionId` that passes the truthy guard but fails `assertRecordId` inside `store.relate`. Wave 4 follow-up: audit `session-start.ts`'s `store.createSession` return-shape under partial-failure modes.
+
 ## [0.7.86] — 2026-05-16
 
 ### Fixed (auto-drain spawn was missing --plugin-dir)
