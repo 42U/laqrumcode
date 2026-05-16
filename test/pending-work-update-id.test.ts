@@ -51,7 +51,7 @@ interface Hit {
 
 function scan(file: string): Hit[] {
   const text = readFileSync(file, "utf-8");
-  const lines = text.split("\n");
+  const lines = text.split(/\r?\n/);
   const hits: Hit[] = [];
   const pattern = /\b(UPDATE|SELECT\s+\*\s+FROM|DELETE)\s+\$[a-zA-Z_][a-zA-Z0-9_]*\b/;
 

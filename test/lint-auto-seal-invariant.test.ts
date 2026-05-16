@@ -102,7 +102,7 @@ describe("auto-seal invariant (v0.7.81)", () => {
       // CRLF regex fixes.
       const rel = relative(REPO_ROOT, file).replace(/\\/g, "/");
       const content = readFileSync(file, "utf8");
-      const lines = content.split("\n");
+      const lines = content.split(/\r?\n/);
       for (let i = 0; i < lines.length; i++) {
         const line = lines[i];
         // Anchored regex requires statement-start, so single-line tests work.

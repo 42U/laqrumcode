@@ -433,7 +433,7 @@ async function ingestSkill(
   const parts = file.relPath.split("/");
   const dirName = parts.length >= 2 ? parts[parts.length - 2] : "unknown";
   const skillName = fm?.name ?? dirName;
-  const description = fm?.description ?? body.split("\n").find(l => l.trim().length > 10)?.trim() ?? `Skill: ${skillName}`;
+  const description = fm?.description ?? body.split(/\r?\n/).find(l => l.trim().length > 10)?.trim() ?? `Skill: ${skillName}`;
 
   // Extract steps from markdown body
   const steps = extractSteps(body);
@@ -523,7 +523,7 @@ function parseFrontmatter(content: string): { frontmatter: Record<string, unknow
   // Full YAML parsing would need a dependency — this covers SKILL.md format.
   try {
     const result: Record<string, unknown> = {};
-    for (const line of fmBlock.split("\n")) {
+    for (const line of fmBlock.split(/\r?\n/)) {
       const match = line.match(/^(\w[\w-]*)\s*:\s*(.+)$/);
       if (match) {
         const [, key, val] = match;
@@ -660,7 +660,7 @@ function categorizeFile(relPath: string, name: string): string {
 }
 
 function summarizeFile(relPath: string, name: string, content: string): string {
-  const lineCount = content.split("\n").length;
+  const lineCount = content.split(/\r?\n/).length;
   const upper = name.toUpperCase();
 
   if (upper === "IDENTITY.MD") return `Agent identity document (${lineCount} lines) — migrated from workspace`;

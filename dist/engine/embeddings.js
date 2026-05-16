@@ -203,7 +203,7 @@ export async function probeEmbeddingService(embeddings) {
     if (!e.isAvailable()) {
         const diag = typeof e.getDiagnostics === "function" ? e.getDiagnostics() : null;
         if (diag?.initError) {
-            const firstLine = String(diag.initError.message ?? "").split("\n")[0].slice(0, 200);
+            const firstLine = String(diag.initError.message ?? "").split(/\r?\n/)[0].slice(0, 200);
             return { status: "down", message: `initialize() threw: ${firstLine}` };
         }
         if (diag?.initStartedAt != null && diag.initFinishedAt == null) {

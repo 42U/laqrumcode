@@ -90,7 +90,7 @@ function findRelateCalls(): CallSite[] {
     const text = readFileSync(file, "utf-8");
     let m: RegExpExecArray | null;
     while ((m = re.exec(text)) !== null) {
-      const line = text.slice(0, m.index).split("\n").length;
+      const line = text.slice(0, m.index).split(/\r?\n/).length;
       calls.push({
         file: file.replace(SRC_DIR + "/", ""),
         line,

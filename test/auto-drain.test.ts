@@ -592,7 +592,7 @@ describe("auto-drain: spending append-only ndjson", () => {
     bumpSpending(tmp);
     bumpSpending(tmp);
     const raw = readFileSync(spendingFilePath(tmp), "utf-8");
-    const lines = raw.split("\n").filter(l => l.trim().length > 0);
+    const lines = raw.split(/\r?\n/).filter(l => l.trim().length > 0);
     expect(lines.length).toBe(3);
     for (const line of lines) {
       const obj = JSON.parse(line);
@@ -669,7 +669,7 @@ describe("auto-drain: spending append-only ndjson", () => {
       Array.from({ length: N }, () => Promise.resolve().then(() => bumpSpending(tmp))),
     );
     const raw = readFileSync(spendingFilePath(tmp), "utf-8");
-    const lines = raw.split("\n").filter(l => l.trim().length > 0);
+    const lines = raw.split(/\r?\n/).filter(l => l.trim().length > 0);
     expect(lines.length).toBe(N);
     // And every line parses cleanly (no torn writes — appendFileSync with
     // O_APPEND under PIPE_BUF is atomic on POSIX).
@@ -721,7 +721,7 @@ describe("auto-drain: pruneStaleSpending", () => {
     bumpSpending(tmp);
     pruneStaleSpending(tmp);
     const raw = readFileSync(spendingFilePath(tmp), "utf-8");
-    const lines = raw.split("\n").filter(l => l.trim().length > 0);
+    const lines = raw.split(/\r?\n/).filter(l => l.trim().length > 0);
     expect(lines.length).toBe(2);
     for (const line of lines) {
       const obj = JSON.parse(line);
@@ -742,7 +742,7 @@ describe("auto-drain: pruneStaleSpending", () => {
     bumpSpending(tmp);
     pruneStaleSpending(tmp);
     const raw = readFileSync(spendingFilePath(tmp), "utf-8");
-    const lines = raw.split("\n").filter(l => l.trim().length > 0);
+    const lines = raw.split(/\r?\n/).filter(l => l.trim().length > 0);
     expect(lines.length).toBe(2);
   });
 
@@ -781,7 +781,7 @@ describe("auto-drain: pruneStaleSpending", () => {
     bumpSpending(tmp);
     // File has 2 lines total, well under threshold → no prune.
     const raw = readFileSync(spendingFilePath(tmp), "utf-8");
-    const lines = raw.split("\n").filter(l => l.trim().length > 0);
+    const lines = raw.split(/\r?\n/).filter(l => l.trim().length > 0);
     expect(lines.length).toBe(2);
     // Count only today's though.
     expect(readSpending(tmp).count).toBe(1);

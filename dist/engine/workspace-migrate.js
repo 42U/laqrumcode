@@ -352,7 +352,7 @@ async function ingestSkill(file, store, embeddings) {
     const parts = file.relPath.split("/");
     const dirName = parts.length >= 2 ? parts[parts.length - 2] : "unknown";
     const skillName = fm?.name ?? dirName;
-    const description = fm?.description ?? body.split("\n").find(l => l.trim().length > 10)?.trim() ?? `Skill: ${skillName}`;
+    const description = fm?.description ?? body.split(/\r?\n/).find(l => l.trim().length > 10)?.trim() ?? `Skill: ${skillName}`;
     // Extract steps from markdown body
     const steps = extractSteps(body);
     // Compute embedding once: shared between the skill row (via precomputedVec
@@ -436,7 +436,7 @@ function parseFrontmatter(content) {
     // Full YAML parsing would need a dependency — this covers SKILL.md format.
     try {
         const result = {};
-        for (const line of fmBlock.split("\n")) {
+        for (const line of fmBlock.split(/\r?\n/)) {
             const match = line.match(/^(\w[\w-]*)\s*:\s*(.+)$/);
             if (match) {
                 const [, key, val] = match;
@@ -565,7 +565,7 @@ function categorizeFile(relPath, name) {
     return "workspace-file";
 }
 function summarizeFile(relPath, name, content) {
-    const lineCount = content.split("\n").length;
+    const lineCount = content.split(/\r?\n/).length;
     const upper = name.toUpperCase();
     if (upper === "IDENTITY.MD")
         return `Agent identity document (${lineCount} lines) — migrated from workspace`;

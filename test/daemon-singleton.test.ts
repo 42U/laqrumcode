@@ -37,7 +37,7 @@ import {
   constants as fsConstants,
 } from "node:fs";
 import { tmpdir, platform } from "node:os";
-import { join } from "node:path";
+import { join, isAbsolute } from "node:path";
 
 import { DAEMON_PID_FILE } from "../src/shared/ipc-types.js";
 import { __testing as drainTesting } from "../src/daemon/auto-drain.js";
@@ -474,6 +474,10 @@ describe("daemon singleton: pid file path constant", () => {
   });
 
   it("DAEMON_PID_FILE is a relative path (joined to $HOME by daemon)", () => {
-    expect(DAEMON_PID_FILE.startsWith("/")).toBe(false);
+    // Use path.isAbsolute so the assertion works on Windows (where absolute
+    // paths look like C:\... not /...) as well as POSIX. v0.7.89 shipped the
+    // older `startsWith("/")` form which passed on Linux CI then exposed the
+    // platform-blind shape on Windows; the v0.7.90 lint catches this.
+    expect(isAbsolute(DAEMON_PID_FILE)).toBe(false);
   });
 });

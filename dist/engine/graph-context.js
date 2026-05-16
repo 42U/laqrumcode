@@ -1037,7 +1037,7 @@ function getRecentTurns(messages, convTokens, toolTokens, contextWindow, session
             msg.content = msg.content.map((c) => {
                 if (c.type === "text" && c.text && c.text.length > 120) {
                     // Keep first line as summary (usually the intent statement)
-                    const firstLine = c.text.split("\n")[0].slice(0, 120);
+                    const firstLine = c.text.split(/\r?\n/)[0].slice(0, 120);
                     return { ...c, text: firstLine };
                 }
                 if (c.type === "thinking") {

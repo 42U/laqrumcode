@@ -4,6 +4,42 @@ All notable changes to KongCode are documented here. The 0.7.x series introduced
 
 ## [Unreleased]
 
+## [0.7.90] — 2026-05-16
+
+### Added (cross-platform path lint test)
+
+New static lint at `test/lint-cross-platform-paths.test.ts`. Walks `src/**` and `test/**` and fails `npm test` on four bug classes that pass on Linux CI but break on Windows:
+
+- `.startsWith("/")` for filesystem path checks. Replace with `import { isAbsolute } from "node:path"; isAbsolute(p)`.
+- `.startsWith("\\")` (Windows-only variant). Same fix.
+- `path.sep === "/"` / `path.sep !== "\\"` direct literal comparisons. Use `path.isAbsolute` / `path.join` / `path.normalize` instead.
+- `.split("\n")` on file content. Replace with `.split(/\r?\n/)` to tolerate CRLF.
+
+Whitelist entries go in `APPROVED_FILES` with a one-line justification. Pre-push hook now blocks any push that introduces these patterns. v0.7.89 shipped a test using `startsWith("/")` that passed on Linux CI then failed Windows CI 1m27s in — exactly the recurrence this lint prevents.
+
+### Fixed (19 pre-existing cross-platform-brittle patterns)
+
+The new lint surfaced 19 existing violations that had been silently shipping. Fixed in this release:
+
+- `src/daemon/auto-drain.ts` (2 split sites — spending log line iteration)
+- `src/engine/embeddings.ts` (1 split site — error message first-line extraction)
+- `src/engine/errors.ts` (1 split site — stack trace frame extraction)
+- `src/engine/graph-context.ts` (1 split site — citation preview)
+- `src/engine/transcript-reader.ts` (2 split sites — JSONL iteration)
+- `src/engine/workspace-migrate.ts` (3 split sites — markdown body parsing)
+- `test/auto-drain.test.ts` (5 split sites)
+- `test/lint-auto-seal-invariant.test.ts` (1 split site)
+- `test/pending-work-update-id.test.ts` (1 split site)
+- `test/schema-edge-integrity.test.ts` (1 split site)
+- `test/daemon-singleton.test.ts:477` — the smoking-gun `DAEMON_PID_FILE.startsWith("/")` assertion. Now uses `isAbsolute(DAEMON_PID_FILE)`. Same shape as v0.7.89's last-minute fix commit `9214a73`, applied here proactively across the entire codebase.
+
+All sites converted to either `.split(/\r?\n/)` or `path.isAbsolute()`. No behavior change on POSIX; behavior fixes on Windows.
+
+### Verified
+
+- `npm test`: 986 passed (986) — up from 985, +1 for the new lint.
+- The lint test self-verifies: it walks the same files and finds 0 violations after the fixes.
+
 ## [0.7.89] — 2026-05-16
 
 ### Fixed (Wave 2 QA waterfall: auto-drain timer was silently dead)

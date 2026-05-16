@@ -87,7 +87,7 @@ swallow.error = function swallowError(context: string, err?: unknown): void {
   if (DEBUG && err instanceof Error && err.stack) {
     detail = "\n" + err.stack;
   } else if (err instanceof Error && err.stack) {
-    const firstFrame = err.stack.split("\n").find(l => l.trimStart().startsWith("at "));
+    const firstFrame = err.stack.split(/\r?\n/).find(l => l.trimStart().startsWith("at "));
     if (firstFrame) detail = ` (${firstFrame.trim()})`;
   }
   log.error(`${context}: ${errMsg(err)}${detail}`);

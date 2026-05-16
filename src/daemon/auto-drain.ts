@@ -412,7 +412,7 @@ function readSpending(cacheDir: string): SpendingState {
   // count. Truncated/malformed lines are skipped silently.
   try {
     const raw = readFileSync(spendingFilePath(cacheDir), "utf-8");
-    for (const line of raw.split("\n")) {
+    for (const line of raw.split(/\r?\n/)) {
       const trimmed = line.trim();
       if (!trimmed) continue;
       try {
@@ -460,7 +460,7 @@ function pruneStaleSpending(cacheDir: string): void {
   catch { return; }
 
   const kept: string[] = [];
-  for (const line of raw.split("\n")) {
+  for (const line of raw.split(/\r?\n/)) {
     const trimmed = line.trim();
     if (!trimmed) continue;
     try {

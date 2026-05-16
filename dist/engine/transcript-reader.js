@@ -53,7 +53,7 @@ export function readLatestAssistantText(transcriptPath) {
         return "";
     }
     let latestText = "";
-    for (const line of raw.split("\n")) {
+    for (const line of raw.split(/\r?\n/)) {
         if (!line.trim())
             continue;
         let obj;
@@ -134,7 +134,7 @@ export function readTurnTokenUsage(transcriptPath) {
     catch {
         return null;
     }
-    const lines = raw.split("\n").filter(l => l.trim());
+    const lines = raw.split(/\r?\n/).filter(l => l.trim());
     // Walk bottom-up: sum assistant output_tokens; capture latest input_tokens;
     // stop at the first real (non-tool_result) user message.
     let outputSum = 0;
