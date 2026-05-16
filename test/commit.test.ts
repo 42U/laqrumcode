@@ -268,6 +268,23 @@ describe("commitKnowledge — subagent kind", () => {
     expect(calls).toContainEqual(["subagent:s1", "derived_from", "session:abc"]);
   });
 
+  it("derived_from treats empty-string taskId as unset and falls back to surrealSessionId (v0.7.88 Wave 4)", async () => {
+    // Regression: session.taskId defaults to "" (empty string), not undefined.
+    // The prior `data.taskId ?? data.surrealSessionId` returned "" because ??
+    // only fires on null/undefined. The store.relate(...,"") call then threw
+    // "Invalid record ID format:" with empty payload (the exact symptom Wave 4
+    // is chasing). Truthy fallback must hand surrealSessionId to relate.
+    const state = mockSubagentState();
+    const result = await commitKnowledge(state, { ...baseData, taskId: "" });
+    expect(result.edges).toBe(3);
+    const calls = (state.store as any).relate.mock.calls;
+    expect(calls).toContainEqual(["subagent:s1", "derived_from", "session:abc"]);
+    // And: relate must NEVER have been called with an empty target.
+    for (const call of calls) {
+      expect(call[2]).not.toBe("");
+    }
+  });
+
   it("recovers from UNIQUE collision by returning the sibling id with edges=0", async () => {
     const uniqueErr = Object.assign(new Error("Database index `subagent_corr_unique` already contains 'tool-use-1'"), { name: "Error" });
     const state = mockSubagentState({ createError: uniqueErr, siblingId: "subagent:existing-1" });

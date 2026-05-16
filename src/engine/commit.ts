@@ -819,15 +819,30 @@ async function commitSubagent(
   }
 
   if (data.linkDerivedFrom !== false) {
-    const target = data.taskId ?? data.surrealSessionId;
-    // The v0.7.74 fallback: when taskId is unset we anchor derived_from
-    // to the session row, using a distinct swallow tag so production log
-    // alerts keying on 'derived_from_session_fallback' still fire.
-    const tag = data.taskId ? `${logTag}:derived_from` : `${logTag}:derived_from_session_fallback`;
-    try {
-      await store.relate(subagentId, "derived_from", target);
-      edges++;
-    } catch (e) { swallow.warn(tag, e); }
+    // v0.7.88 Wave 4 fix: state.taskId defaults to "" (empty string), NOT
+    // undefined. The previous `data.taskId ?? data.surrealSessionId` only
+    // fell through on null/undefined, so an empty taskId from PreToolUse
+    // produced target="" and `store.relate(...,"")` threw "Invalid record
+    // ID format:" (empty after colon). The truthy check is required.
+    const target = (data.taskId && data.taskId.length > 0)
+      ? data.taskId
+      : data.surrealSessionId;
+    const tag = (data.taskId && data.taskId.length > 0)
+      ? `${logTag}:derived_from`
+      : `${logTag}:derived_from_session_fallback`;
+    // Belt-and-suspenders: if target is somehow still empty (defensive —
+    // surrealSessionId is validated non-empty at line 748, but a future
+    // refactor could break that invariant), skip the relate entirely
+    // instead of throwing the "Invalid record ID format:" noise. The
+    // subagent row is still useful without this edge.
+    if (target && target.length > 0) {
+      try {
+        await store.relate(subagentId, "derived_from", target);
+        edges++;
+      } catch (e) { swallow.warn(tag, e); }
+    } else {
+      log.debug(`${tag}: target empty, skipping relate (subagentId=${subagentId.slice(-8)})`);
+    }
   }
 
   return { id: subagentId, edges };

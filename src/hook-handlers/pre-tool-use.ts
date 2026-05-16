@@ -171,7 +171,10 @@ export async function handlePreToolUse(
           prompt_length: prompt.length,
           outcome: "in_progress",
           tool_call_count: 0,
-          taskId: session.taskId,
+          // v0.7.88 Wave 4: session.taskId defaults to "" (empty string)
+          // not undefined. Pass undefined when empty so commitSubagent's
+          // truthy fallback to surrealSessionId fires correctly.
+          taskId: session.taskId || undefined,
         });
         if (result.id) {
           session._activeSubagents.set(toolUseId, result.id);

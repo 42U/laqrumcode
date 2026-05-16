@@ -4,6 +4,28 @@ All notable changes to KongCode are documented here. The 0.7.x series introduced
 
 ## [Unreleased]
 
+## [0.7.88] — 2026-05-16
+
+### Fixed (Wave 4 follow-up)
+
+The 3-wave waterfall that shipped in 0.7.87 left one residual: `commit:subagent:general-purpose:derived_from_session_fallback: Invalid record ID format:` (note the empty payload after the trailing colon) was still firing post-respawn. Wave 4 chased it to its root.
+
+**Root cause.** `SessionState.taskId` is initialized to `""` (empty string), not `undefined`. `commitSubagent` computed the `derived_from` target via `data.taskId ?? data.surrealSessionId`. The `??` operator only falls through on null/undefined, so when `taskId === ""` was passed from `pre-tool-use.ts`, the empty string was returned as the target. `store.relate(subagentId, "derived_from", "")` then threw inside `assertRecordId` ("Invalid record ID format: " with empty input), which `swallow.warn` logged under the `derived_from_session_fallback` tag. The fallback NEVER actually fell back — it had been logging the symptom under the wrong name for a release or two.
+
+**Fix.**
+
+- `src/engine/commit.ts` `commitSubagent`: replaced `data.taskId ?? data.surrealSessionId` with a truthy length check `(data.taskId && data.taskId.length > 0) ? data.taskId : data.surrealSessionId`. Empty string now correctly falls through to `surrealSessionId`. Added a defensive skip: if the resolved target is still empty (would only happen via future refactor breakage of the `surrealSessionId` validate-non-empty invariant at line 748), log a `log.debug` and skip the `relate` instead of throwing the "Invalid record ID format:" noise.
+- `src/hook-handlers/pre-tool-use.ts`: pass `taskId: session.taskId || undefined` so the source side of the contract aligns with the new sink-side semantics (`undefined` means "no task assigned", `""` is no longer a sentinel that leaks through `??`).
+
+### Verified
+
+- `npm test`: **973 passed (973)**, up from 972. New regression test `test/commit.test.ts > derived_from treats empty-string taskId as unset and falls back to surrealSessionId (v0.7.88 Wave 4)` asserts (a) the fallback fires when `taskId: ""` is passed and (b) `store.relate` is NEVER invoked with an empty third argument.
+- Live respawn on the workstation daemon over a 2-minute natural-traffic window: `grep -c "Invalid record ID format"` against `~/.kongcode/cache/daemon.log` = 0 (was 2+ on prior respawns); `grep -c "derived_from_session_fallback"` = 0.
+
+### Migration notes
+
+None. The fix is internal to `commitSubagent` and the PreToolUse spawn-write callsite. No schema changes, no surface API changes. Existing subagent rows are unaffected.
+
 ## [0.7.87] — 2026-05-16
 
 ### Fixed (3-wave QA waterfall)
