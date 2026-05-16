@@ -4,6 +4,26 @@ All notable changes to KongCode are documented here. The 0.7.x series introduced
 
 ## [Unreleased]
 
+## [0.7.84] — 2026-05-15
+
+### Added (DB-resident skills)
+Founder directive: no more SKILL.md proliferation. Skill bodies move into the vector-indexed `skill` table so they are semantically recallable, smaller on disk, and authored through the canonical MCP write path.
+
+- **`create_skill` MCP tool** — writes a new skill row with name, description, body, optional preconditions / steps / postconditions. Embeds inline via `commitKnowledge`. Rejects duplicate names. Source: `src/tools/create-skill.ts`.
+- **`get_skill_body` MCP tool** — fetches the full markdown body of a skill by name. Returns reconstructed frontmatter + body. Called from the 5-line SKILL.md stubs to load real instructions. Source: `src/tools/get-skill-body.ts`.
+- **`scripts/migrate-skills-to-db.mjs`** — one-shot migration that parsed every `skills/*/SKILL.md` on disk and inserted them as `skill` rows tagged `source="migration-from-md"`. Idempotent dedup by name. Uses directory slug as canonical name (matches Claude Code's slash-command discovery convention); frontmatter `name:` preserved as `title`.
+- **`scripts/finalize-skill-migration.mjs`** — generates `.claude-plugin/skills-seed.json` (15 skills, ~74KB) from the migrated rows and rewrites each `skills/<name>/SKILL.md` as a 5-line stub: frontmatter (name + description) + a one-line body that points at `mcp__plugin_kongcode_kongcode__get_skill_body`. Auto-fixes any rows where `name` was set to the human-readable title instead of the directory slug.
+- **`seedSkillsFromJson` maintenance hook** — on every daemon bootstrap, reads `.claude-plugin/skills-seed.json` and CREATEs any missing skill rows tagged `source="seed"`. Idempotent (per-row dedup by name). Makes fresh kongcode installs auto-hydrate the DB on first start without manual migration.
+- **`backfillSkillEmbeddings` maintenance hook** — embeds any skill rows with NULL embedding (LIMIT 50 per run). Closes the gap from migrations that write rows without inline embeddings.
+
+### Changed
+- All 15 existing `skills/*/SKILL.md` files are now 5-line stubs. Full procedural content lives in the DB and ships via the seed JSON.
+- `runBootstrapMaintenance` group 2 now calls `seedSkillsFromJson` followed by `backfillSkillEmbeddings` so a fresh install populates and embeds skills in one boot.
+
+### Known follow-ups (carried from v0.7.83)
+- `collectProjectRefs` SurrealQL UNION bug in `scripts/backup-semantic.mjs` (returns 0 project_ids).
+- Hardcoded absolute `/home/zero/voidorigin/kongcode/node_modules/surrealdb/...` import paths in `scripts/backup-jsonl.mjs`, `scripts/backup-semantic.mjs`, `scripts/migrate-skills-to-db.mjs`, and `scripts/finalize-skill-migration.mjs`. Breaks plugin distribution; needs a portability sweep.
+
 ## [0.7.83] — 2026-05-15
 
 ### Added (backup skills)

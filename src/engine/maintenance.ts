@@ -18,9 +18,10 @@
 import type { GlobalPluginState } from "./state.js";
 import { checkACANReadiness } from "./acan.js";
 import { swallow } from "./errors.js";
-import { copyFileSync, existsSync, mkdirSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { log } from "./log.js";
 
 /**
@@ -74,6 +75,8 @@ export function runBootstrapMaintenance(state: GlobalPluginState): void {
     await store.garbageCollectMemories().catch(e => swallow.warn("maintenance:gcMemories", e));
     await store.garbageCollectConcepts().catch(e => swallow.warn("maintenance:gcConcepts", e));
     await backfillSessionTurnCounts(state);
+    await seedSkillsFromJson(state);
+    await backfillSkillEmbeddings(state);
   }).catch(e => swallow.warn("bootstrap:maintenance:group2", e));
 
   // Group 3: CPU-heavy — deferred so first-turn context assembly is uncontested
@@ -125,6 +128,127 @@ async function backfillSessionTurnCounts(state: GlobalPluginState): Promise<void
     }
   } catch (e) {
     swallow.warn("maintenance:backfillTurnCount", e);
+  }
+}
+
+/** Seed the `skill` table from the repo-committed JSON snapshot at
+ *  `.claude-plugin/skills-seed.json`. This is how fresh kongcode installs
+ *  get the curated skills since the SKILL.md files on disk are 5-line
+ *  stubs (v0.7.84 moved the skill bodies into the DB as the founder's
+ *  no-md-proliferation directive).
+ *
+ *  Idempotent: per-row dedup by name. Existing skill rows (from prior
+ *  migrations or prior boots) are never overwritten. Newly-inserted rows
+ *  are tagged `source: "seed"` so the embedding backfill picks them up on
+ *  the same boot. */
+async function seedSkillsFromJson(state: GlobalPluginState): Promise<void> {
+  if (!state.store.isAvailable()) return;
+  try {
+    // Resolve repo root from the running module location. The compiled file
+    // lives at dist/engine/maintenance.js inside the plugin dir, so two
+    // levels up is the plugin root.
+    const here = fileURLToPath(import.meta.url);
+    const pluginDir = resolve(here, "..", "..", "..");
+    const seedPath = join(pluginDir, ".claude-plugin", "skills-seed.json");
+    if (!existsSync(seedPath)) return;
+
+    const raw = JSON.parse(readFileSync(seedPath, "utf8"));
+    if (!Array.isArray(raw?.skills)) return;
+
+    let inserted = 0;
+    let skipped = 0;
+    for (const s of raw.skills) {
+      if (!s?.name || !s?.description || !s?.body) continue;
+      try {
+        const existing = await state.store.queryFirst<{ id: string }>(
+          `SELECT id FROM skill WHERE name = $name LIMIT 1`,
+          { name: s.name },
+        );
+        if (existing.length > 0) {
+          skipped++;
+          continue;
+        }
+        await state.store.queryExec(
+          `CREATE skill CONTENT {
+            name: $name,
+            description: $description,
+            body: $body,
+            steps: $steps,
+            preconditions: $preconditions,
+            postconditions: $postconditions,
+            source: "seed",
+            active: true,
+            confidence: 1.0
+          }`,
+          {
+            name: s.name,
+            description: s.description,
+            body: s.body,
+            steps: s.steps ?? [],
+            preconditions: s.preconditions ?? null,
+            postconditions: s.postconditions ?? null,
+          },
+        );
+        inserted++;
+      } catch (e) {
+        swallow.warn(`maintenance:seedSkill:${s.name}`, e);
+      }
+    }
+    if (inserted > 0) {
+      log.info(`[maintenance] skill seed: ${inserted} inserted, ${skipped} already present (${raw.skills.length} total in seed)`);
+    }
+  } catch (e) {
+    swallow.warn("maintenance:seedSkillsFromJson", e);
+  }
+}
+
+/** Embed any skill rows that exist without a vector. Created 2026-05-15
+ *  when SKILL.md files were migrated into the DB by scripts/migrate-skills-to-db.mjs;
+ *  the direct-write migration left embeddings NULL because the script
+ *  doesn't load BGE-M3. This hook closes the gap on the next daemon
+ *  start so recall(scope="skills") works without manual intervention.
+ *
+ *  Idempotent: only acts on rows where embedding IS NONE. LIMIT 50 per run
+ *  to keep startup bounded; subsequent boots clear the rest. Embedding
+ *  target matches create_skill's: `${name}: ${description}\n\n${body}`. */
+async function backfillSkillEmbeddings(state: GlobalPluginState): Promise<void> {
+  if (!state.store.isAvailable()) return;
+  if (!state.embeddings.isAvailable()) return;
+  try {
+    const rows = await state.store.queryFirst<{
+      id: string;
+      name: string;
+      description: string;
+      body?: string;
+    }>(
+      `SELECT id, name, description, body FROM skill
+        WHERE embedding IS NONE AND (active = true OR active IS NONE)
+        LIMIT 50`,
+    );
+    if (!rows.length) return;
+    log.info(`[maintenance] backfilling skill embeddings: ${rows.length} row(s)`);
+    let ok = 0;
+    for (const row of rows) {
+      if (!row?.id || !row?.name) continue;
+      const target = `${row.name}: ${row.description ?? ""}${row.body ? "\n\n" + row.body : ""}`;
+      try {
+        const vec = await state.embeddings.embed(target);
+        if (!vec?.length) continue;
+        // Update by `name` (safe filter, no `$id` pattern). Migration script
+        // guarantees names are unique per skill row by skipping name-collisions
+        // on insert, so this matches at most one row.
+        await state.store.queryExec(
+          `UPDATE skill SET embedding = $vec WHERE name = $name AND embedding IS NONE`,
+          { name: row.name, vec },
+        );
+        ok++;
+      } catch (e) {
+        swallow.warn(`maintenance:backfillSkillEmbeddings:${row.name}`, e);
+      }
+    }
+    log.info(`[maintenance] skill embedding backfill: ${ok}/${rows.length} embedded`);
+  } catch (e) {
+    swallow.warn("maintenance:backfillSkillEmbeddings", e);
   }
 }
 

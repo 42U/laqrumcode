@@ -43,6 +43,8 @@ import { handleSupersede } from "./tools/supersede.js";
 import { handleRecordFinding } from "./tools/record-finding.js";
 import { handleClusterScan } from "./tools/cluster-scan.js";
 import { handleWhatIsMissing } from "./tools/what-is-missing.js";
+import { handleCreateSkill } from "./tools/create-skill.js";
+import { handleGetSkillBody } from "./tools/get-skill-body.js";
 import { log } from "./engine/log.js";
 import { runBootstrapMaintenance } from "./engine/maintenance.js";
 
@@ -279,6 +281,33 @@ const TOOLS = [
       required: ["old_text", "new_text"],
     },
   },
+  {
+    name: "create_skill",
+    description: "Create a new skill row in the kongcode DB. Skills are DB-resident vector-indexed procedural knowledge invokable via slash command. The full body is stored in the `skill` table and recallable via recall(scope=\"skills\"). Use this instead of authoring a SKILL.md file on disk.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        name: { type: "string", description: "Kebab-case skill name (matches the slash command, e.g. 'kongcode-release')" },
+        description: { type: "string", description: "One-line summary used for slash-command suggestion and embedding target. Be specific about when to invoke." },
+        body: { type: "string", description: "Full markdown body of the skill (procedural instructions, steps, examples). Min 20 chars." },
+        preconditions: { type: "string", description: "Optional structured preconditions text." },
+        postconditions: { type: "string", description: "Optional structured postconditions text." },
+        steps: { type: "array", description: "Optional structured step list (strings or {tool, description, argsPattern} objects)." },
+      },
+      required: ["name", "description", "body"],
+    },
+  },
+  {
+    name: "get_skill_body",
+    description: "Fetch the full body markdown of a skill by name. Called from a 5-line SKILL.md stub to load real instructions, or from any agent that needs procedural detail of a known skill. Returns frontmatter (name + description) followed by the body.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        name: { type: "string", description: "Skill name (kebab-case, matches the SKILL.md frontmatter `name` field)" },
+      },
+      required: ["name"],
+    },
+  },
 ];
 
 // ── Tool handlers ─────────────────────────────────────────────────────────────
@@ -347,6 +376,10 @@ async function handleToolCall(
         return await handleClusterScan(globalState, session, args);
       case "what_is_missing":
         return await handleWhatIsMissing(globalState, session, args);
+      case "create_skill":
+        return await handleCreateSkill(globalState, session, args);
+      case "get_skill_body":
+        return await handleGetSkillBody(globalState, session, args);
       default:
         return { content: [{ type: "text", text: `Unknown tool: ${name}` }] };
     }
@@ -485,7 +518,7 @@ async function shutdown(): Promise<void> {
 
 async function main(): Promise<void> {
   const server = new Server(
-    { name: "kongcode", version: "0.7.83" },
+    { name: "kongcode", version: "0.7.84" },
     { capabilities: { tools: {} } },
   );
 
