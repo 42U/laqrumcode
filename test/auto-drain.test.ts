@@ -883,9 +883,12 @@ describe("auto-drain: buildDrainEnv (Wave 2 Fix A1)", () => {
     expect(env.CLAUDE_PLUGIN_ROOT).toBeTruthy();
     expect(typeof env.CLAUDE_PLUGIN_ROOT).toBe("string");
     // The value should be the kongcode repo root resolved from the test's
-    // module location. We don't pin the exact path (it'd be fragile across
-    // dev/CI), but it must be a non-empty absolute path.
-    expect((env.CLAUDE_PLUGIN_ROOT as string).startsWith("/")).toBe(true);
+    // module location via `resolve(...)`. We don't pin the exact path (it'd
+    // be fragile across dev/CI), but it must be an absolute path. Use
+    // node:path/isAbsolute so the assertion is portable across Linux/macOS
+    // (POSIX, "/foo") and Windows ("D:\foo" or "\\?\foo").
+    const { isAbsolute } = require("node:path") as typeof import("node:path");
+    expect(isAbsolute(env.CLAUDE_PLUGIN_ROOT as string)).toBe(true);
     expect((env.CLAUDE_PLUGIN_ROOT as string).length).toBeGreaterThan(1);
   });
 
