@@ -27,12 +27,29 @@ import { existsSync, openSync, closeSync, writeSync, readFileSync, unlinkSync, s
 import { execFileSync } from "node:child_process";
 import { join, resolve, dirname } from "node:path";
 import { homedir, platform } from "node:os";
+import { fileURLToPath } from "node:url";
 import { log } from "../engine/log.js";
 import { swallow } from "../engine/errors.js";
 let schedulerStarted = false;
 let schedulerTimer = null;
 let claudeBinPath = null;
 let claudeBinUnavailable = false;
+/** The kongcode plugin install dir, derived from this daemon's own code
+ *  location. Used as `--plugin-dir` on spawned drain subprocesses so they
+ *  load the same kongcode MCP plugin the daemon is running, which is what
+ *  registers `mcp__plugin_kongcode_kongcode__fetch_pending_work` and
+ *  `..._commit_work_results` — the only two tools the drain subagent needs.
+ *
+ *  `import.meta.url` for `dist/daemon/auto-drain.js` resolves to the
+ *  plugin's `dist/daemon/`, then three levels up is the plugin root. This
+ *  works for every install shape (dev tree, marketplace cache, npm-linked)
+ *  because it asks "where am I" instead of trusting env. Reading
+ *  `process.env.CLAUDE_PLUGIN_ROOT` would be wrong: the daemon is shared
+ *  across attached sessions and that env reflects whichever mcp-client
+ *  spawned the daemon first, not necessarily the install we want to point
+ *  the subprocess at. v0.7.85 and earlier omitted this flag entirely,
+ *  silently breaking drain for two days. */
+const PLUGIN_DIR = resolve(fileURLToPath(import.meta.url), "..", "..", "..");
 /** Build a minimal environment for the drain subprocess.
  *  The subprocess talks to the daemon over IPC — it never needs DB
  *  credentials, API keys, or other secrets from the parent. */
@@ -543,8 +560,29 @@ async function spawnHeadlessDrainer(state, opts, reason) {
         : "kongcode:memory-extractor-lite";
     const count = await getPendingCount(state);
     log.info(`[auto-drain] spawning headless extractor (queue=${count}, agent=${agentName}, reason=${reason})`);
+    // Capture drain stdout/stderr to <cacheDir>/auto-drain.log so future
+    // failures aren't invisible. v0.7.85 and earlier used stdio:"ignore"
+    // which silently swallowed two days of "KongCode tools are not available
+    // in this environment" messages from the subprocess when the spawn was
+    // missing --plugin-dir. Open with O_APPEND and let the child inherit
+    // the fd; close the parent's copy after spawn (child holds its own).
+    const drainLogPath = join(opts.cacheDir, "auto-drain.log");
+    let drainLogFd = -1;
+    try {
+        drainLogFd = openSync(drainLogPath, "a");
+        const header = `\n=== auto-drain spawn ${new Date().toISOString()} (queue=${count}, agent=${agentName}, reason=${reason}, plugin_dir=${PLUGIN_DIR}) ===\n`;
+        writeSync(drainLogFd, header);
+    }
+    catch (e) {
+        swallow.warn("auto-drain:openLog", e);
+        drainLogFd = -1;
+    }
+    const stdioConfig = drainLogFd >= 0
+        ? ["ignore", drainLogFd, drainLogFd]
+        : "ignore";
     try {
         const child = spawn(claudeBin, [
+            "--plugin-dir", PLUGIN_DIR,
             "--agent", agentName,
             "--print",
             "--output-format", "text",
@@ -552,9 +590,16 @@ async function spawnHeadlessDrainer(state, opts, reason) {
             DRAIN_PROMPT,
         ], {
             detached: true,
-            stdio: "ignore",
+            stdio: stdioConfig,
             env: buildDrainEnv(),
         });
+        // Close the parent's copy of the log fd; child inherits its own.
+        if (drainLogFd >= 0) {
+            try {
+                closeSync(drainLogFd);
+            }
+            catch { /* race with close-on-exec */ }
+        }
         if (typeof child.pid !== "number") {
             releaseLock(lockFd, lockPath);
             return { spawned: false, reason: "spawn returned no pid" };

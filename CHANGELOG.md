@@ -4,6 +4,22 @@ All notable changes to KongCode are documented here. The 0.7.x series introduced
 
 ## [Unreleased]
 
+## [0.7.86] — 2026-05-16
+
+### Fixed (auto-drain spawn was missing --plugin-dir)
+`src/daemon/auto-drain.ts` `spawnHeadlessDrainer` was silently failing for two days. The subprocess started by `claude --agent kongcode:memory-extractor-lite` did not have the kongcode plugin loaded — the spawn args lacked `--plugin-dir`, so Claude Code's plugin discovery never wired up the kongcode MCP server, and the only two tools the drain agent uses (`mcp__plugin_kongcode_kongcode__fetch_pending_work` and `..._commit_work_results`) didn't exist in its environment. The agent correctly refused to fake-drain and exited code 0 with stdout reading "The KongCode tools are not available in this environment". Because the spawn used `stdio: "ignore"`, that error was invisible in every log. The `auto-drain-spending.ndjson` log went silent on 2026-05-14 even with 606+ pending_work rows backed up.
+
+Fix: pass `--plugin-dir PLUGIN_DIR` where `PLUGIN_DIR = resolve(fileURLToPath(import.meta.url), "..", "..", "..")`. This derives the plugin install dir from the daemon's own running code location, which is the correct source — `process.env.CLAUDE_PLUGIN_ROOT` would be wrong because the daemon is shared across attached Claude Code sessions and that env reflects whichever mcp-client spawned the daemon first, not necessarily the install we want a subprocess pointed at. Same pattern v0.7.84's `seedSkillsFromJson` uses for `.claude-plugin/skills-seed.json`.
+
+### Added (drain stdout/stderr now captured)
+The same spawn block now opens `<cacheDir>/auto-drain.log` with `O_APPEND` and uses `stdio: ["ignore", logFd, logFd]`. Each spawn writes a timestamped header (`=== auto-drain spawn <ISO> (queue=N, agent=X, reason=Y, plugin_dir=Z) ===`). Failures the drain subagent surfaces in its stdout (like the missing-tools message that started this whole bug) now leave a trail.
+
+### Verified
+- `npm test`: **962 passed (962)** — wiring + integration tests still green.
+- Smoke spawn with `--plugin-dir`: agent replied `TOOLS_VISIBLE` confirming `mcp__plugin_kongcode_kongcode__fetch_pending_work` is in the subprocess's tool list.
+- Prior smoke spawn without `--plugin-dir` (from session pre-patch): same agent replied "tools are not available in this environment" — the literal failure mode this fix repairs.
+- Live drain decremented `pending_work` from 606 → 596 during the smoke test window.
+
 ## [0.7.85] — 2026-05-16
 
 ### Fixed (daemon-split wiring for DB-resident skill tools)
