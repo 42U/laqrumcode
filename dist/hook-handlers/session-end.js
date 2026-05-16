@@ -141,6 +141,26 @@ export async function handleSessionEnd(state, payload) {
     }
     // Cleanup session from state
     state.removeSession(sessionId);
+    // Trigger auto-drain FIRST — this session just queued 2-3 items; let the
+    // scheduler decide whether to spawn a headless extractor right now
+    // (gated by threshold + PID-file lock). Fire-and-forget; returns
+    // immediately. No-op when KONGCODE_AUTO_DRAIN=0 or queue is below
+    // threshold.
+    //
+    // Placed BEFORE clearSessionClaim's retry-with-backoff loop so the 60s
+    // Claude Code hook timeout can never cancel us before triggerDrainCheck
+    // fires. Pre-0.7.89 the trigger ran after the retry; if the retry hit
+    // its 1s backoff in a degraded-store scenario it could exceed the hook
+    // window, and triggerDrainCheck would never be reached. Moving it
+    // earlier doesn't change correctness (it's fire-and-forget; the actual
+    // drain happens in a detached child) but guarantees the call site
+    // executes.
+    triggerDrainCheck(state, {
+        threshold: Number(process.env.KONGCODE_AUTO_DRAIN_THRESHOLD ?? 5),
+        intervalMs: 0,
+        cacheDir: state.config.paths.cacheDir,
+        maxDaily: Number(process.env.KONGCODE_AUTO_DRAIN_MAX_DAILY ?? 50),
+    }, "session-end");
     // Clear the cleanup_claim_token now that the work is queued and the handoff
     // is written. The token is only useful between claim and completion;
     // leaving it makes every successful SessionEnd accumulate a UUID-sized
@@ -161,15 +181,5 @@ export async function handleSessionEnd(state, payload) {
             swallow.warn("session-end:clearSessionClaim", combined);
         });
     });
-    // Trigger auto-drain — this session just queued 2-3 items; let the
-    // scheduler decide whether to spawn a headless extractor right now
-    // (gated by threshold + PID-file lock). Fire-and-forget. No-op when
-    // KONGCODE_AUTO_DRAIN=0 or queue is below threshold.
-    triggerDrainCheck(state, {
-        threshold: Number(process.env.KONGCODE_AUTO_DRAIN_THRESHOLD ?? 5),
-        intervalMs: 0,
-        cacheDir: state.config.paths.cacheDir,
-        maxDaily: Number(process.env.KONGCODE_AUTO_DRAIN_MAX_DAILY ?? 50),
-    }, "session-end");
     return {};
 }

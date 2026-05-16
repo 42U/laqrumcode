@@ -89,6 +89,16 @@ function buildDrainEnv(): Record<string, string | undefined> {
     SHELL: process.env.SHELL,
     LANG: process.env.LANG,
     XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR,
+    // Belt-and-suspenders: explicitly pin CLAUDE_PLUGIN_ROOT to the kongcode
+    // plugin install dir derived from this daemon's own module location.
+    // The ALLOWED_CLAUDE loop below still allows the parent to override if
+    // process.env.CLAUDE_PLUGIN_ROOT is set, but this base value guarantees
+    // the subprocess always has a valid plugin dir even when the parent's
+    // env doesn't carry one (e.g. daemon started from a detached spawn
+    // without inheriting Claude Code's session env). Pre-0.7.89 this
+    // depended entirely on the parent's env carrying CLAUDE_PLUGIN_ROOT,
+    // which wasn't always true.
+    CLAUDE_PLUGIN_ROOT: PLUGIN_DIR,
   };
   const ALLOWED_CLAUDE = new Set(["CLAUDE_CODE_ENTRYPOINT", "CLAUDE_WORKSPACE", "CLAUDE_PLUGIN_ROOT"]);
   for (const [k, v] of Object.entries(process.env)) {
@@ -705,30 +715,51 @@ async function spawnHeadlessDrainer(
 
 /** Start the periodic drain scheduler. Idempotent — calling twice is a no-op. */
 export function startDrainScheduler(state: GlobalPluginState, opts: DrainSchedulerOpts): void {
-  if (schedulerStarted) return;
+  if (schedulerStarted) {
+    // Surface the double-arm rather than silently no-op: a caller in the
+    // wrong init order, or two parallel initializeStack() invocations, is a
+    // bug we want to see in the log, not bury.
+    log.warn("[auto-drain] startDrainScheduler called twice; ignoring");
+    return;
+  }
   if (process.env.KONGCODE_AUTO_DRAIN === "0") {
     log.info("[auto-drain] disabled by KONGCODE_AUTO_DRAIN=0");
     return;
   }
   schedulerStarted = true;
 
-  // Startup check — fire immediately if there's a backlog.
+  // Startup check — fire immediately if there's a backlog. Log on both
+  // success and skip so we can verify from daemon.log that the scheduler
+  // is alive, not just silent-on-skip.
   spawnHeadlessDrainer(state, opts, "startup")
     .then(r => {
-      if (!r.spawned && r.reason) log.info(`[auto-drain] startup check: skip (${r.reason})`);
+      if (r.spawned) {
+        log.info(`[auto-drain] startup spawn succeeded`);
+      } else if (r.reason) {
+        log.info(`[auto-drain] startup check: skip (${r.reason})`);
+      }
     })
     .catch(e => swallow.warn("auto-drain:startup", e));
 
-  // Periodic check.
+  // Periodic check. Log the arming itself so a post-respawn reader can
+  // confirm the periodic timer is set up before waiting an interval to
+  // see the first tick fire.
   if (opts.intervalMs > 0) {
+    log.info(
+      `[auto-drain] arming periodic timer ` +
+        `(intervalMs=${opts.intervalMs}, threshold=${opts.threshold}, maxDaily=${opts.maxDaily})`,
+    );
     schedulerTimer = setInterval(() => {
       spawnHeadlessDrainer(state, opts, "periodic")
         .then(r => {
           if (r.spawned) log.info(`[auto-drain] periodic spawn`);
+          else if (r.reason) log.info(`[auto-drain] periodic check: skip (${r.reason})`);
         })
         .catch(e => swallow.warn("auto-drain:periodic", e));
     }, opts.intervalMs);
     schedulerTimer.unref?.();
+  } else {
+    log.info(`[auto-drain] periodic timer NOT armed (intervalMs=0)`);
   }
 }
 

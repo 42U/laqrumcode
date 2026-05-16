@@ -37,7 +37,7 @@ import { MCP_TOOLS, MCP_TO_IPC_METHOD } from "../shared/tool-defs.js";
 import { IpcErrorCode } from "../shared/ipc-types.js";
 import { log } from "../engine/log.js";
 
-const CLIENT_VERSION = "0.7.88";
+const CLIENT_VERSION = "0.7.89";
 
 let ipc: IpcClient | null = null;
 /** In-flight connect promise — concurrent callers share it so we never

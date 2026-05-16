@@ -217,6 +217,49 @@ async function initializeStack(): Promise<void> {
   // indefinitely as new sessions arrive.
   registerRetrievalQualityCleanup(globalState);
 
+  // Start auto-drain scheduler EARLY — before any `await store.initialize()`
+  // or `await embeddings.initialize()` so the periodic timer arms even when
+  // a downstream init step hangs or takes a long time. The scheduler only
+  // needs globalState + config.paths.cacheDir; the actual spawn check reads
+  // `state.store.isAvailable()` inside getPendingCount, so if store isn't
+  // ready yet, the first spawn attempts return `queue=0` until store is
+  // ready — which is fine. Prior placement (after all heavy awaits at the
+  // end of initializeStack) left the timer un-armed when bootstrap hit a
+  // slow phase, which is exactly what produced the dead-drain symptom
+  // post-0.7.85.
+  if (globalState) {
+    const drainThreshold = (() => {
+      const env = process.env.KONGCODE_AUTO_DRAIN_THRESHOLD;
+      if (env !== undefined) {
+        const n = Number(env);
+        return Number.isFinite(n) && n >= 0 ? n : 5;
+      }
+      return 5;
+    })();
+    const drainIntervalMs = (() => {
+      const env = process.env.KONGCODE_AUTO_DRAIN_INTERVAL_MS;
+      if (env !== undefined) {
+        const n = Number(env);
+        return Number.isFinite(n) && n >= 0 ? n : resourceProfile.drainIntervalMs;
+      }
+      return resourceProfile.drainIntervalMs;
+    })();
+    const drainMaxDaily = (() => {
+      const env = process.env.KONGCODE_AUTO_DRAIN_MAX_DAILY;
+      if (env !== undefined) {
+        const n = Number(env);
+        return Number.isFinite(n) && n >= 0 ? n : 50;
+      }
+      return 50;
+    })();
+    startDrainScheduler(globalState, {
+      threshold: drainThreshold,
+      intervalMs: drainIntervalMs,
+      cacheDir: config.paths.cacheDir,
+      maxDaily: drainMaxDaily,
+    });
+  }
+
   setBootstrapPhase("connecting-store");
   try {
     await store.initialize();
@@ -252,47 +295,6 @@ async function initializeStack(): Promise<void> {
     } else {
       log.warn(`[daemon] reranker model not found at ${config.reranker.modelPath} — recall will use WMR/ACAN only`);
     }
-  }
-
-  // Start auto-drain scheduler — restores the auto-extraction behavior that
-  // lived in the in-process MemoryDaemon before commit 4f7b962 removed the
-  // Anthropic SDK. Spawns `claude --agent kongcode:memory-extractor -p ...`
-  // when pending_work backlog exceeds threshold. Self-disables if claude
-  // binary not findable. Skipped here only when bootstrap completely failed
-  // (globalState would be null). Configurable via env vars
-  // KONGCODE_AUTO_DRAIN, KONGCODE_AUTO_DRAIN_THRESHOLD,
-  // KONGCODE_AUTO_DRAIN_INTERVAL_MS.
-  if (globalState) {
-    const drainThreshold = (() => {
-      const env = process.env.KONGCODE_AUTO_DRAIN_THRESHOLD;
-      if (env !== undefined) {
-        const n = Number(env);
-        return Number.isFinite(n) && n >= 0 ? n : 5;
-      }
-      return 5;
-    })();
-    const drainIntervalMs = (() => {
-      const env = process.env.KONGCODE_AUTO_DRAIN_INTERVAL_MS;
-      if (env !== undefined) {
-        const n = Number(env);
-        return Number.isFinite(n) && n >= 0 ? n : resourceProfile.drainIntervalMs;
-      }
-      return resourceProfile.drainIntervalMs;
-    })();
-    const drainMaxDaily = (() => {
-      const env = process.env.KONGCODE_AUTO_DRAIN_MAX_DAILY;
-      if (env !== undefined) {
-        const n = Number(env);
-        return Number.isFinite(n) && n >= 0 ? n : 50;
-      }
-      return 50;
-    })();
-    startDrainScheduler(globalState, {
-      threshold: drainThreshold,
-      intervalMs: drainIntervalMs,
-      cacheDir: config.paths.cacheDir,
-      maxDaily: drainMaxDaily,
-    });
   }
 
   // Register hook handlers + start the legacy HTTP API on a per-PID Unix

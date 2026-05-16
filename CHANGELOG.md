@@ -4,6 +4,38 @@ All notable changes to KongCode are documented here. The 0.7.x series introduced
 
 ## [Unreleased]
 
+## [0.7.89] — 2026-05-16
+
+### Fixed (Wave 2 QA waterfall: auto-drain timer was silently dead)
+
+Four-fix wave restoring auto-drain to actually firing periodically + on SessionEnd. Symptom: `~/.kongcode/cache/auto-drain.log` had its last spawn timestamp 2+ hours stale on a live install even with pending_work above threshold; no periodic spawns showed up in `auto-drain-spending.ndjson`. Pre-0.7.89 the scheduler was being called near the END of `initializeStack()` after `await store.initialize()`, `await embeddings.initialize()`, and `initReranker()` — any one of those taking long meant the scheduler never armed, and there was zero positive-signal logging to tell us so.
+
+**Root causes (each independent — fixed all four for defense-in-depth):**
+
+1. **`src/daemon/index.ts` `initializeStack` — scheduler armed too late.** The `startDrainScheduler(globalState, ...)` block sat near the bottom of the function, after every heavy `await` (SurrealDB connect, BGE-M3 model load, reranker config). When any of those took long, the setInterval never armed. Moved the entire `if (globalState) { ... startDrainScheduler(...) }` block to fire IMMEDIATELY after `globalState = new GlobalPluginState(...)` is created — before `await store.initialize()`. The scheduler only needs globalState and `config.paths.cacheDir`; it does NOT need store/embeddings initialized (`getPendingCount` reads `state.store.isAvailable()` inside the spawn check, so if store isn't ready yet, early spawns return `queue=0` and skip — which is harmless and self-corrects once store comes up).
+
+2. **`src/hook-handlers/session-end.ts` — `triggerDrainCheck` ran after a retry-with-1s-backoff loop that could blow past the 60s Claude Code hook timeout.** Reordered so `triggerDrainCheck(state, opts, "session-end")` fires BEFORE `await store.clearSessionClaim(...)`. The trigger is fire-and-forget (returns immediately; the actual drain happens in a detached child), so moving it earlier doesn't change correctness — it just guarantees the call site executes regardless of how slow the clear-claim retry is. Pre-0.7.89, a degraded SurrealDB blip causing the clear to retry could exceed the hook budget and the SessionEnd handler would be cancelled before triggerDrainCheck ran.
+
+3. **`src/daemon/auto-drain.ts` `buildDrainEnv` — `CLAUDE_PLUGIN_ROOT` propagation was only conditional.** The previous code relied on the ALLOWED_CLAUDE loop pulling `CLAUDE_PLUGIN_ROOT` from `process.env` — which only worked if the daemon's own env carried the var. For daemons spawned from a context that lost the var (e.g. detached `nohup`), the subprocess inherited no plugin dir and the headless drain silently failed inside Claude Code with "kongcode tools are not available". Now `CLAUDE_PLUGIN_ROOT: PLUGIN_DIR` is explicitly seeded in the base `env` object before the conditional loop runs. The loop afterwards still lets the parent's value win if present — belt-and-suspenders, not override.
+
+4. **`src/daemon/auto-drain.ts` `startDrainScheduler` — zero positive-signal logging meant we couldn't tell the timer had armed.** The previous code only logged on FAILURE inside the startup spawn `.then(r => { if (!r.spawned && r.reason) log.info(...) })`. Added: (a) `log.info("[auto-drain] arming periodic timer (intervalMs=..., threshold=..., maxDaily=...)")` right before `setInterval`, (b) `log.info("[auto-drain] startup spawn succeeded")` when startup spawn worked, (c) `log.info("[auto-drain] periodic check: skip (...)")` on every periodic tick that no-ops so a daemon-log reader can see the timer is alive even when there's nothing to drain, (d) `log.warn("[auto-drain] startDrainScheduler called twice; ignoring")` on the double-arm guard so an init-order bug surfaces instead of being silently no-op'd, (e) `log.info("[auto-drain] periodic timer NOT armed (intervalMs=0)")` when the env disables periodic ticks. These run at `info` level so are suppressed at the default `warn` level — but they're the receipt you need when troubleshooting via `KONGCODE_LOG_LEVEL=info`.
+
+### Verified
+
+- `npm test`: **985 passed (985)**, up from 973. Twelve new tests:
+  - `test/auto-drain.test.ts`: 2 static-source ordering assertions for Fix #1, 2 `buildDrainEnv` propagation assertions for Fix #3, 3 `startDrainScheduler` lifecycle-logging assertions for Fix #4.
+  - `test/session-end.test.ts` (NEW): 5 call-order assertions verifying `triggerDrainCheck` runs before `clearSessionClaim` on the happy path, fires exactly once, runs before clear even when clear is slow, and is SKIPPED on the lost-claim / empty-surrealSessionId early-return paths (Fix #2).
+
+- **Live respawn verification** on the workstation daemon: manually started a daemon at PID **2734006** with `KONGCODE_LOG_LEVEL=info KONGCODE_AUTO_DRAIN_INTERVAL_MS=20000 KONGCODE_AUTO_DRAIN_THRESHOLD=1`. Captured log shows:
+  - `[auto-drain] arming periodic timer (intervalMs=20000, threshold=1, maxDaily=50)` BEFORE `[daemon] SurrealDB connected` — confirms Fix #1 placement (scheduler arms before store init completes).
+  - `[auto-drain] startup check: skip (queue=0 < threshold=1)` — startup check fires.
+  - After 20s: `[auto-drain] spawning headless extractor (queue=4, agent=kongcode:memory-extractor-lite, reason=periodic)` + `[auto-drain] periodic spawn` — periodic timer fired and consumed the live pending_work queue (4 → spawned). Then on the next tick: `[auto-drain] periodic check: skip (another extractor already running)` — Fix #4's new skip-log fires.
+  - `~/.kongcode/cache/auto-drain.log` got a new header at `2026-05-16T15:02:29.212Z` with `reason=periodic`, confirming the spawned subprocess actually wrote its banner.
+
+### Migration notes
+
+None. All four fixes are internal. No schema changes, no surface API changes. Existing installs pick up auto-drain firing again on next daemon respawn.
+
 ## [0.7.88] — 2026-05-16
 
 ### Fixed (Wave 4 follow-up)

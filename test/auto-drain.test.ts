@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, statSync, utimesSync, appendFileSync } from "node:fs";
 import { tmpdir, platform } from "node:os";
 import { join } from "node:path";
@@ -868,5 +868,174 @@ describe("auto-drain: buildDrainEnv (Wave 2 Fix A1)", () => {
     const env = buildDrainEnv();
     expect(env.CLAUDE_CODE_ENTRYPOINT).toBe("test-entrypoint");
     delete process.env.CLAUDE_CODE_ENTRYPOINT;
+  });
+
+  // Wave 2 v0.7.89 Fix #3: belt-and-suspenders explicit base-env assignment.
+  // The conditional propagation through ALLOWED_CLAUDE only worked when the
+  // daemon's own process.env had CLAUDE_PLUGIN_ROOT set; if it didn't (e.g.
+  // daemon spawned from a context that lost the var), the subprocess inherited
+  // no plugin dir and the headless drain failed silently. Now the base env
+  // object pins CLAUDE_PLUGIN_ROOT=PLUGIN_DIR regardless; the parent's value
+  // (if any) still wins via the conditional loop afterwards.
+  it("sets CLAUDE_PLUGIN_ROOT to the resolved plugin dir even when parent has none (Fix #3)", () => {
+    delete process.env.CLAUDE_PLUGIN_ROOT;
+    const env = buildDrainEnv();
+    expect(env.CLAUDE_PLUGIN_ROOT).toBeTruthy();
+    expect(typeof env.CLAUDE_PLUGIN_ROOT).toBe("string");
+    // The value should be the kongcode repo root resolved from the test's
+    // module location. We don't pin the exact path (it'd be fragile across
+    // dev/CI), but it must be a non-empty absolute path.
+    expect((env.CLAUDE_PLUGIN_ROOT as string).startsWith("/")).toBe(true);
+    expect((env.CLAUDE_PLUGIN_ROOT as string).length).toBeGreaterThan(1);
+  });
+
+  it("parent's CLAUDE_PLUGIN_ROOT still overrides the base value (loop runs after base) (Fix #3)", () => {
+    process.env.CLAUDE_PLUGIN_ROOT = "/parent/override/path";
+    const env = buildDrainEnv();
+    expect(env.CLAUDE_PLUGIN_ROOT).toBe("/parent/override/path");
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Wave 2 v0.7.89 Fix #1: startDrainScheduler must be invoked EARLY in
+// initializeStack — specifically before `await store.initialize()` and
+// `await embeddings.initialize()` — so a slow/hung downstream init step
+// cannot starve the scheduler from arming. Pre-0.7.89, the scheduler call
+// was the last work before "kongcode stack ready"; when a single
+// initializeStack step hung, the periodic timer never fired and auto-drain
+// silently died.
+//
+// We verify this via static source inspection: the offset of the
+// `startDrainScheduler(` callsite must be LESS than the offset of
+// `await store.initialize()`. A behavioral test would require a full
+// daemon boot which is out of scope for unit tests.
+// ─────────────────────────────────────────────────────────────────────────────
+describe("daemon initializeStack: startDrainScheduler ordering (Wave 2 Fix #1)", () => {
+  it("startDrainScheduler appears before await store.initialize() in daemon/index.ts", () => {
+    const src = readFileSync(
+      join(__dirname, "..", "src", "daemon", "index.ts"),
+      "utf-8",
+    );
+    // Look for the actual call (with trailing semicolon) not the comment string.
+    const schedulerIdx = src.indexOf("startDrainScheduler(globalState,");
+    const storeInitIdx = src.indexOf("await store.initialize();");
+    expect(schedulerIdx).toBeGreaterThan(-1);
+    expect(storeInitIdx).toBeGreaterThan(-1);
+    expect(schedulerIdx).toBeLessThan(storeInitIdx);
+  });
+
+  it("startDrainScheduler appears before await embeddings.initialize() in daemon/index.ts", () => {
+    const src = readFileSync(
+      join(__dirname, "..", "src", "daemon", "index.ts"),
+      "utf-8",
+    );
+    const schedulerIdx = src.indexOf("startDrainScheduler(globalState,");
+    const embedInitIdx = src.indexOf("await embeddings.initialize();");
+    expect(schedulerIdx).toBeGreaterThan(-1);
+    expect(embedInitIdx).toBeGreaterThan(-1);
+    expect(schedulerIdx).toBeLessThan(embedInitIdx);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// startDrainScheduler — Wave 2 v0.7.89 Fix #4: diagnostic logging on
+// scheduler lifecycle. The previous version only logged failures; in
+// production we had no positive signal that the scheduler had armed at all.
+// The new version logs (a) the "arming periodic timer" line at startup,
+// (b) the "called twice; ignoring" warning when the module guard fires.
+// ─────────────────────────────────────────────────────────────────────────────
+describe("auto-drain: startDrainScheduler logging (Wave 2 Fix #4)", () => {
+  it("logs an arming line when scheduler starts with intervalMs > 0", async () => {
+    const { log } = await import("../src/engine/log.js");
+    const infoSpy = vi.spyOn(log, "info");
+    const { startDrainScheduler, stopDrainScheduler } = await import("../src/daemon/auto-drain.js");
+    // Stop first to clear any state from earlier tests.
+    stopDrainScheduler();
+    try {
+      // Minimal state stub — getPendingCount short-circuits to 0 because
+      // store.isAvailable() returns false, so no real spawn fires.
+      const state = {
+        store: { isAvailable: () => false, queryFirst: async () => [] },
+      } as unknown as Parameters<typeof startDrainScheduler>[0];
+      startDrainScheduler(state, {
+        threshold: 5,
+        intervalMs: 60_000,
+        cacheDir: "/tmp/kc-test-fix4",
+        maxDaily: 7,
+      });
+      // Allow the startup spawn microtask to resolve.
+      await new Promise(r => setImmediate(r));
+      const armingMessages = infoSpy.mock.calls
+        .map(c => String(c[0] ?? ""))
+        .filter(s => s.includes("arming periodic timer"));
+      expect(armingMessages.length).toBe(1);
+      expect(armingMessages[0]).toContain("intervalMs=60000");
+      expect(armingMessages[0]).toContain("threshold=5");
+      expect(armingMessages[0]).toContain("maxDaily=7");
+    } finally {
+      stopDrainScheduler();
+      infoSpy.mockRestore();
+    }
+  });
+
+  it("logs a warning when startDrainScheduler is called twice", async () => {
+    const { log } = await import("../src/engine/log.js");
+    const warnSpy = vi.spyOn(log, "warn");
+    const { startDrainScheduler, stopDrainScheduler } = await import("../src/daemon/auto-drain.js");
+    stopDrainScheduler();
+    try {
+      const state = {
+        store: { isAvailable: () => false, queryFirst: async () => [] },
+      } as unknown as Parameters<typeof startDrainScheduler>[0];
+      startDrainScheduler(state, {
+        threshold: 5,
+        intervalMs: 60_000,
+        cacheDir: "/tmp/kc-test-fix4-twice",
+        maxDaily: 7,
+      });
+      // Second call should hit the guard and log a warn.
+      startDrainScheduler(state, {
+        threshold: 5,
+        intervalMs: 60_000,
+        cacheDir: "/tmp/kc-test-fix4-twice",
+        maxDaily: 7,
+      });
+      const doubleArmWarn = warnSpy.mock.calls
+        .map(c => String(c[0] ?? ""))
+        .filter(s => s.includes("startDrainScheduler called twice"));
+      expect(doubleArmWarn.length).toBe(1);
+    } finally {
+      stopDrainScheduler();
+      warnSpy.mockRestore();
+    }
+  });
+
+  it("logs disabled message when KONGCODE_AUTO_DRAIN=0", async () => {
+    const { log } = await import("../src/engine/log.js");
+    const infoSpy = vi.spyOn(log, "info");
+    const { startDrainScheduler, stopDrainScheduler } = await import("../src/daemon/auto-drain.js");
+    stopDrainScheduler();
+    const saved = process.env.KONGCODE_AUTO_DRAIN;
+    process.env.KONGCODE_AUTO_DRAIN = "0";
+    try {
+      const state = {
+        store: { isAvailable: () => false, queryFirst: async () => [] },
+      } as unknown as Parameters<typeof startDrainScheduler>[0];
+      startDrainScheduler(state, {
+        threshold: 5,
+        intervalMs: 60_000,
+        cacheDir: "/tmp/kc-test-fix4-disabled",
+        maxDaily: 7,
+      });
+      const disabledMessages = infoSpy.mock.calls
+        .map(c => String(c[0] ?? ""))
+        .filter(s => s.includes("disabled by KONGCODE_AUTO_DRAIN=0"));
+      expect(disabledMessages.length).toBe(1);
+    } finally {
+      if (saved === undefined) delete process.env.KONGCODE_AUTO_DRAIN;
+      else process.env.KONGCODE_AUTO_DRAIN = saved;
+      stopDrainScheduler();
+      infoSpy.mockRestore();
+    }
   });
 });
