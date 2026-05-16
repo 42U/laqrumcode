@@ -4,6 +4,29 @@ All notable changes to KongCode are documented here. The 0.7.x series introduced
 
 ## [Unreleased]
 
+## [0.7.91] — 2026-05-16
+
+### Added (2 new structural lints)
+
+Both lint tests target bug classes that produced same-day follow-up commits earlier in the 0.7.x series. Each lint walks specific source files and fails `npm test` on the regression pattern.
+
+- **`test/lint-init-order.test.ts`** — asserts `startDrainScheduler()` is called BEFORE `await store.initialize()` AND `await embeddings.initialize()` in `src/daemon/index.ts`. v0.7.89 shipped this exact init-ordering regression: scheduler init was placed after a slow embedding-model load, so when the load hung the scheduler never armed and `pending_work` stopped draining while the daemon appeared alive. Comment lines are skipped to avoid false-firing on docstring examples that reference these patterns.
+- **`test/lint-spawn-env-completeness.test.ts`** — two assertions over `src/daemon/auto-drain.ts`: (1) every `spawn(claudeBin, ...)` call window includes `"--plugin-dir"` in argv; (2) `buildDrainEnv()` explicitly sets `CLAUDE_PLUGIN_ROOT:` in its base env object rather than relying on conditional env propagation. v0.7.85 shipped without `--plugin-dir` and drain silently failed for two days because `stdio: "ignore"` hid the subprocess's "tools are not available" message. v0.7.86 / v0.7.88 / v0.7.89 had recurring SessionEnd-hook-cancelled bugs traced to the missing `CLAUDE_PLUGIN_ROOT`.
+
+### Added (DB-resident skill updates)
+
+- **`kongcode-release` skill body** (DB row, name=`kongcode-release`): appended three new sections marked `(added v0.7.91)` — (1) the `gh run list --limit 1 --json databaseId --jq` form for run-id extraction, replacing the awk-on-text pattern that grabbed "QA" from a commit title earlier today; (2) the mandatory live-exercise gate (daemon restart + 2-min wait + grep for original bug signature in post-respawn log window, must return 0) before declaring done; (3) the canonical list of pre-push lint tests that gate `npm test`.
+- **`pre-flight-done-check` skill** (new DB row): 7-step checklist invoked before ANY use of the words "shipped", "verified", "fixed", "done" in a user-facing reply. Catches the "tests passed locally so shipped" failure mode that produced 6 same-day follow-up commits on 2026-05-16. Anti-pattern list at the bottom flags "Agent reported VERIFIED_FIXED" as needing independent verification of the diff + live log, not just acceptance of the agent's summary.
+
+### Process
+
+- Added `scripts/update-skills-v091.mjs` for the DB body updates. Idempotent — re-running on already-updated rows is a no-op via the `(added v0.7.91)` marker.
+- The `kongcode-release` skill body now ends with: "If a new bug class costs the project a same-day follow-up commit, the response is 'add a lint test that would have caught it' — not 'be more careful next time.'"
+
+### Verified
+
+- `npm test`: 989 passed (989), up from 986. +3 tests for the 2 new lint files (init-order has 1 test; spawn-env-completeness has 2). All 4 pre-existing lints still green.
+
 ## [0.7.90] — 2026-05-16
 
 ### Added (cross-platform path lint test)
