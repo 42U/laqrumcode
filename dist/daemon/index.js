@@ -43,6 +43,8 @@ import { handleSupersede } from "../tools/supersede.js";
 import { handleRecordFinding } from "../tools/record-finding.js";
 import { handleClusterScan } from "../tools/cluster-scan.js";
 import { handleWhatIsMissing } from "../tools/what-is-missing.js";
+import { handleCreateSkill } from "../tools/create-skill.js";
+import { handleGetSkillBody } from "../tools/get-skill-body.js";
 import { handleSessionStart } from "../hook-handlers/session-start.js";
 import { handleSessionEnd } from "../hook-handlers/session-end.js";
 import { handleUserPromptSubmit } from "../hook-handlers/user-prompt-submit.js";
@@ -755,6 +757,8 @@ async function main() {
     server.register("tool.recordFinding", wrapToolHandler(handleRecordFinding, "record_finding"));
     server.register("tool.clusterScan", wrapToolHandler(handleClusterScan, "cluster_scan"));
     server.register("tool.whatIsMissing", wrapToolHandler(handleWhatIsMissing, "what_is_missing"));
+    server.register("tool.createSkill", wrapToolHandler(handleCreateSkill, "create_skill"));
+    server.register("tool.getSkillBody", wrapToolHandler(handleGetSkillBody, "get_skill_body"));
     // Hook handlers — different signature from tools: (state, payload) → HookResponse,
     // where payload is the raw Claude Code hook event (already includes session_id,
     // cwd, transcript_path, etc.). The IPC params is the payload itself; no extra

@@ -106,6 +106,8 @@ export const IPC_METHODS = [
   "tool.recordFinding",
   "tool.clusterScan",
   "tool.whatIsMissing",
+  "tool.createSkill",
+  "tool.getSkillBody",
 
   // ── Claude Code hook handlers (mirror src/hook-handlers/*.ts) ──
   "hook.sessionStart",

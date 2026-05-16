@@ -312,6 +312,52 @@ export declare const MCP_TOOLS: readonly [{
         };
         readonly required: readonly ["old_text", "new_text"];
     };
+}, {
+    readonly name: "create_skill";
+    readonly description: "Create a new skill row in the kongcode DB. Skills are DB-resident vector-indexed procedural knowledge invokable via slash command. The full body is stored in the `skill` table and recallable via recall(scope=\"skills\"). Use this instead of authoring a SKILL.md file on disk.";
+    readonly inputSchema: {
+        readonly type: "object";
+        readonly properties: {
+            readonly name: {
+                readonly type: "string";
+                readonly description: "Kebab-case skill name (matches the slash command, e.g. 'kongcode-release')";
+            };
+            readonly description: {
+                readonly type: "string";
+                readonly description: "One-line summary used for slash-command suggestion and embedding target. Be specific about when to invoke.";
+            };
+            readonly body: {
+                readonly type: "string";
+                readonly description: "Full markdown body of the skill (procedural instructions, steps, examples). Min 20 chars.";
+            };
+            readonly preconditions: {
+                readonly type: "string";
+                readonly description: "Optional structured preconditions text.";
+            };
+            readonly postconditions: {
+                readonly type: "string";
+                readonly description: "Optional structured postconditions text.";
+            };
+            readonly steps: {
+                readonly type: "array";
+                readonly description: "Optional structured step list (strings or {tool, description, argsPattern} objects).";
+            };
+        };
+        readonly required: readonly ["name", "description", "body"];
+    };
+}, {
+    readonly name: "get_skill_body";
+    readonly description: "Fetch the full body markdown of a skill by name. Called from a 5-line SKILL.md stub to load real instructions, or from any agent that needs procedural detail of a known skill. Returns frontmatter (name + description) followed by the body.";
+    readonly inputSchema: {
+        readonly type: "object";
+        readonly properties: {
+            readonly name: {
+                readonly type: "string";
+                readonly description: "Skill name (kebab-case, matches the SKILL.md frontmatter `name` field)";
+            };
+        };
+        readonly required: readonly ["name"];
+    };
 }];
 /** Map MCP tool name (snake_case, what Claude Code sends) to IPC method name
  *  (dotted camelCase, what the daemon expects). The thin client looks up here

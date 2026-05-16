@@ -4,6 +4,24 @@ All notable changes to KongCode are documented here. The 0.7.x series introduced
 
 ## [Unreleased]
 
+## [0.7.85] — 2026-05-16
+
+### Fixed (daemon-split wiring for DB-resident skill tools)
+v0.7.84 shipped `create_skill` and `get_skill_body` MCP tools that compiled, passed all 957 unit tests, and made it through CI, but were **unreachable through any live MCP client** because they were wired only into the legacy in-process path at `src/mcp-server.ts`. The actual runtime is the daemon-split architecture (since v0.7.0) where a thin per-session MCP client forwards JSON-RPC over a Unix socket to a long-lived daemon. v0.7.85 wires both tools through all 5 surfaces:
+
+- `src/shared/tool-defs.ts` — MCP_TOOLS array (advertises tools to Claude Code via the thin client) + MCP_TO_IPC_METHOD record (snake_case → dotted-camelCase mapping).
+- `src/shared/ipc-types.ts` — IPC_METHODS array (which generates the compile-time `IpcMethod` union via `typeof IPC_METHODS[number]`).
+- `src/daemon/index.ts` — 2 imports + 2 `server.register(...)` calls using the existing `wrapToolHandler` adapter pattern.
+
+### Added (lint test that prevents the recurrence)
+- **`test/lint-mcp-tool-wiring-invariant.test.ts`** — static lint that walks `src/mcp-server.ts`, `src/shared/tool-defs.ts`, `src/shared/ipc-types.ts`, and `src/daemon/index.ts`, extracts the tool name set from each, and fails if any tool is missing from any surface. The error message lists the missing surface per tool so a future contributor can fix in one pass. Future MCP tool additions either touch all 5 surfaces or `npm test` fails immediately.
+
+### Added (live daemon round-trip integration test)
+- **`test/integration/daemon-tool-roundtrip.test.ts`** — connects to the live `kongcode-daemon.sock` via the production `IpcClient` from `src/mcp-client/ipc-client.ts` and exercises 4 read-only round-trips: `tool.getSkillBody` for `kongcode-release` (~7000 char body), for `kongcode-health`, for a missing name (returns "no skill found"), and with empty name (validation error). Skips cleanly when no daemon socket exists (e.g. CI without a started daemon) via `describe.skipIf(!RUN_LIVE)`. The static lint above runs unconditionally and catches the v0.7.84 failure class.
+
+### Verification
+- `npm test`: **962 passed (962)** — 957 prior + 1 new lint test + 4 new integration tests. All integration tests ran against the live daemon at PID 1941796 (respawned from updated `dist/` after killing PID 891819 which was started before the v0.7.84 wiring fix).
+
 ## [0.7.84] — 2026-05-15
 
 ### Added (DB-resident skills)
