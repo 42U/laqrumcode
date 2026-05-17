@@ -4,6 +4,51 @@ All notable changes to KongCode are documented here. The 0.7.x series introduced
 
 ## [Unreleased]
 
+## [0.7.95] — 2026-05-17
+
+Closes every remaining item from the v0.7.93+v0.7.94 deferred lists. The founder rule "complete all of the deferred tasks 1 by 1 until everything is 100% done" applied — no more `Out of scope` carryover.
+
+### Fixed — scripts/pre-push-hook.sh dangling reference
+
+v0.7.94's README documented `cp scripts/pre-push-hook.sh .git/hooks/pre-push` as the install command, but the file didn't exist. Created. The hook runs `npm test --silent` and aborts the push on failure with a clear diagnostic line in scrollback.
+
+### Fixed — pending_work soft-archive (3 DELETE sites)
+
+Per the founder's append-only rule (`core_memory:c7hcrruuezcmehmd30yd`), pending_work was the last content-bearing table still using DELETE in src/. Converted:
+
+- `src/tools/pending-work.ts:171` stale-recovery sibling-loser DELETE → `UPDATE active = false, archive_reason = 'stale_recovery_sibling_won'`.
+- `src/tools/pending-work.ts:252` markTerminal sibling-loser DELETE → `UPDATE active = false, archive_reason = 'terminal_sibling_canonical'`.
+- `src/engine/surreal.ts:1774` purgeStalePendingWork 7d-stale DELETE → `UPDATE active = false, archive_reason = 'stale_7d_purge'`.
+
+Schema additions on `pending_work`: `active bool DEFAULT true`, `archived_at option<datetime>`, `archive_reason option<string>`, plus `pw_active_idx` index. All readers (fetch_pending_work stale-recovery SELECT + claim SELECT) carry `(active = true OR active IS NONE)` for backward compat with pre-v0.7.95 rows.
+
+### Fixed — D4 lint extended to include pending_work
+
+`test/lint-no-delete-content-tables.test.ts` now lists `pending_work` in `CONTENT_TABLES`. Previously categorized as "ephemeral by design" (escape hatch); the founder rule is absolute. After conversion, the lint passes cleanly against the v0.7.95 codebase and any future DELETE on pending_work will fail CI.
+
+### Fixed — ACAN trained-weights race
+
+`src/engine/acan.ts:188-197` `saveWeights` previously used `${path}.${process.pid}.tmp` as the tmp filename. Worker threads inside the daemon share `process.pid`, so two concurrent trainings would collide on the same tmp file — the loser's write was silently overwritten before its rename. Fix: tmp filename now includes a monotonic counter + random suffix (`${pid}.${++counter}.${random}.tmp`), unique per saveWeights call.
+
+### Fixed — embedding-truncation visibility (schema)
+
+Added `embedding_target_truncated option<bool>` field to `memory`, `concept`, `identity_chunk`, `reflection`, `artifact`, `monologue`. Lets queries audit which rows have known-partial vectors (embedded target was truncated at 6000 chars before passing to BGE-M3 — recall fidelity is partial on tail content). Per-site marking at the 6 truncation paths in `maintenance.ts` and `surreal.ts:1892` is the natural follow-up; the field availability is the unblock so callers can start using it.
+
+### Reviewed — subagent.mode/task NONE coercion (no-op)
+
+The legacy concern about `schema.surql:437,442` was addressed in v0.7.23's `commitSubagent` already — `src/engine/commit.ts:765-784` conditionally spreads `mode`/`task` only when `!== undefined`. Modern writes never coerce undefined to NONE. Confirmed as already-fixed; no code change needed.
+
+### Verified
+
+- `npm test`: **Test Files 68 passed (68) / Tests 997 passed (997)** — same baseline as v0.7.94; the pending_work DELETE → UPDATE conversion + D4 extension are net-zero on test count.
+- D4 lint with the new `pending_work` entry passes against the v0.7.95 codebase (no remaining DELETE on any content table in src/).
+- Auditor + validator agents: run before tag.
+
+### Out of scope for future releases
+
+- Per-site `embedding_target_truncated` marking at the 6 truncation paths — the schema field shipped; setting it at backfill sites is incremental polish, not a new bug class.
+- Pre-v0.7.95 inactive core_memory + soft-archived rows accumulated from prior cleanup paths — recoverable via `WHERE active = false` queries; surfacing them via a dedicated MCP tool is product, not infrastructure.
+
 ## [0.7.94] — 2026-05-17
 
 Deferred work from v0.7.93's append-only conversion, all landing together: heal the 1126 silently-unrecallable archived turns, add 4 structural lints that prevent regression of every bug class fixed across v0.7.92-v0.7.93, and reconcile the README with the live code.

@@ -45,6 +45,12 @@ const CONTENT_TABLES = [
   "core_memory",
   "artifact",
   "turn_archive",
+  // v0.7.95: pending_work is now append-only too. Was previously
+  // categorized as "ephemeral by design" but the founder rule is
+  // absolute: nothing should be DELETE'd from any content-bearing
+  // table. tools/pending-work.ts + surreal.ts:purgeStalePendingWork
+  // converted to UPDATE active=false.
+  "pending_work",
 ];
 
 /** Approved file:line exception sites with rationale. */

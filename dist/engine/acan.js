@@ -151,14 +151,24 @@ function loadWeights(path) {
         return null;
     }
 }
+// Monotonic per-process counter to disambiguate concurrent saveWeights
+// callers within the same PID. Worker threads share process.pid; without
+// this, two workers finishing at the same time would write to the same
+// `${path}.${pid}.tmp` file and one's data would silently overwrite the
+// other's before the rename. v0.7.95 fix.
+let _saveWeightsCounter = 0;
 function saveWeights(weights, path) {
-    // Atomic write: multiple MCPs can train concurrently, so a partial write
-    // from one process must not be visible to another reading the file.
-    // write-to-tmp then rename() is atomic on the same filesystem.
+    // Atomic write: multiple MCPs / worker threads can train concurrently,
+    // so a partial write from one caller must not be visible to another
+    // reading the file, AND two concurrent in-process callers must not
+    // collide on the same tmp file. write-to-tmp then rename() is atomic
+    // on the same filesystem; the (pid, counter, random) suffix is unique
+    // per saveWeights call so concurrent workers never share a tmp path.
     const dir = join(path, "..");
     if (!existsSync(dir))
         mkdirSync(dir, { recursive: true });
-    const tmpPath = `${path}.${process.pid}.tmp`;
+    const uniq = `${process.pid}.${++_saveWeightsCounter}.${Math.random().toString(36).slice(2, 8)}`;
+    const tmpPath = `${path}.${uniq}.tmp`;
     writeFileSync(tmpPath, JSON.stringify(weights), { encoding: "utf-8", mode: 0o600 });
     renameSync(tmpPath, path);
 }

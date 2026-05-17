@@ -1770,9 +1770,19 @@ export class SurrealStore {
       const count = countRows[0]?.count ?? 0;
       if (!(await this.shouldRunMaintenance("purgeStalePendingWork", 10, 1, count))) return 0;
 
+      // v0.7.95 append-only: was DELETE — now soft-archives stale pending_work
+      // rows so historical queue activity stays auditable. Readers filter on
+      // (active = true OR active IS NONE) so archived rows never claim CPU.
       const purged = await this.queryMulti<number>(
-        `LET $stale = (SELECT id FROM pending_work WHERE created_at < time::now() - 7d);
-         FOR $p IN $stale { DELETE $p.id; };
+        `LET $stale = (SELECT id FROM pending_work
+           WHERE created_at < time::now() - 7d
+             AND (active = true OR active IS NONE));
+         FOR $p IN $stale {
+           UPDATE $p.id SET
+             active = false,
+             archived_at = time::now(),
+             archive_reason = "stale_7d_purge";
+         };
          RETURN array::len($stale);`,
       );
       const n = Number(purged ?? 0);

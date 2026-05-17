@@ -41,6 +41,7 @@ DEFINE FIELD IF NOT EXISTS content_hash ON artifact TYPE option<string>;
 DEFINE FIELD IF NOT EXISTS embedding ON artifact TYPE option<array<float>>;
 DEFINE FIELD IF NOT EXISTS tags ON artifact TYPE option<array>;
 DEFINE FIELD IF NOT EXISTS created_at ON artifact TYPE datetime DEFAULT time::now();
+DEFINE FIELD IF NOT EXISTS embedding_target_truncated ON artifact TYPE option<bool>;
 DEFINE INDEX IF NOT EXISTS artifact_vec_idx ON artifact FIELDS embedding HNSW DIMENSION 1024 DIST COSINE;
 DEFINE INDEX IF NOT EXISTS artifact_type_idx ON artifact FIELDS type;
 
@@ -122,6 +123,7 @@ DEFINE FIELD IF NOT EXISTS importance ON identity_chunk TYPE float DEFAULT 0.5;
 DEFINE FIELD IF NOT EXISTS active ON identity_chunk TYPE bool DEFAULT true;
 DEFINE FIELD IF NOT EXISTS archived_at ON identity_chunk TYPE option<datetime>;
 DEFINE FIELD IF NOT EXISTS archive_reason ON identity_chunk TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS embedding_target_truncated ON identity_chunk TYPE option<bool>;
 -- identity_version is written by src/engine/identity.ts and named as a key
 -- column in the UNIQUE compound (source, identity_version, chunk_index) at
 -- schema.surql:identity_chunk_unique. Declared explicitly so INFO FOR TABLE
@@ -167,6 +169,13 @@ DEFINE FIELD IF NOT EXISTS resolved_by ON memory TYPE option<string>;
 DEFINE FIELD IF NOT EXISTS archived_at ON memory TYPE option<datetime>;
 DEFINE FIELD IF NOT EXISTS archive_reason ON memory TYPE option<string>;
 DEFINE FIELD IF NOT EXISTS superseded_by ON memory TYPE option<record<memory>>;
+-- v0.7.95 truncation visibility: when the embedding target was truncated
+-- (BGE-M3 8192-token limit, mirrored as 6000-char slice in maintenance
+-- backfills + surreal.ts:1892 consolidate-backfill), recall fidelity is
+-- partial — the tail of the stored text isn't represented in the vector.
+-- Set to true at every site that truncates before embedding so queries can
+-- audit which rows have known-partial vectors.
+DEFINE FIELD IF NOT EXISTS embedding_target_truncated ON memory TYPE option<bool>;
 DEFINE INDEX IF NOT EXISTS memory_vec_idx ON memory FIELDS embedding HNSW DIMENSION 1024 DIST COSINE;
 DEFINE INDEX IF NOT EXISTS memory_category_idx ON memory FIELDS category;
 -- Status is filtered on every vectorSearch (line 417), getSessionRetrievedMemories
@@ -440,6 +449,7 @@ DEFINE FIELD IF NOT EXISTS active ON reflection TYPE bool DEFAULT true;
 DEFINE FIELD IF NOT EXISTS archived_at ON reflection TYPE option<datetime>;
 DEFINE FIELD IF NOT EXISTS archive_reason ON reflection TYPE option<string>;
 DEFINE FIELD IF NOT EXISTS superseded_by ON reflection TYPE option<record<reflection>>;
+DEFINE FIELD IF NOT EXISTS embedding_target_truncated ON reflection TYPE option<bool>;
 DEFINE INDEX IF NOT EXISTS reflection_vec_idx ON reflection FIELDS embedding HNSW DIMENSION 1024 DIST COSINE;
 
 DEFINE TABLE IF NOT EXISTS reflects_on TYPE RELATION IN reflection OUT session;
@@ -533,6 +543,7 @@ DEFINE FIELD IF NOT EXISTS category ON monologue TYPE string;
 DEFINE FIELD IF NOT EXISTS content ON monologue TYPE string;
 DEFINE FIELD IF NOT EXISTS embedding ON monologue TYPE option<array<float>>;
 DEFINE FIELD IF NOT EXISTS timestamp ON monologue TYPE datetime DEFAULT time::now();
+DEFINE FIELD IF NOT EXISTS embedding_target_truncated ON monologue TYPE option<bool>;
 DEFINE INDEX IF NOT EXISTS monologue_session ON monologue FIELDS session_id;
 DEFINE INDEX IF NOT EXISTS monologue_category ON monologue FIELDS category;
 DEFINE INDEX IF NOT EXISTS monologue_vec_idx ON monologue FIELDS embedding HNSW DIMENSION 1024 DIST COSINE;
@@ -627,7 +638,14 @@ DEFINE FIELD OVERWRITE status ON pending_work TYPE string
 DEFINE FIELD IF NOT EXISTS priority ON pending_work TYPE int DEFAULT 5;
 DEFINE FIELD IF NOT EXISTS created_at ON pending_work TYPE datetime DEFAULT time::now();
 DEFINE FIELD IF NOT EXISTS completed_at ON pending_work TYPE option<datetime>;
+-- v0.7.95 append-only: pending_work formerly DELETE'd dupes + 7d-stale rows;
+-- now soft-archived via active=false + archived_at + archive_reason. Readers
+-- (fetch_pending_work, status_breakdown) filter `(active = true OR active IS NONE)`.
+DEFINE FIELD IF NOT EXISTS active ON pending_work TYPE bool DEFAULT true;
+DEFINE FIELD IF NOT EXISTS archived_at ON pending_work TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS archive_reason ON pending_work TYPE option<string>;
 DEFINE INDEX IF NOT EXISTS pw_status_idx ON pending_work FIELDS status, priority;
+DEFINE INDEX IF NOT EXISTS pw_active_idx ON pending_work FIELDS active;
 
 -- ============================================================
 -- EMBEDDING CACHE: Persistent L2 cache surviving daemon restarts
@@ -742,6 +760,7 @@ DEFINE FIELD IF NOT EXISTS superseded_by ON concept TYPE option<record<memory>>;
 -- already use superseded_at IS NONE as the active filter (vectorSearch line
 -- 441); archive_reason annotates why a concept was marked inactive.
 DEFINE FIELD IF NOT EXISTS archive_reason ON concept TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS embedding_target_truncated ON concept TYPE option<bool>;
 
 -- ============================================================
 -- ARTIFACT DEDUP SEAL (defense in depth)

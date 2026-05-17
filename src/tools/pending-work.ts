@@ -151,7 +151,9 @@ export async function handleFetchPendingWork(
       // first, matching FIFO intuition.
       const stuck = await store.queryFirst<{ id: string; session_id: string; work_type: string }>(
         `SELECT id, session_id, work_type FROM pending_work
-           WHERE status = "processing" AND created_at < time::now() - 10m
+           WHERE status = "processing"
+             AND created_at < time::now() - 10m
+             AND (active = true OR active IS NONE)
            ORDER BY created_at ASC`,
       );
       for (const row of stuck as { id: string; session_id: string; work_type: string }[]) {
@@ -163,12 +165,20 @@ export async function handleFetchPendingWork(
           // for the same (session_id, work_type) triggers DELETE of the
           // stuck row. AND id != ${row.id} excludes self from the check so
           // we don't see ourselves as our own sibling.
+          // v0.7.95 append-only: was DELETE of duplicate stuck row — now
+          // soft-archives via active=false + archive_reason. Sibling
+          // still exists, so this row is redundant; UPDATE preserves the
+          // forensic trail without polluting the active queue.
           await store.queryExec(
             `BEGIN TRANSACTION;
              LET $siblings = (SELECT id FROM pending_work
-               WHERE session_id = $sid AND work_type = $wt AND id != ${row.id} LIMIT 1);
+               WHERE session_id = $sid AND work_type = $wt AND id != ${row.id}
+                 AND (active = true OR active IS NONE) LIMIT 1);
              IF array::len($siblings) > 0 THEN
-               DELETE ${row.id}
+               UPDATE ${row.id} SET
+                 active = false,
+                 archived_at = time::now(),
+                 archive_reason = "stale_recovery_sibling_won"
              ELSE
                UPDATE ${row.id} SET status = "pending"
              END;
@@ -183,7 +193,10 @@ export async function handleFetchPendingWork(
     // the WHERE status="pending" on the UPDATE acts as an optimistic lock so
     // concurrent claimers don't double-process the same item.
     const candidates = await store.queryFirst<{ id: string }>(
-      `SELECT id FROM pending_work WHERE status = "pending" ORDER BY priority ASC, created_at ASC LIMIT 3`,
+      `SELECT id FROM pending_work
+         WHERE status = "pending"
+           AND (active = true OR active IS NONE)
+         ORDER BY priority ASC, created_at ASC LIMIT 3`,
     );
     if (candidates.length === 0) {
       return text(JSON.stringify({ empty: true, message: "No pending work items. You are done." }));
@@ -244,12 +257,20 @@ async function markTerminal(
   status: "completed" | "failed",
 ): Promise<void> {
   assertRecordId(workId);
+  // v0.7.95 append-only: was DELETE on terminal-sibling collision — now
+  // soft-archives. Sibling already occupies the canonical (session, work,
+  // status) triple, so this row is the duplicate; preserve the forensic
+  // trail via UPDATE active=false.
   await state.store.queryExec(
     `BEGIN TRANSACTION;
      LET $siblings = (SELECT id FROM pending_work
-       WHERE session_id = $sid AND work_type = $wt AND status = $st AND id != ${workId} LIMIT 1);
+       WHERE session_id = $sid AND work_type = $wt AND status = $st AND id != ${workId}
+         AND (active = true OR active IS NONE) LIMIT 1);
      IF array::len($siblings) > 0 THEN
-       DELETE ${workId}
+       UPDATE ${workId} SET
+         active = false,
+         archived_at = time::now(),
+         archive_reason = "terminal_sibling_canonical"
      ELSE
        UPDATE ${workId} SET status = $st, completed_at = time::now()
      END;
