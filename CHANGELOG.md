@@ -4,6 +4,68 @@ All notable changes to KongCode are documented here. The 0.7.x series introduced
 
 ## [Unreleased]
 
+## [0.7.93] — 2026-05-17
+
+The append-only conversion. Founder rule (saved Tier-0 as `core_memory:c7hcrruuezcmehmd30yd`):
+
+> "Nothing should be getting deleted."
+
+A two-session, multi-subagent sweep across kongcode surfaced 11 DELETE sites on content-bearing tables plus 8 other silent-data-loss patterns. The destructive consolidate/GC/dedup patterns were inherited from the KongBrain fork in `5b93d73` (2026-04-06) and had been silently destroying user-supplied memory content for ~6 weeks. v0.7.92's skill-supersede fix was one instance of the same broader architectural bug.
+
+### Fixed — DELETE → soft-deactivate across content tables
+
+Every DELETE on a content-bearing table is now an UPDATE soft-deactivate with `archived_at` + `archive_reason` annotations. Dedup-loser writes additionally carry `superseded_by` so the audit chain is recoverable.
+
+- `src/engine/surreal.ts:1685` `garbageCollectMemories` — was `DELETE memory WHERE stale_180d` (60-day untouched + low-importance rows hard-deleted). Now `UPDATE status='archived', archive_reason='stale_14d_low_importance'`. Readers already filter `(status = 'active' OR status IS NONE)`.
+- `src/engine/surreal.ts:1718` `garbageCollectConcepts` — was `DELETE concept` of short-uppercase orphans. Now `UPDATE superseded_at = time::now(), archive_reason = 'stale_orphan_short_uppercase'`. Readers filter `superseded_at IS NONE`.
+- `src/engine/surreal.ts:1863, 1956, 2006` `consolidateMemories` Passes 1, 2, 3 — three sites that DELETE'd the cosine-loser of memory-or-reflection dedup (cosine ≥ 0.88, same category). Now soft-archive the loser, wrap UPDATE-keeper + UPDATE-loser in BEGIN/COMMIT TRANSACTION so a network blip can't leave half-done state.
+- `src/engine/surreal.ts:1244` `createMemory` — was a cosine-≥0.92 silent-discard that bumped the existing row's importance/access_count and threw away the incoming text. Now requires lexical text equality (`string::lowercase(text) = string::lowercase($text)`) before merging; semantically-similar-but-different content persists as siblings.
+- `src/engine/identity.ts:103, 203` + `src/engine/cognitive-bootstrap.ts:137, 173, 227` — `DELETE identity_chunk WHERE source=$source` and `DELETE core_memory WHERE …` on bootstrap/identity-version replacement. Now soft-archive with `active=false`.
+- `src/engine/soul.ts:656, 666` — `DELETE core_memory WHERE category=...` on soul re-graduation. Now soft-archive so prior personae remain queryable for soul-evolution history.
+- `src/engine/hooks/profile.ts:115` — `DELETE core_memory` on hook-profile replacement. Now soft-archive.
+
+### Fixed — commitReflection silent-discard removed
+
+`src/engine/commit.ts:683-696` previously had a cosine-≥0.85 dedup that silently dropped the incoming reflection if any prior reflection (any category, any session) cleared the threshold. Now opt-in only: callers must explicitly pass `dedupCosineThreshold` to enable, and the SELECT is scoped to same `category` + active rows.
+
+### Added — schema fields
+
+`src/engine/schema.surql`:
+
+- `memory`: `archived_at`, `archive_reason`, `superseded_by option<record<memory>>`.
+- `concept`: `archive_reason` (concept already had `superseded_at` + `superseded_by`).
+- `identity_chunk`: `active bool DEFAULT true`, `archived_at`, `archive_reason`.
+- `core_memory`: `archived_at`, `archive_reason` (already had `active`).
+- `reflection`: `active`, `archived_at`, `archive_reason`, `superseded_by option<record<reflection>>`.
+
+All additions use `DEFINE FIELD IF NOT EXISTS` and `option<...>` so existing rows aren't broken on schema apply.
+
+### Added — reader filters
+
+Every reader on `identity_chunk` and `reflection` now carries `(active = true OR active IS NONE)`. `concept-links.ts:119` lexical fallback now filters `superseded_at IS NONE`. `surreal.ts:2118` (`getDueMemories` Fibonacci-resurface) and `surreal.ts:1456` (`getUnresolvedMemories`) tightened to exclude soft-archived rows. `soul.ts:117/190/195` and `reflection.ts:111` graduation/stats reflection-counts filter `active` so the count doesn't double when Pass 3 archives dedup losers.
+
+### Added — migration script
+
+`scripts/migrate-to-append-only.mjs` (NEW). Idempotent, dry-run by default, `--apply` to mutate. Backfills `active=true` on existing identity_chunk + reflection rows (memory/concept already have soft-deactivate fields with appropriate defaults). Verifies post-apply that `count() WHERE active IS NONE` returns 0.
+
+### Added — lint extension
+
+`test/pending-work-update-id.test.ts` — the existing static lint that catches unsafe `UPDATE/SELECT/DELETE $id` patterns now excepts `UPDATE $m.id` inside `FOR $m IN $stale { ... }` blocks (was DELETE-only). Required because the GC paths now use the SurrealQL FOR-loop UPDATE pattern.
+
+### Verified
+
+- `npm test`: **Test Files 64 passed (64) / Tests 992 passed (992)** (up from 991, +1 for the new opt-in reflection-dedup test).
+- Migration applied to live DB: 17 identity_chunk + 49 reflection rows backfilled, 0 remaining missing `active`.
+- Auditor agent: 1 CRITICAL (`getDueMemories` filter regression — fixed), 2 MAJOR (`concept-links` lexical fallback + soul graduation counts — both fixed), 1 MINOR (jsdoc stale — fixed).
+- Validator agent: 7/8 verified, 1 CONCERN (`getUnresolvedMemories` would leak archived rows once any exist — fixed before tag).
+
+### Out of scope (deferred)
+
+- Phase 4 (embed integrity): turn_archive backfill for 1126 silently-unrecallable archived turns, fix `surreal.ts:1892` truncation/storage mismatch — v0.7.94.
+- Phase 5 (structural lints D1-D4): backfill-coverage, name-equality guard, swallow-then-create, no-DELETE-on-content-tables — v0.7.94.
+- Phase 6 (README accuracy): tests-badge, LongMemEval claim, WMR signal count, MCP tool list omissions, pre-push hook documentation — v0.7.94.
+- Pre-v0.7.93 rows that were already DELETE'd by past GC/consolidate runs cannot be resurrected. v0.7.93 stops the loss going forward; it can't reach back.
+
 ## [0.7.92] — 2026-05-17
 
 Two bugs that had been silently corrupting graph state for weeks. Both surfaced when the founder pushed back on "the gap isn't growing, it's minor" and "the skill is just missing, I'll restore it" — neither was a real explanation. The fixes follow probe-first diagnosis to verified-with-receipts.

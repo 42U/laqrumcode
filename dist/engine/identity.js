@@ -84,11 +84,21 @@ export async function seedIdentity(store, embeddings) {
                 // re-seed. Pre-0.4.0 installs had no identity_version field, which the
                 // check naturally treats as "not current version" — triggers migration.
                 const vrows = await store.queryFirst(`SELECT count() AS count FROM identity_chunk
-             WHERE source = $source AND identity_version = $v GROUP ALL`, { source: IDENTITY_SOURCE, v: IDENTITY_VERSION });
+             WHERE source = $source AND identity_version = $v
+               AND (active = true OR active IS NONE)
+             GROUP ALL`, { source: IDENTITY_SOURCE, v: IDENTITY_VERSION });
                 const currentVersionSeeded = (vrows[0]?.count ?? 0) >= IDENTITY_CHUNKS.length;
                 if (currentVersionSeeded)
                     return 0;
-                await store.queryExec(`DELETE identity_chunk WHERE source = $source`, { source: IDENTITY_SOURCE });
+                // v0.7.93 append-only: was DELETE — now soft-deactivates the prior
+                // version's chunks. The next CREATE block writes new chunks under a
+                // bumped IDENTITY_VERSION so the UNIQUE (source, identity_version,
+                // chunk_index) constraint doesn't collide with the archived rows.
+                await store.queryExec(`UPDATE identity_chunk SET
+             active = false,
+             archived_at = time::now(),
+             archive_reason = 'identity_version_replaced'
+           WHERE source = $source AND (active = true OR active IS NONE)`, { source: IDENTITY_SOURCE });
             }
             catch (e) {
                 swallow.warn("identity:check", e);
@@ -139,7 +149,9 @@ export async function hasUserIdentity(store) {
     if (!store.isAvailable())
         return true;
     try {
-        const rows = await store.queryFirst(`SELECT count() AS count FROM identity_chunk WHERE source = $source GROUP ALL`, { source: USER_IDENTITY_SOURCE });
+        const rows = await store.queryFirst(`SELECT count() AS count FROM identity_chunk
+       WHERE source = $source AND (active = true OR active IS NONE)
+       GROUP ALL`, { source: USER_IDENTITY_SOURCE });
         return (rows[0]?.count ?? 0) > 0;
     }
     catch (e) {
@@ -172,7 +184,12 @@ export async function saveUserIdentity(chunks, store, embeddings) {
     if (chunks.length === 0)
         return 0;
     try {
-        await store.queryExec(`DELETE identity_chunk WHERE source = $source`, { source: USER_IDENTITY_SOURCE });
+        // v0.7.93 append-only — same shape as the bootstrap identity replacement.
+        await store.queryExec(`UPDATE identity_chunk SET
+         active = false,
+         archived_at = time::now(),
+         archive_reason = 'user_identity_replaced'
+       WHERE source = $source AND (active = true OR active IS NONE)`, { source: USER_IDENTITY_SOURCE });
     }
     catch (e) {
         swallow.warn("identity:clearUserIdentity", e);

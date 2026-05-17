@@ -130,9 +130,11 @@ export interface CommitReflectionData {
      *  save-summary/work-completion DOWNGRADE (importance=3, no embedding).
      *  Default true. Setting false bypasses the filter (tests, migrations). */
     applyContentFilter?: boolean;
-    /** Cosine-similarity dedup threshold against existing reflections.
-     *  undefined → 0.85 (matches pre-v0.7.76 commitReflection). Set null to
-     *  disable dedup entirely. */
+    /** Opt-in cosine-similarity dedup threshold against existing reflections.
+     *  v0.7.93: dedup is now OFF by default (per the "nothing should be
+     *  deleted" append-only rule). Pass a number (e.g. 0.85) to opt into
+     *  silently dropping the incoming write when an active same-category
+     *  reflection exists with cosine > threshold. undefined/null = disabled. */
     dedupCosineThreshold?: number | null;
 }
 export interface CommitSubagentData {

@@ -115,6 +115,13 @@ DEFINE FIELD IF NOT EXISTS chunk_index ON identity_chunk TYPE int;
 DEFINE FIELD IF NOT EXISTS text ON identity_chunk TYPE string;
 DEFINE FIELD IF NOT EXISTS embedding ON identity_chunk TYPE option<array<float>>;
 DEFINE FIELD IF NOT EXISTS importance ON identity_chunk TYPE float DEFAULT 0.5;
+-- v0.7.93 append-only: identity_chunk previously DELETE'd by identity.ts +
+-- cognitive-bootstrap.ts on soul-evolve replacement. Now soft-deactivated via
+-- active=false + archived_at + archive_reason; the new version inserts as
+-- additional rows with chunk_index continuing from prior.
+DEFINE FIELD IF NOT EXISTS active ON identity_chunk TYPE bool DEFAULT true;
+DEFINE FIELD IF NOT EXISTS archived_at ON identity_chunk TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS archive_reason ON identity_chunk TYPE option<string>;
 -- identity_version is written by src/engine/identity.ts and named as a key
 -- column in the UNIQUE compound (source, identity_version, chunk_index) at
 -- schema.surql:identity_chunk_unique. Declared explicitly so INFO FOR TABLE
@@ -153,6 +160,13 @@ DEFINE FIELD IF NOT EXISTS last_accessed ON memory TYPE option<datetime>;
 DEFINE FIELD IF NOT EXISTS status ON memory TYPE option<string> DEFAULT "active";
 DEFINE FIELD IF NOT EXISTS resolved_at ON memory TYPE option<datetime>;
 DEFINE FIELD IF NOT EXISTS resolved_by ON memory TYPE option<string>;
+-- v0.7.93 append-only: replaces DELETE in garbageCollectMemories +
+-- consolidateMemories. Archived rows are soft-deactivated via status='archived'
+-- and recorded with archived_at + archive_reason; consolidate-loser rows also
+-- carry superseded_by pointing at the keeper.
+DEFINE FIELD IF NOT EXISTS archived_at ON memory TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS archive_reason ON memory TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS superseded_by ON memory TYPE option<record<memory>>;
 DEFINE INDEX IF NOT EXISTS memory_vec_idx ON memory FIELDS embedding HNSW DIMENSION 1024 DIST COSINE;
 DEFINE INDEX IF NOT EXISTS memory_category_idx ON memory FIELDS category;
 -- Status is filtered on every vectorSearch (line 417), getSessionRetrievedMemories
@@ -418,6 +432,14 @@ DEFINE FIELD IF NOT EXISTS severity ON reflection TYPE string DEFAULT "minor"; -
 DEFINE FIELD IF NOT EXISTS importance ON reflection TYPE float DEFAULT 7.0;
 DEFINE FIELD IF NOT EXISTS access_count ON reflection TYPE int DEFAULT 0;
 DEFINE FIELD IF NOT EXISTS created_at ON reflection TYPE datetime DEFAULT time::now();
+-- v0.7.93 append-only: consolidateMemories Pass 3 previously DELETE'd
+-- reflection-dedup losers; now soft-deactivates via active=false + archived_at
+-- + archive_reason. The winner's id is captured in superseded_by so the audit
+-- chain is recoverable.
+DEFINE FIELD IF NOT EXISTS active ON reflection TYPE bool DEFAULT true;
+DEFINE FIELD IF NOT EXISTS archived_at ON reflection TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS archive_reason ON reflection TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS superseded_by ON reflection TYPE option<record<reflection>>;
 DEFINE INDEX IF NOT EXISTS reflection_vec_idx ON reflection FIELDS embedding HNSW DIMENSION 1024 DIST COSINE;
 
 DEFINE TABLE IF NOT EXISTS reflects_on TYPE RELATION IN reflection OUT session;
@@ -494,6 +516,11 @@ DEFINE FIELD IF NOT EXISTS category ON core_memory TYPE string DEFAULT "general"
 DEFINE FIELD IF NOT EXISTS priority ON core_memory TYPE int DEFAULT 50;
 DEFINE FIELD IF NOT EXISTS tier ON core_memory TYPE int DEFAULT 0;
 DEFINE FIELD IF NOT EXISTS active ON core_memory TYPE bool DEFAULT true;
+-- v0.7.93 append-only: replaces DELETE in soul.ts, profile.ts,
+-- cognitive-bootstrap.ts. Soft-deactivation now sets active=false +
+-- archived_at + archive_reason rather than dropping the row.
+DEFINE FIELD IF NOT EXISTS archived_at ON core_memory TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS archive_reason ON core_memory TYPE option<string>;
 DEFINE FIELD IF NOT EXISTS session_id ON core_memory TYPE option<string>;
 DEFINE FIELD IF NOT EXISTS created_at ON core_memory TYPE datetime DEFAULT time::now();
 DEFINE FIELD IF NOT EXISTS updated_at ON core_memory TYPE datetime DEFAULT time::now();
@@ -711,6 +738,10 @@ DEFINE FIELD IF NOT EXISTS reason ON subagent TYPE option<string>;
 DEFINE FIELD IF NOT EXISTS kc_session_id ON session TYPE option<string>;
 DEFINE FIELD IF NOT EXISTS superseded_at ON concept TYPE option<datetime>;
 DEFINE FIELD IF NOT EXISTS superseded_by ON concept TYPE option<record<memory>>;
+-- v0.7.93 append-only: replaces DELETE in garbageCollectConcepts. Concepts
+-- already use superseded_at IS NONE as the active filter (vectorSearch line
+-- 441); archive_reason annotates why a concept was marked inactive.
+DEFINE FIELD IF NOT EXISTS archive_reason ON concept TYPE option<string>;
 
 -- ============================================================
 -- ARTIFACT DEDUP SEAL (defense in depth)

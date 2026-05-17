@@ -93,14 +93,24 @@ export async function seedIdentity(
         // check naturally treats as "not current version" — triggers migration.
         const vrows = await store.queryFirst<{ count: number }>(
           `SELECT count() AS count FROM identity_chunk
-             WHERE source = $source AND identity_version = $v GROUP ALL`,
+             WHERE source = $source AND identity_version = $v
+               AND (active = true OR active IS NONE)
+             GROUP ALL`,
           { source: IDENTITY_SOURCE, v: IDENTITY_VERSION },
         );
         const currentVersionSeeded = (vrows[0]?.count ?? 0) >= IDENTITY_CHUNKS.length;
         if (currentVersionSeeded) return 0;
 
+        // v0.7.93 append-only: was DELETE — now soft-deactivates the prior
+        // version's chunks. The next CREATE block writes new chunks under a
+        // bumped IDENTITY_VERSION so the UNIQUE (source, identity_version,
+        // chunk_index) constraint doesn't collide with the archived rows.
         await store.queryExec(
-          `DELETE identity_chunk WHERE source = $source`,
+          `UPDATE identity_chunk SET
+             active = false,
+             archived_at = time::now(),
+             archive_reason = 'identity_version_replaced'
+           WHERE source = $source AND (active = true OR active IS NONE)`,
           { source: IDENTITY_SOURCE },
         );
       } catch (e) {
@@ -159,7 +169,9 @@ export async function hasUserIdentity(store: SurrealStore): Promise<boolean> {
   if (!store.isAvailable()) return true;
   try {
     const rows = await store.queryFirst<{ count: number }>(
-      `SELECT count() AS count FROM identity_chunk WHERE source = $source GROUP ALL`,
+      `SELECT count() AS count FROM identity_chunk
+       WHERE source = $source AND (active = true OR active IS NONE)
+       GROUP ALL`,
       { source: USER_IDENTITY_SOURCE },
     );
     return (rows[0]?.count ?? 0) > 0;
@@ -199,8 +211,13 @@ export async function saveUserIdentity(
   if (chunks.length === 0) return 0;
 
   try {
+    // v0.7.93 append-only — same shape as the bootstrap identity replacement.
     await store.queryExec(
-      `DELETE identity_chunk WHERE source = $source`,
+      `UPDATE identity_chunk SET
+         active = false,
+         archived_at = time::now(),
+         archive_reason = 'user_identity_replaced'
+       WHERE source = $source AND (active = true OR active IS NONE)`,
       { source: USER_IDENTITY_SOURCE },
     );
   } catch (e) {

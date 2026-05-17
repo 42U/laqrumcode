@@ -49,7 +49,10 @@ async function getGraduationSignals(store) {
     try {
         const [sessions, reflections, causal, concepts, skills, monologues, span] = await Promise.all([
             store.queryFirst(`SELECT count() AS count FROM session GROUP ALL`).catch(() => []),
-            store.queryFirst(`SELECT count() AS count FROM reflection GROUP ALL`).catch(() => []),
+            // v0.7.93: reflection graduation gate counts only active rows. After
+            // consolidate Pass 3 archives duplicate-losers, including them would
+            // double-count work and inflate the gate.
+            store.queryFirst(`SELECT count() AS count FROM reflection WHERE (active = true OR active IS NONE) GROUP ALL`).catch(() => []),
             store.queryFirst(`SELECT count() AS count FROM causal_chain GROUP ALL`).catch(() => []),
             store.queryFirst(`SELECT count() AS count FROM concept GROUP ALL`).catch(() => []),
             store.queryFirst(`SELECT count() AS count FROM skill GROUP ALL`).catch(() => []),
@@ -110,10 +113,14 @@ export async function getQualitySignals(store) {
             // Skill success vs failure totals
             store.queryFirst(`SELECT math::sum(success_count) AS totalSuccess, math::sum(failure_count) AS totalFailure
          FROM skill WHERE active = true OR active = NONE GROUP ALL`).catch(() => []),
-            // Critical reflections count
-            store.queryFirst(`SELECT count() AS count FROM reflection WHERE severity = "critical" GROUP ALL`).catch(() => []),
-            // Total reflections count
-            store.queryFirst(`SELECT count() AS count FROM reflection GROUP ALL`).catch(() => []),
+            // Critical reflections count. v0.7.93: filter active per the gate rule.
+            store.queryFirst(`SELECT count() AS count FROM reflection
+         WHERE severity = "critical" AND (active = true OR active IS NONE)
+         GROUP ALL`).catch(() => []),
+            // Total reflections count (active only — same v0.7.93 rule).
+            store.queryFirst(`SELECT count() AS count FROM reflection
+         WHERE (active = true OR active IS NONE)
+         GROUP ALL`).catch(() => []),
             // Tool failure rate from retrieval outcomes
             store.queryFirst(`SELECT math::mean(IF tool_success = false THEN 1.0 ELSE 0.0 END) AS failRate
          FROM retrieval_outcome WHERE tool_success != NONE GROUP ALL`).catch(() => []),
@@ -496,16 +503,26 @@ const SOUL_CATEGORY = "soul";
 export async function seedSoulAsCoreMemory(soul, store) {
     if (!store.isAvailable())
         return 0;
-    // Clear any existing soul core memory entries
+    // v0.7.93 append-only: was DELETE on soul-category entries — now
+    // soft-archives so prior graduations stay readable for forensic / soul
+    // evolution history. New soul entries land fresh; readers filter on active.
     try {
-        await store.queryExec(`DELETE core_memory WHERE category = $cat`, { cat: SOUL_CATEGORY });
+        await store.queryExec(`UPDATE core_memory SET
+         active = false,
+         archived_at = time::now(),
+         archive_reason = 'soul_regraduation'
+       WHERE category = $cat AND (active = true OR active IS NONE)`, { cat: SOUL_CATEGORY });
     }
     catch (e) {
         swallow.warn("soul:clearCoreMem", e);
     }
-    // Also clear old persona entry from previous graduation code
+    // Also archive old persona entry from previous graduation code.
     try {
-        await store.queryExec(`DELETE core_memory WHERE category = 'persona' AND tier = 0`);
+        await store.queryExec(`UPDATE core_memory SET
+         active = false,
+         archived_at = time::now(),
+         archive_reason = 'soul_regraduation_legacy_persona'
+       WHERE category = 'persona' AND tier = 0 AND (active = true OR active IS NONE)`);
     }
     catch { /* ignore */ }
     let seeded = 0;

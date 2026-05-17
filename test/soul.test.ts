@@ -35,7 +35,12 @@ function mockStore(signals: Partial<{
     queryFirst: async (sql: string) => {
       // Volume signals
       if (sql.includes("FROM session GROUP ALL")) return [{ count: signals.sessions ?? 0 }];
-      if (sql.includes("FROM reflection GROUP ALL") && !sql.includes("severity")) return [{ count: signals.reflections ?? 0 }];
+      // v0.7.93: SQL now carries a WHERE (active = true OR active IS NONE)
+      // clause between `FROM reflection` and `GROUP ALL`, so the literal
+      // substring check used to fail. Accept both shapes.
+      if (/FROM\s+reflection\b/.test(sql) && sql.includes("GROUP ALL") && !sql.includes("severity")) {
+        return [{ count: signals.reflections ?? 0 }];
+      }
       if (sql.includes("FROM causal_chain GROUP ALL")) return [{ count: signals.causalChains ?? 0 }];
       if (sql.includes("FROM concept GROUP ALL")) return [{ count: signals.concepts ?? 0 }];
       if (sql.includes("FROM skill GROUP ALL")) return [{ count: signals.skills ?? 0 }];
@@ -322,7 +327,14 @@ describe("seedSoulAsCoreMemory", () => {
     return {
       isAvailable: () => true,
       queryExec: async (_sql: string, params?: any) => {
-        if (_sql.includes("DELETE") && params?.cat) deleted.push(params.cat);
+        // v0.7.93 append-only: was DELETE — now UPDATE...SET active=false with
+        // matching archive_reason. Mock the soft-archive shape so the existing
+        // test contract (deleted array contains the cleared category) keeps
+        // working without coupling tests to the exact SQL form.
+        if ((_sql.includes("DELETE") || /UPDATE\s+core_memory[\s\S]+active\s*=\s*false/.test(_sql))
+            && params?.cat) {
+          deleted.push(params.cat);
+        }
       },
       createCoreMemory: async (text: string, category: string, priority: number, tier: number) => {
         records.push({ text, category, priority, tier });

@@ -298,13 +298,22 @@ async function commitReflection(deps, data) {
             swallow(`${logTag}:embed`, e);
         }
     }
-    // 3. Cosine-similarity dedup. undefined → 0.85 (matches pre-v0.7.76).
-    //    null → disable.
-    const threshold = data.dedupCosineThreshold === undefined ? 0.85 : data.dedupCosineThreshold;
-    if (threshold !== null && embedding?.length) {
+    // v0.7.93 append-only: was a cosine-≥0.85 silent-discard that dropped the
+    // incoming reflection across the WHOLE reflection table (name-blind, no
+    // category guard, no session guard). Same family-2 silent-data-loss bug as
+    // createMemory's old dedup. Per the founder's "nothing should be deleted"
+    // rule, every reflection persists. consolidateMemories Pass 3 (now
+    // soft-archiving) collapses duplicates later, audit chain intact.
+    // The dedupCosineThreshold option is preserved for callers that opt in
+    // explicitly with a non-default value, scoped to same-category active rows.
+    if (data.dedupCosineThreshold != null && embedding?.length) {
+        const threshold = data.dedupCosineThreshold;
         const existing = await store.queryFirst(`SELECT vector::similarity::cosine(embedding, $vec) AS score
-       FROM reflection WHERE embedding != NONE
-       ORDER BY score DESC LIMIT 1`, { vec: embedding });
+       FROM reflection
+       WHERE embedding != NONE
+         AND category = $cat
+         AND (active = true OR active IS NONE)
+       ORDER BY score DESC LIMIT 1`, { vec: embedding, cat: data.category ?? "efficiency" });
         if ((existing[0]?.score ?? 0) > threshold) {
             return { id: "", edges: 0 };
         }

@@ -146,9 +146,11 @@ export interface CommitReflectionData {
    *  save-summary/work-completion DOWNGRADE (importance=3, no embedding).
    *  Default true. Setting false bypasses the filter (tests, migrations). */
   applyContentFilter?: boolean;
-  /** Cosine-similarity dedup threshold against existing reflections.
-   *  undefined → 0.85 (matches pre-v0.7.76 commitReflection). Set null to
-   *  disable dedup entirely. */
+  /** Opt-in cosine-similarity dedup threshold against existing reflections.
+   *  v0.7.93: dedup is now OFF by default (per the "nothing should be
+   *  deleted" append-only rule). Pass a number (e.g. 0.85) to opt into
+   *  silently dropping the incoming write when an active same-category
+   *  reflection exists with cosine > threshold. undefined/null = disabled. */
   dedupCosineThreshold?: number | null;
 }
 
@@ -680,15 +682,24 @@ async function commitReflection(
     catch (e) { swallow(`${logTag}:embed`, e); }
   }
 
-  // 3. Cosine-similarity dedup. undefined → 0.85 (matches pre-v0.7.76).
-  //    null → disable.
-  const threshold = data.dedupCosineThreshold === undefined ? 0.85 : data.dedupCosineThreshold;
-  if (threshold !== null && embedding?.length) {
+  // v0.7.93 append-only: was a cosine-≥0.85 silent-discard that dropped the
+  // incoming reflection across the WHOLE reflection table (name-blind, no
+  // category guard, no session guard). Same family-2 silent-data-loss bug as
+  // createMemory's old dedup. Per the founder's "nothing should be deleted"
+  // rule, every reflection persists. consolidateMemories Pass 3 (now
+  // soft-archiving) collapses duplicates later, audit chain intact.
+  // The dedupCosineThreshold option is preserved for callers that opt in
+  // explicitly with a non-default value, scoped to same-category active rows.
+  if (data.dedupCosineThreshold != null && embedding?.length) {
+    const threshold = data.dedupCosineThreshold;
     const existing = await store.queryFirst<{ score: number }>(
       `SELECT vector::similarity::cosine(embedding, $vec) AS score
-       FROM reflection WHERE embedding != NONE
+       FROM reflection
+       WHERE embedding != NONE
+         AND category = $cat
+         AND (active = true OR active IS NONE)
        ORDER BY score DESC LIMIT 1`,
-      { vec: embedding },
+      { vec: embedding, cat: data.category ?? "efficiency" },
     );
     if ((existing[0]?.score ?? 0) > threshold) {
       return { id: "", edges: 0 };

@@ -34,7 +34,8 @@ export async function retrieveReflections(queryVec, limit = 3, store, projectId)
         const rows = await store.queryFirst(`SELECT id, text, category, severity, importance, embedding,
               vector::similarity::cosine(embedding, $vec) AS score
        FROM reflection
-       WHERE embedding != NONE AND array::len(embedding) > 0${projectFilter}
+       WHERE embedding != NONE AND array::len(embedding) > 0
+         AND (active = true OR active IS NONE)${projectFilter}
        ORDER BY score DESC LIMIT $lim`, bindings);
         const filtered = rows.filter((r) => (r.score ?? 0) > 0.35);
         // Cosine dedup: near-duplicate reflections waste context budget.
@@ -86,7 +87,9 @@ export async function getReflectionCount(store) {
     try {
         if (!store.isAvailable())
             return 0;
-        const rows = await store.queryFirst(`SELECT count() AS count FROM reflection GROUP ALL`);
+        const rows = await store.queryFirst(`SELECT count() AS count FROM reflection
+       WHERE (active = true OR active IS NONE)
+       GROUP ALL`);
         return Number(rows[0]?.count ?? 0);
     }
     catch (e) {

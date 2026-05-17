@@ -94,7 +94,9 @@ export async function linkConceptHierarchy(conceptId, conceptName, store, embedd
              AND superseded_at IS NONE
            ORDER BY score DESC
            LIMIT 50`, { vec: conceptEmb, cid: conceptId })
-            : await store.queryFirst(`SELECT id, content FROM concept WHERE id != $cid LIMIT 50`, { cid: conceptId });
+            : await store.queryFirst(`SELECT id, content FROM concept
+           WHERE id != $cid AND superseded_at IS NONE
+           LIMIT 50`, { cid: conceptId });
         if (existing.length === 0)
             return;
         const lowerName = conceptName.toLowerCase();

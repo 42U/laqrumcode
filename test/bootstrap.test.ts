@@ -85,9 +85,15 @@ describe("seedIdentity", () => {
     const count = await seedIdentity(store, embeddings);
 
     expect(count).toBe(11);
-    // Should have deleted old chunks first
+    // v0.7.93 append-only: was DELETE — now soft-deactivates prior chunks
+    // via UPDATE active=false + archived_at + archive_reason so old version
+    // chunks stay queryable for forensic audit.
     expect(store.queryExec).toHaveBeenCalledWith(
-      expect.stringContaining("DELETE identity_chunk"),
+      expect.stringContaining("UPDATE identity_chunk SET"),
+      expect.any(Object),
+    );
+    expect(store.queryExec).toHaveBeenCalledWith(
+      expect.stringContaining("active = false"),
       expect.any(Object),
     );
   });
@@ -179,9 +185,14 @@ describe("saveUserIdentity", () => {
 
     expect(count).toBe(2);
     expect(embeddings.embed).toHaveBeenCalledTimes(2);
-    // Should have cleared old user identity first
+    // v0.7.93 append-only: was DELETE — now soft-deactivates prior user
+    // identity via UPDATE active=false + archived_at + archive_reason.
     expect(store.queryExec).toHaveBeenCalledWith(
-      expect.stringContaining("DELETE identity_chunk"),
+      expect.stringContaining("UPDATE identity_chunk SET"),
+      expect.any(Object),
+    );
+    expect(store.queryExec).toHaveBeenCalledWith(
+      expect.stringContaining("user_identity_replaced"),
       expect.any(Object),
     );
   });

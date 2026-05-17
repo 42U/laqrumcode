@@ -104,13 +104,33 @@ describe("commitKnowledge — reflection kind", () => {
     expect(createCall![1].record.embedding).toBeUndefined();
   });
 
-  it("skips write when cosine dedup score exceeds threshold", async () => {
+  // v0.7.93 append-only: cosine-dedup is no longer default behavior. Per the
+  // founder's "nothing should be deleted" rule, every reflection persists by
+  // default; the dedup branch now requires an explicit dedupCosineThreshold.
+  // Updated test asserts the new contract: (a) no opt-in => write persists,
+  // (b) explicit threshold => silent-skip preserved for callers that want it.
+  it("persists by default even when a near-duplicate exists", async () => {
     const state = mockState({ existingDedupScore: 0.9 });
     const result = await commitKnowledge(state, {
       kind: "reflection",
       text: "Clean reflection text that would otherwise pass the filter.",
       sessionId: "kc-uuid-1",
       surrealSessionId: "session:s1",
+    });
+    expect(result.id).toBe("reflection:r1");
+    const createCalls = (state.store as any).queryFirst.mock.calls
+      .filter((c: any[]) => typeof c[0] === "string" && c[0].includes("CREATE reflection"));
+    expect(createCalls.length).toBe(1);
+  });
+
+  it("opt-in dedupCosineThreshold still skips write when score exceeds it", async () => {
+    const state = mockState({ existingDedupScore: 0.9 });
+    const result = await commitKnowledge(state, {
+      kind: "reflection",
+      text: "Clean reflection text that would otherwise pass the filter.",
+      sessionId: "kc-uuid-1",
+      surrealSessionId: "session:s1",
+      dedupCosineThreshold: 0.85,
     });
     expect(result.id).toBe("");
     expect(result.edges).toBe(0);

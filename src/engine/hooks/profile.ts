@@ -111,11 +111,18 @@ export async function seedHookProfileDirective(
   const tagged = `${directive}\n[kc_hook_profile_v1]`;
 
   try {
+    // v0.7.93 append-only: was DELETE — now soft-archives prior hook-profile
+    // directives. New one inserts fresh; readers filter on active.
     await store.queryExec(
-      `DELETE core_memory WHERE text CONTAINS '[kc_hook_profile_v1]'`,
+      `UPDATE core_memory SET
+         active = false,
+         archived_at = time::now(),
+         archive_reason = 'hook_profile_replaced'
+       WHERE text CONTAINS '[kc_hook_profile_v1]'
+         AND (active = true OR active IS NONE)`,
     );
   } catch {
-    // best-effort dedup — fall through to create even if delete fails.
+    // best-effort dedup — fall through to create even if archive fails.
   }
   await store.createCoreMemory(tagged, "operations", 88, 0);
 }

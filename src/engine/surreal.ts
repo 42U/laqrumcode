@@ -459,6 +459,7 @@ export class SurrealStore {
               'identity_chunk' AS table,
               vector::similarity::cosine(embedding, $vec) AS score${emb}
        FROM identity_chunk WHERE embedding != NONE AND array::len(embedding) > 0
+         AND (active = true OR active IS NONE)
        ORDER BY score DESC LIMIT ${lim.identity}`,
     ];
 
@@ -1226,26 +1227,28 @@ export class SurrealStore {
   ): Promise<string> {
     const source = category ?? "general";
 
-    if (embedding?.length) {
-      const dupes = await this.queryFirst<{
-        id: string;
-        importance: number;
-        score: number;
-      }>(
-        `SELECT id, importance,
-                vector::similarity::cosine(embedding, $vec) AS score
-         FROM memory
-         WHERE embedding != NONE AND array::len(embedding) > 0
+    // v0.7.93 append-only: was a cosine-≥0.92 dedup that silently DISCARDED
+    // the incoming text and bumped the existing row's importance/access_count.
+    // That's the family-2 silent-data-loss bug (text never persists).
+    // New behavior: tightened to exact lexical text equality on the same
+    // category. If a byte-identical row exists, treat it as a re-save (bump
+    // access + importance, keep the original text). Otherwise CREATE a new
+    // row even when cosine is high — semantically-similar-but-different
+    // content is preserved as siblings; consolidation (now soft-archiving)
+    // can collapse later, audit trail intact.
+    if (text && text.length > 0) {
+      const exact = await this.queryFirst<{ id: string; importance: number }>(
+        `SELECT id, importance FROM memory
+         WHERE string::lowercase(text) = string::lowercase($text)
            AND category = $cat
-         ORDER BY score DESC
+           AND (status = 'active' OR status IS NONE)
          LIMIT 1`,
-        { vec: embedding, cat: source },
+        { text, cat: source },
       );
-      if (dupes.length > 0 && dupes[0].score > 0.92) {
-        const existing = dupes[0];
-        const existingId = String(existing.id);
+      if (exact.length > 0) {
+        const existingId = String(exact[0]!.id);
         assertRecordId(existingId);
-        const newImp = Math.max(existing.importance ?? 0, importance);
+        const newImp = Math.max(exact[0]!.importance ?? 0, importance);
         await this.queryExec(
           `UPDATE ${existingId} SET access_count += 1, importance = $imp, last_accessed = time::now()`,
           { imp: newImp },
@@ -1377,7 +1380,9 @@ export class SurrealStore {
   async getAllIdentityChunks(): Promise<{ text: string }[]> {
     try {
       return await this.queryFirst<{ text: string }>(
-        `SELECT text, chunk_index FROM identity_chunk ORDER BY chunk_index ASC`,
+        `SELECT text, chunk_index FROM identity_chunk
+         WHERE active = true OR active IS NONE
+         ORDER BY chunk_index ASC`,
       );
     } catch (e) {
       swallow.warn("surreal:getAllIdentityChunks", e);
@@ -1452,7 +1457,7 @@ export class SurrealStore {
                 math::max([importance - math::min([math::floor(duration::days(time::now() - created_at) / 7), 3]), 0]) AS importance,
                 category
          FROM memory
-         WHERE (status IS NONE OR status != 'resolved')
+         WHERE (status IS NONE OR status = 'active')
            AND category NOT IN ['handoff', 'monologue', 'reflection', 'compaction', 'consolidation']
            AND importance >= 6
          ORDER BY importance DESC
@@ -1667,12 +1672,18 @@ export class SurrealStore {
       // Floor lowered to 50 and scheduled weekly so new installs benefit.
       if (!(await this.shouldRunMaintenance("garbageCollectMemories", 50, 7, count))) return 0;
 
+      // v0.7.93 append-only: was DELETE — now soft-deactivates via
+      // status='archived' + archived_at + archive_reason. Memory rows are
+      // permanent; readers already filter `status = 'active' OR status IS NONE`
+      // (surreal.ts:447, 2019), so archived rows naturally drop out of recall
+      // while remaining recoverable for forensic inspection.
       const pruned = await this.db.query(
         `LET $stale = (
           SELECT id FROM memory
           WHERE created_at < time::now() - 14d
             AND importance <= 2.0
             AND (access_count = 0 OR access_count IS NONE)
+            AND (status = 'active' OR status IS NONE)
             AND string::concat("memory:", id) NOT IN (
               SELECT VALUE memory_id FROM (
                 SELECT memory_id FROM retrieval_outcome
@@ -1682,7 +1693,12 @@ export class SurrealStore {
             )
           LIMIT 50
         );
-        FOR $m IN $stale { DELETE $m.id; };
+        FOR $m IN $stale {
+          UPDATE $m.id SET
+            status = 'archived',
+            archived_at = time::now(),
+            archive_reason = 'stale_14d_low_importance';
+        };
         RETURN array::len($stale);`,
       );
       const n = Number(pruned ?? 0);
@@ -1703,19 +1719,28 @@ export class SurrealStore {
       const count = countRows[0]?.count ?? 0;
       if (!(await this.shouldRunMaintenance("garbageCollectConcepts", 200, 3, count))) return 0;
 
+      // v0.7.93 append-only: was DELETE — now soft-deactivates via
+      // superseded_at + archive_reason. Concept readers already filter
+      // `superseded_at IS NONE` (surreal.ts:441 vectorSearch), so archived
+      // concepts naturally drop out of recall while remaining auditable.
       const pruned = await this.db.query(
         `LET $stale = (
           SELECT id FROM concept
           WHERE created_at < time::now() - 1d
             AND string::len(content) <= 12
             AND content = string::uppercase(content)
+            AND superseded_at IS NONE
             AND array::len(<-about_concept<-memory) = 0
             AND array::len(<-mentions<-turn) <= 2
             AND array::len(->narrower->?) = 0
             AND array::len(->broader->?) = 0
           LIMIT 100
         );
-        FOR $c IN $stale { DELETE $c.id; };
+        FOR $c IN $stale {
+          UPDATE $c.id SET
+            superseded_at = time::now(),
+            archive_reason = 'stale_orphan_short_uppercase';
+        };
         RETURN array::len($stale);`,
       );
       const n = Number(pruned ?? 0);
@@ -1839,6 +1864,7 @@ export class SurrealStore {
            FROM memory
            WHERE id != $mid
              AND category = $cat
+             AND (status = 'active' OR status IS NONE)
              AND embedding != NONE AND array::len(embedding) > 0
            ORDER BY score DESC
            LIMIT 3`,
@@ -1856,11 +1882,24 @@ export class SurrealStore {
           const [keep, drop] = keepMem ? [mem.id, dupe.id] : [dupe.id, mem.id];
           assertRecordId(String(keep));
           assertRecordId(String(drop));
+          // v0.7.93 append-only: was UPDATE-keep + DELETE-drop (silent loss
+          // of the loser's text). Now both rows survive: keeper is enriched,
+          // loser is soft-archived with superseded_by pointing at keeper.
+          // Wrapped in a single transaction so a network blip can't leave
+          // half-done state (keeper updated but loser still active).
           await this.queryExec(
-            `UPDATE ${String(keep)} SET access_count += 1, importance = math::max([importance, $imp])`,
-            { imp: dupe.importance },
+            `BEGIN TRANSACTION;
+             UPDATE ${String(keep)} SET
+               access_count += 1,
+               importance = math::max([importance, $imp]);
+             UPDATE ${String(drop)} SET
+               status = 'archived',
+               archived_at = time::now(),
+               archive_reason = 'dedup_consolidate_pass1',
+               superseded_by = type::record($kid);
+             COMMIT TRANSACTION;`,
+            { imp: dupe.importance, kid: String(keep) },
           );
-          await this.queryExec(`DELETE ${String(drop)}`);
           seen.add(String(drop));
           merged++;
         }
@@ -1914,6 +1953,7 @@ export class SurrealStore {
              FROM memory
              WHERE id != $mid
                AND category = $cat
+               AND (status = 'active' OR status IS NONE)
                AND embedding != NONE AND array::len(embedding) > 0
              ORDER BY score DESC
              LIMIT 3`,
@@ -1929,11 +1969,20 @@ export class SurrealStore {
             const [keep, drop] = keepMem ? [mem.id, dupe.id] : [dupe.id, mem.id];
             assertRecordId(String(keep));
             assertRecordId(String(drop));
+            // v0.7.93 append-only — same shape as Pass 1.
             await this.queryExec(
-              `UPDATE ${String(keep)} SET access_count += 1, importance = math::max([importance, $imp])`,
-              { imp: dupe.importance },
+              `BEGIN TRANSACTION;
+               UPDATE ${String(keep)} SET
+                 access_count += 1,
+                 importance = math::max([importance, $imp]);
+               UPDATE ${String(drop)} SET
+                 status = 'archived',
+                 archived_at = time::now(),
+                 archive_reason = 'dedup_consolidate_pass2',
+                 superseded_by = type::record($kid);
+               COMMIT TRANSACTION;`,
+              { imp: dupe.importance, kid: String(keep) },
             );
-            await this.queryExec(`DELETE ${String(drop)}`);
             seen.add(String(drop));
             merged++;
           }
@@ -1953,6 +2002,7 @@ export class SurrealStore {
         `SELECT id, text, importance, category, embedding, created_at
          FROM reflection
          WHERE embedding != NONE AND array::len(embedding) > 0
+           AND (active = true OR active IS NONE)
          ORDER BY created_at ASC
          LIMIT 50`,
       );
@@ -1969,10 +2019,12 @@ export class SurrealStore {
                   vector::similarity::cosine(embedding, $vec) AS score
            FROM reflection
            WHERE id != $rid
+             AND category = $cat
+             AND (active = true OR active IS NONE)
              AND embedding != NONE AND array::len(embedding) > 0
            ORDER BY score DESC
            LIMIT 3`,
-          { vec: ref.embedding, rid: ref.id },
+          { vec: ref.embedding, rid: ref.id, cat: ref.category },
         );
 
         for (const dupe of dupes) {
@@ -1983,7 +2035,17 @@ export class SurrealStore {
           const [keep, drop] = keepRef ? [ref.id, dupe.id] : [dupe.id, ref.id];
           assertRecordId(String(keep));
           assertRecordId(String(drop));
-          await this.queryExec(`DELETE ${String(drop)}`);
+          // v0.7.93 append-only: was DELETE — now soft-archives the loser
+          // with superseded_by pointing at keeper. Also added category guard
+          // to SELECT so different-category reflections don't collide.
+          await this.queryExec(
+            `UPDATE ${String(drop)} SET
+              active = false,
+              archived_at = time::now(),
+              archive_reason = 'dedup_consolidate_pass3_reflection',
+              superseded_by = type::record($kid);`,
+            { kid: String(keep) },
+          );
           seen.add(String(drop));
           merged++;
         }
@@ -2053,7 +2115,7 @@ export class SurrealStore {
          FROM memory
          WHERE surfaceable = true
            AND next_surface_at <= time::now()
-           AND status = 'active'
+           AND (status = 'active' OR status IS NONE)
          ORDER BY importance DESC
          LIMIT $lim`,
         { lim: limit },

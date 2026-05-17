@@ -116,7 +116,9 @@ export async function linkConceptHierarchy(
           { vec: conceptEmb, cid: conceptId },
         )
       : await store.queryFirst<{ id: string; content: string }>(
-          `SELECT id, content FROM concept WHERE id != $cid LIMIT 50`,
+          `SELECT id, content FROM concept
+           WHERE id != $cid AND superseded_at IS NONE
+           LIMIT 50`,
           { cid: conceptId },
         );
     if (existing.length === 0) return;

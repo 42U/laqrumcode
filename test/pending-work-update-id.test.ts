@@ -56,16 +56,19 @@ function scan(file: string): Hit[] {
   const pattern = /\b(UPDATE|SELECT\s+\*\s+FROM|DELETE)\s+\$[a-zA-Z_][a-zA-Z0-9_]*\b/;
 
   // Native SurQL FOR loop over a SELECT id result lets you DELETE $var.id
-  // where $var is a row object with a record-id-typed id field. That's
-  // legal SurrealDB syntax, not the JS-param bug class we're catching.
-  const forLoopDeletePattern = /DELETE\s+\$\w+\.\w+/;
+  // or UPDATE $var.id where $var is a row object with a record-id-typed id
+  // field. That's legal SurrealDB syntax, not the JS-param bug class we're
+  // catching. v0.7.93 added UPDATE to the exception alongside DELETE when
+  // garbageCollectMemories / garbageCollectConcepts converted from
+  // FOR $m IN $stale { DELETE $m.id } to FOR $m IN $stale { UPDATE $m.id SET ... }.
+  const forLoopOpPattern = /(?:DELETE|UPDATE)\s+\$\w+\.\w+/;
   const forIntroPattern = /FOR\s+\$\w+\s+IN/;
 
   for (let i = 0; i < lines.length; i++) {
     if (!pattern.test(lines[i])) continue;
 
-    // Skip DELETE $m.id when the surrounding lines open a FOR $x IN block
-    if (forLoopDeletePattern.test(lines[i])) {
+    // Skip DELETE/UPDATE $m.id when the surrounding lines open a FOR $x IN block
+    if (forLoopOpPattern.test(lines[i])) {
       const contextStart = Math.max(0, i - 8);
       const context = lines.slice(contextStart, i + 1).join("\n");
       if (forIntroPattern.test(context)) continue;

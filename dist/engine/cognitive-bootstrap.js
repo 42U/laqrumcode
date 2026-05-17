@@ -105,8 +105,16 @@ async function seedCognitiveBootstrapImpl(store, embeddings) {
         // SELF-TEACHING CYCLE was a transient pre-0.4.0 CORE_ENTRY (dropped
         // before a8a880b landed) that survived on installs bootstrapped in
         // that window; include it so those installs migrate cleanly to 6.
-        await store.queryExec(`DELETE core_memory WHERE
+        // v0.7.93 append-only: was DELETE — now soft-deactivates legacy core
+        // entries via active=false + archived_at + archive_reason. Readers
+        // already filter on active=true (core_memory.active field).
+        await store.queryExec(`UPDATE core_memory SET
+         active = false,
+         archived_at = time::now(),
+         archive_reason = 'pre_kc_bootstrap_v_legacy_migration'
+       WHERE
          (!(text CONTAINS '[kc_bootstrap_v'))
+         AND (active = true OR active IS NONE)
          AND
          (text CONTAINS 'MEMORY REFLEX'
            OR text CONTAINS 'RECALL BEFORE GUESSING'
@@ -123,7 +131,9 @@ async function seedCognitiveBootstrapImpl(store, embeddings) {
         // BOOTSTRAP_VERSION. If absent, re-seed the core entries (clearing stale
         // ones from prior versions first). This lets 0.4.0's new AUTO-SEAL
         // CONTRACT entry land in grafts that bootstrapped under 0.3.x or earlier.
-        const versionRows = await store.queryFirst(`SELECT count() AS cnt FROM core_memory WHERE text CONTAINS $tag GROUP ALL`, { tag: `[kc_bootstrap_v${BOOTSTRAP_VERSION}]` });
+        const versionRows = await store.queryFirst(`SELECT count() AS cnt FROM core_memory
+       WHERE text CONTAINS $tag AND (active = true OR active IS NONE)
+       GROUP ALL`, { tag: `[kc_bootstrap_v${BOOTSTRAP_VERSION}]` });
         const currentVersionSeeded = (versionRows[0]?.cnt ?? 0) > 0;
         if (!currentVersionSeeded) {
             // Clear prior bootstrap entries so the index stays tight. Matches
@@ -135,14 +145,24 @@ async function seedCognitiveBootstrapImpl(store, embeddings) {
             //     first-ever 0.4.0 boot left old entries in place, doubling the
             //     core-memory count to 11 instead of migrating to 6.
             try {
-                await store.queryExec(`DELETE core_memory WHERE
-             text CONTAINS '[kc_bootstrap_v' OR
-             string::starts_with(text, 'MEMORY REFLEX:') OR
-             string::starts_with(text, 'RECALL BEFORE GUESSING:') OR
-             string::starts_with(text, 'GRAPH-AWARE SAVING:') OR
-             string::starts_with(text, 'MEMORY TOOLS:') OR
-             string::starts_with(text, 'GRAPH SCHEMA REFERENCE:') OR
-             string::starts_with(text, 'SELF-TEACHING CYCLE:')`);
+                // v0.7.93 append-only: was DELETE — now soft-archives prior bootstrap
+                // entries so the new tagged version takes precedence in recall while
+                // the old text remains for forensic audit.
+                await store.queryExec(`UPDATE core_memory SET
+             active = false,
+             archived_at = time::now(),
+             archive_reason = 'bootstrap_version_replaced'
+           WHERE
+             (active = true OR active IS NONE)
+             AND (
+               text CONTAINS '[kc_bootstrap_v' OR
+               string::starts_with(text, 'MEMORY REFLEX:') OR
+               string::starts_with(text, 'RECALL BEFORE GUESSING:') OR
+               string::starts_with(text, 'GRAPH-AWARE SAVING:') OR
+               string::starts_with(text, 'MEMORY TOOLS:') OR
+               string::starts_with(text, 'GRAPH SCHEMA REFERENCE:') OR
+               string::starts_with(text, 'SELF-TEACHING CYCLE:')
+             )`);
             }
             catch (e) {
                 swallow.warn("bootstrap:clearPrior", e);
@@ -173,12 +193,21 @@ async function seedCognitiveBootstrapImpl(store, embeddings) {
         // "KongBrain", not "KongCode") because the old count-match heuristic
         // saw 6 chunks present and skipped re-seeding even when content changed.
         const vrows = await store.queryFirst(`SELECT count() AS count FROM identity_chunk
-         WHERE source = $source AND bootstrap_version = $v GROUP ALL`, { source: BOOTSTRAP_SOURCE, v: BOOTSTRAP_VERSION });
+         WHERE source = $source AND bootstrap_version = $v
+           AND (active = true OR active IS NONE)
+         GROUP ALL`, { source: BOOTSTRAP_SOURCE, v: BOOTSTRAP_VERSION });
         const currentVersionSeeded = (vrows[0]?.count ?? 0) > 0;
         if (!currentVersionSeeded) {
             // Clear ALL prior bootstrap identity chunks (any version, including
             // the pre-versioning pre-0.4.0 ones that had no bootstrap_version field).
-            await store.queryExec(`DELETE identity_chunk WHERE source = $source`, { source: BOOTSTRAP_SOURCE });
+            // v0.7.93 append-only: was DELETE — now soft-deactivates so old
+            // identity content remains for forensic audit while the new version
+            // takes effect.
+            await store.queryExec(`UPDATE identity_chunk SET
+           active = false,
+           archived_at = time::now(),
+           archive_reason = 'bootstrap_identity_replaced'
+         WHERE source = $source AND (active = true OR active IS NONE)`, { source: BOOTSTRAP_SOURCE });
             for (let i = 0; i < IDENTITY_CHUNKS.length; i++) {
                 const chunk = IDENTITY_CHUNKS[i];
                 try {

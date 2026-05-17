@@ -54,7 +54,8 @@ export async function retrieveReflections(
       `SELECT id, text, category, severity, importance, embedding,
               vector::similarity::cosine(embedding, $vec) AS score
        FROM reflection
-       WHERE embedding != NONE AND array::len(embedding) > 0${projectFilter}
+       WHERE embedding != NONE AND array::len(embedding) > 0
+         AND (active = true OR active IS NONE)${projectFilter}
        ORDER BY score DESC LIMIT $lim`,
       bindings,
     );
@@ -107,7 +108,11 @@ export function formatReflectionContext(reflections: Reflection[]): string {
 export async function getReflectionCount(store: SurrealStore): Promise<number> {
   try {
     if (!store.isAvailable()) return 0;
-    const rows = await store.queryFirst<{ count: number }>(`SELECT count() AS count FROM reflection GROUP ALL`);
+    const rows = await store.queryFirst<{ count: number }>(
+      `SELECT count() AS count FROM reflection
+       WHERE (active = true OR active IS NONE)
+       GROUP ALL`,
+    );
     return Number(rows[0]?.count ?? 0);
   } catch (e) {
     swallow.warn("reflection:count", e);
