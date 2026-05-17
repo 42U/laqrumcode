@@ -21,7 +21,6 @@ import { clamp01 } from "../engine/math.js";
 import { log } from "../engine/log.js";
 import { stripStructuralTags } from "../engine/sanitize.js";
 import { commitKnowledge, linkConceptCrossLink } from "../engine/commit.js";
-import { supersedeOldSkills } from "../engine/skills.js";
 import { assertRecordId } from "../engine/surreal.js";
 
 // ── Helpers ──────────────────────────────────────────────────────────────────

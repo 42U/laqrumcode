@@ -941,11 +941,12 @@ async function commitSkill(
     }
   }
 
-  // 6. Supersede prior similar skills (field-on-row, not edge). Existing
-  //    supersedeOldSkills logic kept intact.
+  // 6. Supersede prior similar skills (field-on-row, not edge). Same-named
+  //    only as of 2026-05-17 — see supersedeOldSkills jsdoc for the bug
+  //    that motivated the name guard.
   if (data.supersede !== false && embedding?.length) {
     try {
-      await supersedeOldSkills(skillId, embedding, store);
+      await supersedeOldSkills(skillId, data.name, embedding, store);
     } catch (e) { swallow.warn(`${logTag}:supersede`, e); }
   }
 

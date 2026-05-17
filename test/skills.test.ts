@@ -154,14 +154,14 @@ describe("recordSkillOutcome", () => {
 // ── supersedeOldSkills ──
 
 describe("supersedeOldSkills", () => {
-  it("deactivates skills with similarity >= 0.82", async () => {
+  it("deactivates same-named skills with similarity >= 0.82", async () => {
     const store = mockStore();
     store.queryFirst.mockResolvedValue([
       { id: "skill:old1", score: 0.90 },
       { id: "skill:old2", score: 0.50 },
     ]);
 
-    await supersedeOldSkills("skill:new1", new Array(1024).fill(0.1), store);
+    await supersedeOldSkills("skill:new1", "my-skill", new Array(1024).fill(0.1), store);
 
     // Only old1 (0.90 >= 0.82) should be deactivated
     expect(store.queryExec).toHaveBeenCalledTimes(1);
@@ -176,7 +176,31 @@ describe("supersedeOldSkills", () => {
 
   it("no-ops with empty embedding", async () => {
     const store = mockStore();
-    await supersedeOldSkills("skill:new1", [], store);
+    await supersedeOldSkills("skill:new1", "my-skill", [], store);
+    expect(store.queryFirst).not.toHaveBeenCalled();
+  });
+
+  // Regression test for the 2026-05-17 bug where supersedeOldSkills was
+  // matching purely on cosine similarity and was nuking unrelated skills
+  // (dockex-docker-build wrongly deactivated kongcode-health, extract-pdf-gems,
+  // kongcode-backup-semantic). The fix requires name equality.
+  it("scopes the candidate query to name equality", async () => {
+    const store = mockStore();
+    store.queryFirst.mockResolvedValue([]);
+
+    await supersedeOldSkills("skill:new1", "my-skill", new Array(1024).fill(0.1), store);
+
+    // The SELECT must include `name = $newName` and the bindings must carry
+    // the newName so different-named skills cannot land in the candidate set.
+    expect(store.queryFirst).toHaveBeenCalledTimes(1);
+    const [sql, bindings] = store.queryFirst.mock.calls[0]!;
+    expect(sql).toMatch(/name\s*=\s*\$newName/);
+    expect(bindings).toMatchObject({ newName: "my-skill", sid: "skill:new1" });
+  });
+
+  it("no-ops when newName is empty", async () => {
+    const store = mockStore();
+    await supersedeOldSkills("skill:new1", "", new Array(1024).fill(0.1), store);
     expect(store.queryFirst).not.toHaveBeenCalled();
   });
 });

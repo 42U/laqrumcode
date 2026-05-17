@@ -85,6 +85,17 @@ export function runBootstrapMaintenance(state: GlobalPluginState): void {
     try {
       await store.consolidateMemories((text) => embeddings.embed(text));
     } catch (e) { swallow.warn("maintenance:consolidate", e); }
+    // Indexed-table backfill lives here in Group 3, not Group 2, because
+    // backfillSkillEmbeddings showed no log evidence of ever running across
+    // 217KB of daemon log — likely because Group 2 fires before
+    // embeddings.isAvailable() flips true and the function short-circuits.
+    // consolidateMemories at top of Group 3 proves embeddings are ready,
+    // so artifact + concept backfill here is guaranteed to find a live
+    // BGE-M3 context.
+    try {
+      await backfillArtifactEmbeddings(state);
+      await backfillConceptEmbeddings(state);
+    } catch (e) { swallow.warn("maintenance:backfill-indexed", e); }
     try {
       await checkACANReadiness(store, config.thresholds.acanTrainingThreshold, cacheDir);
     } catch (e) { swallow.warn("maintenance:acan", e); }
@@ -249,6 +260,136 @@ async function backfillSkillEmbeddings(state: GlobalPluginState): Promise<void> 
     log.info(`[maintenance] skill embedding backfill: ${ok}/${rows.length} embedded`);
   } catch (e) {
     swallow.warn("maintenance:backfillSkillEmbeddings", e);
+  }
+}
+
+/** Embedding backfill for artifact rows where embedding IS NONE OR len=0.
+ *
+ *  The hot-path `commitArtifact` (src/engine/commit.ts:589) swallows embed
+ *  failures via `swallow(...)` and persists the row with embedding=null when
+ *  BGE-M3 hiccups. Without a backfill pass, those rows are permanent
+ *  sediment — invisible to vector recall forever. consolidateMemories has
+ *  Pass 2 backfill for memory only; this is its sibling for artifact.
+ *
+ *  Idempotent (WHERE embedding IS NONE), LIMIT 50 per boot, embed target
+ *  matches commit.ts:599 (`${path} ${description}`) so backfilled vectors
+ *  agree with query-time vectors. */
+async function backfillArtifactEmbeddings(state: GlobalPluginState): Promise<void> {
+  const started = Date.now();
+  log.info(`[maintenance] backfillArtifactEmbeddings: entering (store.isAvailable=${state.store.isAvailable()}, embeddings.isAvailable=${state.embeddings.isAvailable()})`);
+  if (!state.store.isAvailable()) {
+    log.info(`[maintenance] backfillArtifactEmbeddings: SKIP — store not available`);
+    return;
+  }
+  if (!state.embeddings.isAvailable()) {
+    log.info(`[maintenance] backfillArtifactEmbeddings: SKIP — embeddings not yet available (after ${Date.now() - started}ms)`);
+    return;
+  }
+  let ok = 0;
+  let total = 0;
+  try {
+    const rows = await state.store.queryFirst<{
+      id: string;
+      path: string;
+      description?: string;
+    }>(
+      `SELECT id, path, description FROM artifact
+        WHERE embedding IS NONE OR array::len(embedding) = 0
+        LIMIT 50`,
+    );
+    total = rows.length;
+    log.info(`[maintenance] backfillArtifactEmbeddings: SELECT returned ${total} row(s)`);
+    if (!rows.length) return;
+    for (const row of rows) {
+      if (!row?.id || !row?.path) continue;
+      // Match commit.ts:599 hot-path template literal EXACTLY (no .trim(), no
+      // `?? ""` fallback). For TypeScript-typed callers, description is
+      // required (commit.ts:228) so target is `${path} ${description}`. For
+      // legacy rows with description=NONE, hot-path would produce
+      // `${path} undefined` via JS template-literal coercion, so backfill
+      // matches that quirk to keep query-time vectors aligned with
+      // backfilled vectors (see audit 2026-05-16).
+      let target = `${row.path} ${row.description}`;
+      // BGE-M3 has an 8192-token context window. Long artifact descriptions
+      // (gem content, long doc text) throw "Input is longer than the context
+      // size" and the per-row catch leaves the row unembedded forever.
+      // Mirror the 6000-char truncation from surreal.ts:1892.
+      if (target.length > 6000) {
+        log.warn(`[maintenance] backfillArtifactEmbeddings: truncating target len=${target.length} → 6000 for ${row.path}`);
+        target = target.slice(0, 6000);
+      }
+      try {
+        const vec = await state.embeddings.embed(target);
+        if (!vec?.length) {
+          log.info(`[maintenance] backfillArtifactEmbeddings: empty vec for ${row.path}`);
+          continue;
+        }
+        // WHERE guard mirrors the SELECT predicate so a row with `[]`
+        // (empty-array embedding) also gets updated, not just NONE rows.
+        await state.store.queryExec(
+          `UPDATE ${String(row.id)} SET embedding = $vec WHERE embedding IS NONE OR array::len(embedding) = 0`,
+          { vec },
+        );
+        ok++;
+      } catch (e) {
+        log.warn(`[maintenance] backfillArtifactEmbeddings: row ${row.path} FAILED: ${(e as Error)?.message ?? e}`);
+        swallow.warn(`maintenance:backfillArtifactEmbeddings:${row.path}`, e);
+      }
+    }
+    log.info(`[maintenance] backfillArtifactEmbeddings: complete ${ok}/${total} embedded in ${Date.now() - started}ms`);
+  } catch (e) {
+    log.warn(`[maintenance] backfillArtifactEmbeddings: TOP-LEVEL FAIL: ${(e as Error)?.message ?? e}`);
+    swallow.warn("maintenance:backfillArtifactEmbeddings", e);
+  }
+}
+
+/** Embedding backfill for concept rows where embedding IS NONE OR len=0.
+ *
+ *  Same shape as backfillArtifactEmbeddings. Embed target matches
+ *  commit.ts:454 (just `name`) so backfilled vectors agree with the
+ *  hot-path. */
+async function backfillConceptEmbeddings(state: GlobalPluginState): Promise<void> {
+  if (!state.store.isAvailable()) return;
+  if (!state.embeddings.isAvailable()) return;
+  try {
+    const rows = await state.store.queryFirst<{
+      id: string;
+      name: string;
+    }>(
+      `SELECT id, name FROM concept
+        WHERE embedding IS NONE OR array::len(embedding) = 0
+        LIMIT 50`,
+    );
+    if (!rows.length) return;
+    log.info(`[maintenance] backfilling concept embeddings: ${rows.length} row(s)`);
+    let ok = 0;
+    for (const row of rows) {
+      if (!row?.id || !row?.name) continue;
+      // Concept embed target = name (matches commit.ts:454 hot-path). Names
+      // are typically short, but guard with the same 6000-char truncation
+      // as artifact for defense-in-depth against pathological gem-derived
+      // concept names.
+      let target = row.name;
+      if (target.length > 6000) {
+        log.warn(`[maintenance] backfillConceptEmbeddings: truncating name len=${target.length} → 6000`);
+        target = target.slice(0, 6000);
+      }
+      try {
+        const vec = await state.embeddings.embed(target);
+        if (!vec?.length) continue;
+        // WHERE guard mirrors the SELECT predicate (NONE OR len=0).
+        await state.store.queryExec(
+          `UPDATE ${String(row.id)} SET embedding = $vec WHERE embedding IS NONE OR array::len(embedding) = 0`,
+          { vec },
+        );
+        ok++;
+      } catch (e) {
+        swallow.warn(`maintenance:backfillConceptEmbeddings:${row.name}`, e);
+      }
+    }
+    log.info(`[maintenance] concept embedding backfill: ${ok}/${rows.length} embedded`);
+  } catch (e) {
+    swallow.warn("maintenance:backfillConceptEmbeddings", e);
   }
 }
 

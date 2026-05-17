@@ -12,18 +12,25 @@ import { swallow, safeId } from "./errors.js";
 import { assertRecordId } from "./surreal.js";
 // --- Supersession ---
 /**
- * After saving a new skill, fade similar existing skills above similarity threshold.
+ * After saving a new skill, fade similar existing skills above similarity
+ * threshold — but ONLY same-named ones. Supersession means "this row REPLACES
+ * the old one"; different-named skills are coexistent siblings even when their
+ * embeddings are close. Without the name guard, long procedural-skill bodies
+ * routinely cleared the 0.82 cosine threshold and unrelated skills nuked each
+ * other (verified 2026-05-17: dockex-docker-build had wrongly deactivated
+ * kongcode-health, extract-pdf-gems, and kongcode-backup-semantic).
  */
-export async function supersedeOldSkills(newSkillId, newEmb, store) {
-    if (!newEmb.length || !store.isAvailable())
+export async function supersedeOldSkills(newSkillId, newName, newEmb, store) {
+    if (!newEmb.length || !newName || !store.isAvailable())
         return;
     try {
         const rows = await store.queryFirst(`SELECT id, vector::similarity::cosine(embedding, $vec) AS score
        FROM skill
        WHERE id != $sid
+         AND name = $newName
          AND (active = NONE OR active = true)
          AND embedding != NONE AND array::len(embedding) > 0
-       ORDER BY score DESC LIMIT 5`, { vec: newEmb, sid: newSkillId });
+       ORDER BY score DESC LIMIT 5`, { vec: newEmb, sid: newSkillId, newName });
         for (const row of rows) {
             if ((row.score ?? 0) >= 0.82) {
                 try {

@@ -4,6 +4,47 @@ All notable changes to KongCode are documented here. The 0.7.x series introduced
 
 ## [Unreleased]
 
+## [0.7.92] — 2026-05-17
+
+Two bugs that had been silently corrupting graph state for weeks. Both surfaced when the founder pushed back on "the gap isn't growing, it's minor" and "the skill is just missing, I'll restore it" — neither was a real explanation. The fixes follow probe-first diagnosis to verified-with-receipts.
+
+### Fixed (artifact + concept embedding backfill)
+
+- `src/engine/maintenance.ts` — added `backfillArtifactEmbeddings()` and `backfillConceptEmbeddings()`, called from Group 3 (deferred-heavy phase, after `consolidateMemories`, where `state.embeddings.isAvailable()` is guaranteed true). The original `consolidateMemories` Pass 2 at `src/engine/surreal.ts:1869` was hardcoded `FROM memory`, so artifact + concept rows whose embed call was swallowed by `commitArtifact` / `commitConcept` had no recovery path. 29 artifacts (book PDFs ingested 2026-04-04) and 4 concept rows had been sitting unembedded indefinitely. Verified post-fix: `memory_health.metrics.artifact_count: 1318, artifact_embedded: 1318`. Group-2 placement was attempted first and failed because `state.embeddings.isAvailable()` returns false at Group-2 time — verified by 217KB of daemon log with zero `[maintenance] backfilling skill embeddings` entries from `backfillSkillEmbeddings` (same gate). Group-3 placement uses the same warm-embed window as `consolidateMemories`.
+- Backfill functions match hot-path embed targets: artifact uses ``${path} ${description}`` (commit.ts:599), concept uses `name` (commit.ts:454). 6000-char truncation guard mirrors `src/engine/surreal.ts:1892`. UPDATE `WHERE embedding IS NONE OR array::len(embedding) = 0` mirrors the SELECT predicate so empty-array rows also heal.
+- Manual heal path for stuck sediment: trigger `hook.sessionStart` over `~/.kongcode-daemon.sock` — runs the full `runBootstrapMaintenance(state)` chain on demand.
+
+### Fixed (supersedeOldSkills name-blind deactivation)
+
+- `src/engine/skills.ts:44-90` — `supersedeOldSkills` was deactivating ANY skill with cosine similarity ≥ 0.82 to a newly-committed skill's embedding, regardless of name. Long procedural-skill bodies share enough structural language that unrelated skills routinely cleared 0.82. Verified victim chain: `dockex-docker-build` (skill:gb1rh59mei5hvkk59olm, created 2026-05-16T17:48:03 with body_len=9058) wrongly deactivated 3 unrelated skills — `kongcode-health` (body_len=4920), `extract-pdf-gems` (body_len=7392), `kongcode-backup-semantic` (body_len=4730). `test/integration/daemon-tool-roundtrip.test.ts:102` had been failing for ~21h on the kongcode-health symptom.
+- Fix: `supersedeOldSkills` now takes a `newName: string` parameter, with `AND name = $newName` in the candidate SELECT. Only caller `src/engine/commit.ts:949` passes `data.name`. Skills with different names are coexistent siblings — supersession means replacement, which requires name equality.
+- `scripts/restore-wrongly-superseded-skills.mjs` — new one-shot heal (dry-run default, `--apply` to mutate). Re-activates any inactive body-bearing skill whose superseder has a different name. Idempotent. Ran with `--apply` to restore the 3 documented victims.
+- Stale unused imports removed in `src/tools/pending-work.ts` and `src/engine/memory-daemon.ts` (auditor flagged as MINOR; cleanup landed in same commit).
+
+### Added (process)
+
+- New Tier-0 core memory directive **QA-BEFORE-PUSH** (`core_memory:yaqrlckojpf5hc9ytoy7`, p90): before any `git push`, run the 3-step gate — (1) `npm run build && npm test` with literal pass/fail line quoted, (2) auditor agent reviewing the diff against existing patterns, (3) validator agent independently re-verifying behavior end-to-end against live state. CRITICAL/MAJOR findings block the push; MINOR may be deferred with explicit one-line rationale. The artifact-backfill bug had been sitting for ~6 weeks because no automated check ran patches through review before deploy. This rule is its successor.
+- New saved correction (`memory:7sgsu61wfa66z60f5g76`, importance 10): "do not treat anything as a mystery when the tools are available to investigate it definitively." Triggered by two cases in one session where speculation passed for diagnosis until the founder pushed back and a direct DB query settled the question.
+
+### Added (regression test)
+
+- `test/skills.test.ts` — extended existing supersede tests to pass the new `newName` arg. Added two new cases:
+  - `scopes the candidate query to name equality` — asserts the SELECT contains `name = $newName` and bindings include `newName`. Catches a regression that drops the name filter.
+  - `no-ops when newName is empty` — mirrors the guard at skills.ts:56 (`!newName` short-circuits).
+
+### Verified
+
+- `npm test`: **Test Files 64 passed (64) / Tests 991 passed (991)**, up from 988/989 (the previously-failing `test/integration/daemon-tool-roundtrip.test.ts:102` now passes plus 2 new regression tests).
+- Auditor agent findings: 0 CRITICAL, 0 MAJOR, 2 MINOR (both addressed). Validator agent: 7/7 VERIFIED, 0 CONCERN.
+- Direct DB after restore: 3 victim rows `active: true, superseded_by: NONE`. Active skill count: 2733 (= pre-fix 2730 + 3 restored).
+- Synthetic probe of the new guard: SELECT with nonexistent name returns 0 candidates; positive control with `name='kongcode-health'` returns 1.
+
+### Known follow-ups
+
+- 519 inactive skill rows with `body_len=0` — separate stub-creation-failure issue, not addressed here.
+- 4 concept rows with `name=undefined` — broken-row data hygiene, correctly skipped by the new concept backfill, not in scope.
+- The validator-created `scripts/probe-spot-check.mjs` and session-diagnostic `scripts/probe-stuck.mjs` are intentionally NOT committed (ad-hoc), only `scripts/restore-wrongly-superseded-skills.mjs` ships.
+
 ## [0.7.91] — 2026-05-16
 
 ### Added (2 new structural lints)
