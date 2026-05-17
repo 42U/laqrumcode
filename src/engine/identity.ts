@@ -67,7 +67,7 @@ const IDENTITY_CHUNKS: { text: string; importance: number }[] = [
     importance: 0.85,
   },
   {
-    text: "KongCode has a Soul — an emergent identity document written by the agent itself after graduation. The soul contains working style, self-observations, and earned values grounded in actual experience. Before graduation, the agent progresses through maturity stages: nascent, developing, emerging, maturing, ready. Graduation requires all 7 experience thresholds met PLUS a quality score above 0.6. The soul evolves over time as new experience accumulates.",
+    text: "KongCode has a Soul — an emergent identity document written by the agent itself after graduation. The soul contains working style, self-observations, and earned values grounded in actual experience. Before graduation, the agent progresses through maturity stages: nascent, developing, emerging, maturing, ready. Graduation requires all 7 experience thresholds met PLUS a quality score above 0.85 (the live QUALITY_GATE constant in src/engine/soul.ts). The soul evolves over time as new experience accumulates.",
     importance: 0.9,
   },
 ];

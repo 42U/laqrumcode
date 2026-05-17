@@ -96,6 +96,9 @@ export function runBootstrapMaintenance(state) {
         try {
             await backfillArtifactEmbeddings(state);
             await backfillConceptEmbeddings(state);
+            await backfillReflectionEmbeddings(state);
+            await backfillMonologueEmbeddings(state);
+            await backfillTurnArchiveEmbeddings(state);
         }
         catch (e) {
             swallow.warn("maintenance:backfill-indexed", e);
@@ -381,6 +384,140 @@ async function backfillConceptEmbeddings(state) {
     }
     catch (e) {
         swallow.warn("maintenance:backfillConceptEmbeddings", e);
+    }
+}
+/** Embedding backfill for reflection rows where embedding IS NONE OR len=0.
+ *
+ *  Mirrors backfillArtifactEmbeddings. Reflection hot-path at commit.ts:681
+ *  swallows embed failures and persists the row with embedding=null; without
+ *  this backfill those rows are permanent recall sediment. Embed target =
+ *  `text` field, matching the hot-path. */
+async function backfillReflectionEmbeddings(state) {
+    if (!state.store.isAvailable())
+        return;
+    if (!state.embeddings.isAvailable())
+        return;
+    try {
+        const rows = await state.store.queryFirst(`SELECT id, text FROM reflection
+        WHERE (embedding IS NONE OR array::len(embedding) = 0)
+          AND (active = true OR active IS NONE)
+        LIMIT 50`);
+        if (!rows.length)
+            return;
+        log.info(`[maintenance] backfilling reflection embeddings: ${rows.length} row(s)`);
+        let ok = 0;
+        for (const row of rows) {
+            if (!row?.id || !row?.text)
+                continue;
+            let target = row.text;
+            if (target.length > 6000) {
+                log.warn(`[maintenance] backfillReflectionEmbeddings: truncating text len=${target.length} → 6000`);
+                target = target.slice(0, 6000);
+            }
+            try {
+                const vec = await state.embeddings.embed(target);
+                if (!vec?.length)
+                    continue;
+                await state.store.queryExec(`UPDATE ${String(row.id)} SET embedding = $vec WHERE embedding IS NONE OR array::len(embedding) = 0`, { vec });
+                ok++;
+            }
+            catch (e) {
+                swallow.warn(`maintenance:backfillReflectionEmbeddings:${String(row.id)}`, e);
+            }
+        }
+        log.info(`[maintenance] reflection embedding backfill: ${ok}/${rows.length} embedded`);
+    }
+    catch (e) {
+        swallow.warn("maintenance:backfillReflectionEmbeddings", e);
+    }
+}
+/** Embedding backfill for monologue rows. Hot-path at memory-daemon.ts:280
+ *  swallows embed failures; embed target = `content` field. */
+async function backfillMonologueEmbeddings(state) {
+    if (!state.store.isAvailable())
+        return;
+    if (!state.embeddings.isAvailable())
+        return;
+    try {
+        const rows = await state.store.queryFirst(`SELECT id, content FROM monologue
+        WHERE embedding IS NONE OR array::len(embedding) = 0
+        LIMIT 50`);
+        if (!rows.length)
+            return;
+        log.info(`[maintenance] backfilling monologue embeddings: ${rows.length} row(s)`);
+        let ok = 0;
+        for (const row of rows) {
+            if (!row?.id || !row?.content)
+                continue;
+            let target = row.content;
+            if (target.length > 6000) {
+                log.warn(`[maintenance] backfillMonologueEmbeddings: truncating content len=${target.length} → 6000`);
+                target = target.slice(0, 6000);
+            }
+            try {
+                const vec = await state.embeddings.embed(target);
+                if (!vec?.length)
+                    continue;
+                await state.store.queryExec(`UPDATE ${String(row.id)} SET embedding = $vec WHERE embedding IS NONE OR array::len(embedding) = 0`, { vec });
+                ok++;
+            }
+            catch (e) {
+                swallow.warn(`maintenance:backfillMonologueEmbeddings:${String(row.id)}`, e);
+            }
+        }
+        log.info(`[maintenance] monologue embedding backfill: ${ok}/${rows.length} embedded`);
+    }
+    catch (e) {
+        swallow.warn("maintenance:backfillMonologueEmbeddings", e);
+    }
+}
+/** Embedding backfill for turn_archive rows. This heals the 1126 archived
+ *  turns (16.3%) discovered in v0.7.93 as silently un-recallable: the
+ *  vectorSearch at surreal.ts:435 filters `embedding != NONE`, so archived
+ *  rows without an embedding never surface. archiveOldTurns copies the row
+ *  verbatim into turn_archive; if the source turn had embedding=NONE (from
+ *  a swallowed embed failure during ingestion), the archive inherits it.
+ *  LIMIT 200 per boot — higher than other tables because there are 1126
+ *  stuck rows to heal on first run; subsequent boots find 0 and exit fast.
+ *  Embed target = `text` field, matching the live `turn` table's embed
+ *  target so query-time vectors are aligned. */
+async function backfillTurnArchiveEmbeddings(state) {
+    if (!state.store.isAvailable())
+        return;
+    if (!state.embeddings.isAvailable())
+        return;
+    try {
+        const rows = await state.store.queryFirst(`SELECT id, text FROM turn_archive
+        WHERE (embedding IS NONE OR array::len(embedding) = 0)
+          AND text != NONE
+        LIMIT 200`);
+        if (!rows.length)
+            return;
+        log.info(`[maintenance] backfilling turn_archive embeddings: ${rows.length} row(s)`);
+        let ok = 0;
+        for (const row of rows) {
+            if (!row?.id || !row?.text)
+                continue;
+            let target = row.text;
+            if (target.length > 6000) {
+                log.warn(`[maintenance] backfillTurnArchiveEmbeddings: truncating text len=${target.length} → 6000`);
+                target = target.slice(0, 6000);
+            }
+            try {
+                const vec = await state.embeddings.embed(target);
+                if (!vec?.length)
+                    continue;
+                await state.store.queryExec(`UPDATE ${String(row.id)} SET embedding = $vec WHERE embedding IS NONE OR array::len(embedding) = 0`, { vec });
+                ok++;
+            }
+            catch (e) {
+                swallow.warn(`maintenance:backfillTurnArchiveEmbeddings:${String(row.id)}`, e);
+            }
+        }
+        log.info(`[maintenance] turn_archive embedding backfill: ${ok}/${rows.length} embedded`);
+    }
+    catch (e) {
+        swallow.warn("maintenance:backfillTurnArchiveEmbeddings", e);
     }
 }
 async function purgeStaleEmbedCache(state) {

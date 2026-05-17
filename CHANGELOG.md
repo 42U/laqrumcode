@@ -4,6 +4,63 @@ All notable changes to KongCode are documented here. The 0.7.x series introduced
 
 ## [Unreleased]
 
+## [0.7.94] — 2026-05-17
+
+Deferred work from v0.7.93's append-only conversion, all landing together: heal the 1126 silently-unrecallable archived turns, add 4 structural lints that prevent regression of every bug class fixed across v0.7.92-v0.7.93, and reconcile the README with the live code.
+
+### Fixed — recall sediment on three more tables
+
+`src/engine/maintenance.ts` adds three new sibling backfill functions modeled on `backfillArtifactEmbeddings`, all wired into the Group-3 maintenance block (after `consolidateMemories`, when embeddings are warm):
+
+- **`backfillReflectionEmbeddings`** — heals reflection rows whose hot-path embed at `commit.ts:681` was swallowed. Embed target = `text`. LIMIT 50 per boot.
+- **`backfillMonologueEmbeddings`** — heals monologue rows whose embed at `memory-daemon.ts:280` was swallowed. Embed target = `content`. LIMIT 50.
+- **`backfillTurnArchiveEmbeddings`** — heals the 1126 archived turns (~16% of `turn_archive`) flagged in v0.7.93 as silently un-recallable per `surreal.ts:435`'s `embedding != NONE` filter. LIMIT 200 per boot (higher than other tables because there's existing sediment to clear in one or two passes). Embed target = `text`, matching the live `turn` table.
+
+All three respect the 6000-char truncation guard and the WHERE `(embedding IS NONE OR array::len(embedding) = 0)` predicate so empty-array rows also heal.
+
+### Added — D1-D4 structural lints (regression prevention)
+
+Four new test/lint files under `test/lint-*.test.ts`, modeled on `lint-auto-seal-invariant.test.ts`. They walk `src/` and fail CI on the bug patterns that cost the project same-day follow-up commits across v0.7.92-v0.7.93.
+
+- **D1 — `test/lint-backfill-coverage.test.ts`**: every content table whose hot-path write can swallow an embed failure (concept, memory, artifact, skill, reflection, monologue, turn_archive) must have a registered `backfill<Table>Embeddings` function in `maintenance.ts`. Also asserts every defined backfill is actually called from the Group-3 chain. Would have caught v0.7.92's artifact + concept omission AND today's reflection + monologue + turn_archive additions before they shipped.
+- **D2 — `test/lint-cosine-identity-guard.test.ts`**: every SQL string containing `vector::similarity::cosine` must either be in `READ_ONLY_COSINE_SITES` (search / ranking / edge-creation) or carry a non-similarity identity guard (`name =`, `category =`, `path =`, `string::lowercase(text) =`, `session_id =`, etc.). Direct prevention of the v0.7.92 supersedeOldSkills name-blind bug recurring.
+- **D3 — `test/lint-swallow-then-create.test.ts`**: every `swallow(...embed...)` block followed within 30 lines by a `CREATE <table>` / `store.create<Table>` / `store.upsert<Table>` call must have a matching backfill registered. Catches "silent embed failure persists a null-embed row with no recovery" before it ships.
+- **D4 — `test/lint-no-delete-content-tables.test.ts`**: forbids any `DELETE <content_table>` in `src/` outside an `APPROVED_EXCEPTIONS` whitelist. Enforces the founder rule "Nothing should be getting deleted" (`core_memory:c7hcrruuezcmehmd30yd`) at CI level.
+
+Bug class → matching lint:
+- v0.7.92 artifact-backfill missed (29 stuck rows for 6 weeks) → **D1** would have failed CI.
+- v0.7.92 supersedeOldSkills name-blind (3 unrelated skills deactivated) → **D2** would have failed CI.
+- v0.7.93 reflection + monologue + turn_archive backfill missing → **D1** + **D3** would have failed CI.
+- v0.7.93's 11-DELETE conversion regressing → **D4** fails CI on any future DELETE on a content table.
+
+### Fixed — README accuracy
+
+Reconciled with the live code per v0.7.93's audit findings:
+
+- Tests badge: 970 → 997 (matches `npm test` output post-v0.7.94).
+- WMR signal description: "six hand-tuned signals" → "seven weighted signals" with cosine listed as the largest. Matches `graph-context.ts:671-674`.
+- LongMemEval 98.2% R@5 claim attributed to the upstream `kongclaw` project (which carries the eval harness); kongcode inherits the design but does not bundle the harness. No more unverifiable in-repo claim.
+- Auto-drain default agent: `kongcode:memory-extractor` → `kongcode:memory-extractor-lite` (matches `auto-drain.ts:608`). `KONGCODE_AUTO_DRAIN_MODEL=opus` documented for the heavier variant.
+- Auto-drain cadence: mentions the constrained-tier 15-min sweep (per `resource-tier.ts:43,53,63`).
+- MCP tool list extended with `create_skill` and `get_skill_body` (matches `daemon/index.ts:774-775`).
+- `pre-push` hook clarification: it's per-clone (not tracked in repo). Documented the install one-liner. Also noted the new D1-D4 lints in the test-suite description.
+
+### Fixed — saved-concept stale text
+
+`src/engine/identity.ts:70` — the saved-concept text for soul graduation said "quality score above 0.6". Updated to "0.85" to match the live `QUALITY_GATE` constant at `src/engine/soul.ts:100`. The mismatched value had been retrievable via `recall` and pollutes any session that consulted it for guidance.
+
+### Verified
+
+- `npm test`: **Test Files 68 passed (68) / Tests 997 passed (997)** (+5 from v0.7.93: 4 new D1-D4 lint files plus 1 additional sub-test in D1).
+- Migration: 1126 archived turns expected to heal on the post-deploy daemon sweep.
+- Auditor agent + validator agent: TBD (run before tag).
+
+### Out of scope (deferred — future)
+
+- `surreal.ts:1892` embed-target/storage mismatch (memory text > 6000 chars stored full, embedded truncated). A "partial embedding" marker on the row would surface the gap; the deeper fix is chunked multi-vector embedding. Tracked but not blocking.
+- The 6 inactive core_memory rows from prior cleanup paths (pre-v0.7.93) are recoverable via DB query but not surfaced by `core_memory` action=list. Out of scope.
+- ACAN trained-weights race (`acan.ts:195`) — rare, low priority.
+
 ## [0.7.93] — 2026-05-17
 
 The append-only conversion. Founder rule (saved Tier-0 as `core_memory:c7hcrruuezcmehmd30yd`):

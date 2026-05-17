@@ -6,12 +6,12 @@
 
 [![VoidOrigin](https://img.shields.io/badge/VOIDORIGIN-voidorigin.com-0a0a0a?style=for-the-badge&logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0ibm9uZSI+PGNpcmNsZSBjeD0iMTIiIGN5PSIxMiIgcj0iMTAiIHN0cm9rZT0iI2ZmNmIzNSIgc3Ryb2tlLXdpZHRoPSIyIi8+PGNpcmNsZSBjeD0iMTIiIGN5PSIxMiIgcj0iNCIgZmlsbD0iI2ZmNmIzNSIvPjwvc3ZnPg==&logoColor=ff6b35&labelColor=0a0a0a)](https://voidorigin.com)
 
-[![Version](https://img.shields.io/badge/v0.7.93-stable-22c55e?style=for-the-badge)](https://github.com/42U/kongcode)
+[![Version](https://img.shields.io/badge/v0.7.94-stable-22c55e?style=for-the-badge)](https://github.com/42U/kongcode)
 [![GitHub Stars](https://img.shields.io/github/stars/42U/kongcode?style=for-the-badge&logo=github&color=gold)](https://github.com/42U/kongcode)
 [![License: MIT](https://img.shields.io/github/license/42U/kongcode?style=for-the-badge&logo=opensourceinitiative&color=blue)](https://opensource.org/licenses/MIT)
 [![Node.js](https://img.shields.io/badge/Node.js-18+-339933?style=for-the-badge&logo=node.js&logoColor=white)](https://nodejs.org)
 [![SurrealDB](https://img.shields.io/badge/SurrealDB-3.0-ff00a0?style=for-the-badge&logo=surrealdb&logoColor=white)](https://surrealdb.com)
-[![Tests](https://img.shields.io/badge/Tests-970_passing-brightgreen?style=for-the-badge&logo=vitest&logoColor=white)](https://vitest.dev)
+[![Tests](https://img.shields.io/badge/Tests-997_passing-brightgreen?style=for-the-badge&logo=vitest&logoColor=white)](https://vitest.dev)
 
 **Graph-backed permanent memory for [Claude Code](https://claude.ai/claude-code).**
 
@@ -216,9 +216,9 @@ KongCode runs as **two cooperating processes**:
 - **kongcode-daemon**: Long-lived background process owning the SurrealDB connection, BGE-M3 embedding model, BGE-reranker-v2-m3 cross-encoder, ACAN weights, all tool/hook handlers, and the auto-drain scheduler. Survives plugin updates, MCP restarts, and Claude Code crashes.
 - **kongcode-mcp**: Thin per-session client. Forwards MCP RPC to the daemon over local IPC. Plugin updates only restart this; the daemon keeps running.
 
-**ACAN** (Attentive Cross-Attention Network) is a learned scoring model that replaces the fixed WMR (Weighted Memory Relevance) heuristic once enough retrieval-outcome data accumulates. It trains on query-memory pairs labeled by actual utilization — whether the retrieved item was referenced, cited, or acted on. Training runs in a worker thread; weights are hot-reloaded across concurrent sessions via a shared JSON file. Before ACAN activates, WMR provides a solid baseline using six hand-tuned signals (recency, importance, access count, neighbor bonus, proven utility, reflection boost).
+**ACAN** (Attentive Cross-Attention Network) is a learned scoring model that replaces the fixed WMR (Weighted Memory Relevance) heuristic once enough retrieval-outcome data accumulates. It trains on query-memory pairs labeled by actual utilization — whether the retrieved item was referenced, cited, or acted on. Training runs in a worker thread; weights are hot-reloaded across concurrent sessions via a shared JSON file. Before ACAN activates, WMR provides a solid baseline using seven weighted signals: cosine similarity (largest weight), recency, importance, access count, neighbor bonus, proven utility, and reflection boost.
 
-**BGE-reranker-v2-m3** is a cross-encoder that rescores the top candidates pairwise against the query after the initial vector + ACAN pass. This two-stage retrieve-then-rerank pipeline achieves 98.2% R@5 on the LongMemEval benchmark.
+**BGE-reranker-v2-m3** is a cross-encoder that rescores the top candidates pairwise against the query after the initial vector + ACAN pass. The two-stage retrieve-then-rerank pipeline is modeled on the design validated at 98.2% R@5 on LongMemEval in the upstream kongclaw project; the eval harness for this number ships separately and is not bundled in this repo.
 
 Multiple Claude Code sessions share one daemon: one BGE-M3 in RAM instead of N copies, one SurrealDB connection pool.
 
@@ -227,15 +227,15 @@ Multiple Claude Code sessions share one daemon: one BGE-M3 in RAM instead of N c
 - **Spawn**: The first mcp-client to find a missing daemon socket forks one (detached, PID-file-locked so concurrent sessions don't race).
 - **Idle reap**: When no clients are attached for 6s (configurable), the daemon exits to free RAM. The next client spawns a fresh one in 1-2s.
 - **Supersede on update**: When a newer version connects, the old daemon shuts down after all current sessions close. No active work is interrupted.
-- **Auto-drain**: When `pending_work` exceeds threshold, the daemon shells out to `claude --agent kongcode:memory-extractor` as a headless subprocess.
+- **Auto-drain**: When `pending_work` exceeds threshold, the daemon shells out to `claude --agent kongcode:memory-extractor-lite` (default; set `KONGCODE_AUTO_DRAIN_MODEL=opus` for the heavier `memory-extractor` variant) as a headless subprocess.
 
 ## Auto-drain & costs
 
 Memory extraction (causal chains, concepts, skills, etc.) needs an LLM. The daemon **shells out to your already-authenticated `claude` CLI** to process the queue. This runs under your existing Claude Code authentication and **counts toward your normal usage**. Each spawn processes roughly 5-15 queued items.
 
-**Cadence**:
+**Cadence** (default tier; constrained-resource tier is 15 min between sweeps — see `src/engine/resource-tier.ts:43,53,63`):
 - On daemon startup
-- Every 5 minutes while the daemon is alive
+- Every 5 minutes while the daemon is alive (15 min on constrained tier)
 - Once after each session ends (debounced)
 
 **Cost gating**:
@@ -256,7 +256,7 @@ KongCode exposes **slash commands** (you type) and **MCP tools** (the assistant 
 | `/introspect [action]` | Database diagnostics: `status`, `count`, `verify`, `query`, `trends`, `migrate` |
 | `/kongcode-status` | One-shot health dashboard (counts, embedding coverage, graduation progress) |
 
-The assistant also has access to MCP tools it calls autonomously: `recall`, `core_memory`, `introspect`, `memory_health`, `record_finding`, `supersede`, `link_hierarchy`, `what_is_missing`, `cluster_scan`, `create_knowledge_gems`, `fetch_pending_work`, and `commit_work_results`.
+The assistant also has access to MCP tools it calls autonomously: `recall`, `core_memory`, `introspect`, `memory_health`, `record_finding`, `supersede`, `link_hierarchy`, `what_is_missing`, `cluster_scan`, `create_knowledge_gems`, `fetch_pending_work`, `commit_work_results`, `create_skill`, and `get_skill_body`.
 
 ## Configuration
 
@@ -314,8 +314,8 @@ All env vars are optional with sensible defaults.
 Before each prompt, KongCode runs a multi-stage retrieval pipeline to surface the most relevant prior knowledge:
 
 1. **Vector search** — BGE-M3 embeds the prompt and retrieves candidates by cosine similarity from concepts, memories, turns, artifacts, and skills
-2. **WMR/ACAN scoring** — a 6-signal Weighted Memory Relevance score (recency, importance, access frequency, neighbor bonus, proven utility, reflection boost) is computed per candidate. When enough retrieval-outcome data has accumulated (5000+ labeled pairs), the learned ACAN (Attentive Cross-Attention Network) weights replace the fixed WMR weights automatically
-3. **Cross-encoder rerank** — the top candidates are rescored pairwise against the query using a BGE-reranker-v2-m3 cross-encoder (~606 MB GGUF, loaded lazily on first retrieval). This stage is what pushes recall to 98.2% R@5 on LongMemEval. Falls back to WMR/ACAN-only when the model isn't available
+2. **WMR/ACAN scoring** — a 7-signal Weighted Memory Relevance score (cosine similarity, recency, importance, access frequency, neighbor bonus, proven utility, reflection boost) is computed per candidate. When enough retrieval-outcome data has accumulated (5000+ labeled pairs), the learned ACAN (Attentive Cross-Attention Network) weights replace the fixed WMR weights automatically
+3. **Cross-encoder rerank** — the top candidates are rescored pairwise against the query using a BGE-reranker-v2-m3 cross-encoder (~606 MB GGUF, loaded lazily on first retrieval). The two-stage retrieve-then-rerank design is modeled on the upstream kongclaw project, which measured 98.2% R@5 on LongMemEval; the eval harness is not bundled in this repo. Falls back to WMR/ACAN-only when the model isn't available
 4. **Graph expansion** — each top-scored node's graph neighbors (broader/narrower/related_to edges, causal chains, skill links) are pulled in
 5. **Dedup + budget trim** — duplicates are collapsed and the final set is trimmed to fit the context budget
 6. **Format + inject** — results are assembled into `<recalled_memory>` blocks and injected into the conversation
@@ -411,7 +411,7 @@ npm test
 
 The `dist/` directory ships in releases (intentionally not gitignored). Contributors should `npm run build` before testing.
 
-A `pre-push` hook gates pushes on the full vitest suite. The suite includes a **schema-edge integrity guard** that checks every `store.relate()` call against the IN/OUT types declared in `schema.surql`, catching mismatches at PR time.
+A `pre-push` hook gates pushes on the full vitest suite. The hook is **per-clone** (git's `.git/hooks/` is not tracked in the repo) — install it with `cp scripts/pre-push-hook.sh .git/hooks/pre-push && chmod +x .git/hooks/pre-push` after cloning. The suite includes a **schema-edge integrity guard** that checks every `store.relate()` call against the IN/OUT types declared in `schema.surql`, plus **D1-D4 structural lints** (v0.7.94) that prevent regression of the append-only / backfill-coverage / cosine-identity-guard / no-DELETE-on-content-tables invariants.
 
 ---
 
