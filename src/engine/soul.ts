@@ -476,6 +476,10 @@ export interface SoulDocument {
   self_observations: string[];
   earned_values: { value: string; grounded_in: string }[];
   revisions: { timestamp: string; section: string; change: string; rationale: string }[];
+  // NB: schema declares these as `datetime` (schema.surql:582-583); the
+  // SurrealDB JS client returns datetimes as ISO-8601 strings on the wire,
+  // hence `string` here. No caller currently feeds these back as bindings;
+  // if one is added, convert via `new Date(...)` or `time::now()` inline.
   created_at: string;
   updated_at: string;
 }

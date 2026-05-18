@@ -268,14 +268,14 @@ async function backfillSkillEmbeddings(state: GlobalPluginState): Promise<void> 
 
 /** Embedding backfill for artifact rows where embedding IS NONE OR len=0.
  *
- *  The hot-path `commitArtifact` (src/engine/commit.ts:589) swallows embed
+ *  The hot-path `commitArtifact` (src/engine/commit.ts:601) swallows embed
  *  failures via `swallow(...)` and persists the row with embedding=null when
  *  BGE-M3 hiccups. Without a backfill pass, those rows are permanent
  *  sediment — invisible to vector recall forever. consolidateMemories has
  *  Pass 2 backfill for memory only; this is its sibling for artifact.
  *
  *  Idempotent (WHERE embedding IS NONE), LIMIT 50 per boot, embed target
- *  matches commit.ts:599 (`${path} ${description}`) so backfilled vectors
+ *  matches commit.ts:601 (`${path} ${description}`) so backfilled vectors
  *  agree with query-time vectors. */
 async function backfillArtifactEmbeddings(state: GlobalPluginState): Promise<void> {
   const started = Date.now();
@@ -305,9 +305,9 @@ async function backfillArtifactEmbeddings(state: GlobalPluginState): Promise<voi
     if (!rows.length) return;
     for (const row of rows) {
       if (!row?.id || !row?.path) continue;
-      // Match commit.ts:599 hot-path template literal EXACTLY (no .trim(), no
+      // Match commit.ts:601 hot-path template literal EXACTLY (no .trim(), no
       // `?? ""` fallback). For TypeScript-typed callers, description is
-      // required (commit.ts:228) so target is `${path} ${description}`. For
+      // required (commit.ts:106) so target is `${path} ${description}`. For
       // legacy rows with description=NONE, hot-path would produce
       // `${path} undefined` via JS template-literal coercion, so backfill
       // matches that quirk to keep query-time vectors aligned with
@@ -316,7 +316,7 @@ async function backfillArtifactEmbeddings(state: GlobalPluginState): Promise<voi
       // BGE-M3 has an 8192-token context window. Long artifact descriptions
       // (gem content, long doc text) throw "Input is longer than the context
       // size" and the per-row catch leaves the row unembedded forever.
-      // Mirror the 6000-char truncation from surreal.ts:1892.
+      // Mirror the 6000-char truncation from surreal.ts:1941.
       if (target.length > 6000) {
         log.warn(`[maintenance] backfillArtifactEmbeddings: truncating target len=${target.length} → 6000 for ${row.path}`);
         target = target.slice(0, 6000);
@@ -349,7 +349,7 @@ async function backfillArtifactEmbeddings(state: GlobalPluginState): Promise<voi
 /** Embedding backfill for concept rows where embedding IS NONE OR len=0.
  *
  *  Same shape as backfillArtifactEmbeddings. Embed target matches
- *  commit.ts:454 (just `name`) so backfilled vectors agree with the
+ *  commit.ts:456 (just `name`) so backfilled vectors agree with the
  *  hot-path. */
 async function backfillConceptEmbeddings(state: GlobalPluginState): Promise<void> {
   if (!state.store.isAvailable()) return;
@@ -359,8 +359,16 @@ async function backfillConceptEmbeddings(state: GlobalPluginState): Promise<void
       id: string;
       name: string;
     }>(
+      // Hardening (2026-05-18): explicitly require name to be set. The loop
+      // below `continue`s on missing name anyway, but filtering at SELECT
+      // makes the contract visible. Rows that legitimately need healing but
+      // lack name (e.g. legacy pre-migration writers — see the 2026-05-15
+      // iKong session that left 4 such rows; healed via custom script + this
+      // session's investigation) must be addressed by setting name first.
       `SELECT id, name FROM concept
-        WHERE embedding IS NONE OR array::len(embedding) = 0
+        WHERE (embedding IS NONE OR array::len(embedding) = 0)
+          AND name IS NOT NONE
+          AND name != ""
         LIMIT 50`,
     );
     if (!rows.length) return;
@@ -368,7 +376,7 @@ async function backfillConceptEmbeddings(state: GlobalPluginState): Promise<void
     let ok = 0;
     for (const row of rows) {
       if (!row?.id || !row?.name) continue;
-      // Concept embed target = name (matches commit.ts:454 hot-path). Names
+      // Concept embed target = name (matches commit.ts:456 hot-path). Names
       // are typically short, but guard with the same 6000-char truncation
       // as artifact for defense-in-depth against pathological gem-derived
       // concept names.

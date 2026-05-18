@@ -102,20 +102,3 @@ export function formatReflectionContext(reflections: Reflection[]): string {
   return `\n<reflection_context>\n[Lessons from past sessions — avoid repeating these mistakes]\n${lines.join("\n\n")}\n</reflection_context>`;
 }
 
-/**
- * Get reflection count (for /stats display).
- */
-export async function getReflectionCount(store: SurrealStore): Promise<number> {
-  try {
-    if (!store.isAvailable()) return 0;
-    const rows = await store.queryFirst<{ count: number }>(
-      `SELECT count() AS count FROM reflection
-       WHERE (active = true OR active IS NONE)
-       GROUP ALL`,
-    );
-    return Number(rows[0]?.count ?? 0);
-  } catch (e) {
-    swallow.warn("reflection:count", e);
-    return 0;
-  }
-}
