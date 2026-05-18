@@ -11,7 +11,7 @@
 [![License: MIT](https://img.shields.io/github/license/42U/kongcode?style=for-the-badge&logo=opensourceinitiative&color=blue)](https://opensource.org/licenses/MIT)
 [![Node.js](https://img.shields.io/badge/Node.js-18+-339933?style=for-the-badge&logo=node.js&logoColor=white)](https://nodejs.org)
 [![SurrealDB](https://img.shields.io/badge/SurrealDB-3.0-ff00a0?style=for-the-badge&logo=surrealdb&logoColor=white)](https://surrealdb.com)
-[![Tests](https://img.shields.io/badge/Tests-997_passing-brightgreen?style=for-the-badge&logo=vitest&logoColor=white)](https://vitest.dev)
+[![Tests](https://img.shields.io/badge/Tests-1010_passing-brightgreen?style=for-the-badge&logo=vitest&logoColor=white)](https://vitest.dev)
 
 **Graph-backed permanent memory for [Claude Code](https://claude.ai/claude-code).**
 
@@ -253,7 +253,7 @@ KongCode exposes **slash commands** (you type) and **MCP tools** (the assistant 
 |---|---|
 | `/recall [query]` | Search past knowledge across concepts, memories, turns, artifacts, and skills |
 | `/core-memory [action]` | List, add, update, or deactivate always-loaded directives |
-| `/introspect [action]` | Database diagnostics: `status`, `count`, `verify`, `query`, `trends`, `migrate` |
+| `/introspect [action]` | Database diagnostics: `status`, `count`, `verify`, `query`, `migrate` |
 | `/kongcode-status` | One-shot health dashboard (counts, embedding coverage, graduation progress) |
 
 The assistant also has access to MCP tools it calls autonomously: `recall`, `core_memory`, `introspect`, `memory_health`, `record_finding`, `supersede`, `link_hierarchy`, `what_is_missing`, `cluster_scan`, `create_knowledge_gems`, `fetch_pending_work`, `commit_work_results`, `create_skill`, and `get_skill_body`.
@@ -397,6 +397,18 @@ KongCode ships skills that auto-activate on matching user prompts. Each lives in
 - `synthesize-sources`: Multi-source meta-concept generation with cross-link edges
 - `knowledge-gap-scan`: Topic coverage analysis before research
 - `audit-drift`: Periodic sweep for stale knowledge
+
+**Source-specific extraction:**
+- `extract-pdf-gems`: PDF-specific knowledge gem extraction (predecessor to source-agnostic `extract-knowledge`)
+
+**Identity & introspection:**
+- `kongbrain`: Identity-grounded interaction patterns (search memory, recall, soul management)
+
+**Backup & release:**
+- `kongcode-backup-native`: Lossless SurrealDB-to-SurrealDB snapshot
+- `kongcode-backup-jsonl`: JSONL export for ingestion into non-SurrealDB systems (Postgres + pgvector, Neo4j, etc.)
+- `kongcode-backup-semantic`: Knowledge-core-only transfer to peer agents (concepts/memories/skills, no transcript volume)
+- `kongcode-release`: End-to-end version-bump workflow across all 6 release surfaces
 
 Full workflow docs: [`docs/WORKFLOWS.md`](docs/WORKFLOWS.md).
 
