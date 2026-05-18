@@ -394,18 +394,38 @@ export async function writeExtractionResults(
       counts.skill++;
       priorState.skillNames.push(s.name);
       const content = `${s.name}\nTrigger: ${String(s.trigger_context ?? "").slice(0, 150)}\nSteps:\n${s.steps.map((st: string, i: number) => `${i + 1}. ${String(st).slice(0, 200)}`).join("\n")}`;
+      // v0.7.96 (Phase 8): stitch a substantive markdown body so
+      // get_skill_body returns more than the steps array. Matches the
+      // shape that migration-from-md skills ship with. memory:wa82gq3sq82gxxqi8733
+      // captured the prior gap (2604 auto-gen rows had body=NONE).
+      const stitchedBody = [
+        `# ${s.name}`,
+        ``,
+        s.trigger_context ? `## When to invoke\n\n${String(s.trigger_context).slice(0, 500)}\n` : "",
+        `## Steps\n`,
+        s.steps.map((st: string, i: number) => `${i + 1}. ${String(st).slice(0, 400)}`).join("\n"),
+        ``,
+        `---`,
+        `*Auto-extracted from session traces via causal_graduate.*`,
+      ].filter(Boolean).join("\n");
       writeOps.push((async () => {
         // v0.7.79: migrated to commitKnowledge({ kind: "skill" }). The
         // helper handles embedding (with embeddingText override for the
         // multi-line content blob), CREATE, skill_from_task auto-seal,
         // skill_uses_concept via linkToRelevantConcepts (default behavior
         // when conceptIds not provided), and supersedeOldSkills.
+        // v0.7.96 (Phase 8): now also passes source="causal_graduate" so
+        // auto-gen rows are distinguishable at query time (was source=NONE
+        // for 2604 of 2620 active rows pre-fix), and body=<stitched markdown>
+        // so get_skill_body returns substantive procedural text.
         try {
           await commitKnowledge({ store, embeddings }, {
             kind: "skill",
             name: String(s.name).slice(0, 100),
             description: content,
             steps: s.steps.map((st: string) => String(st).slice(0, 200)),
+            body: stitchedBody,
+            source: "causal_graduate",
             embeddingText: content,
             taskId: taskId,
             sessionId: sessionId,

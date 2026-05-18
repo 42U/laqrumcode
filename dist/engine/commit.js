@@ -519,6 +519,12 @@ async function commitSkill(deps, data) {
         record.preconditions = data.preconditions;
     if (data.postconditions !== undefined)
         record.postconditions = data.postconditions;
+    if (data.body !== undefined) {
+        record.body = data.body;
+        record.body_len = data.body.length;
+    }
+    if (data.source !== undefined)
+        record.source = data.source;
     if (embedding?.length)
         record.embedding = embedding;
     if (data.projectId)

@@ -239,6 +239,17 @@ export interface CommitSkillData {
   // ── Optional core fields ───────────────────────────────────────────────
   preconditions?: string;
   postconditions?: string;
+  /** Full markdown body. When set, `get_skill_body` returns this verbatim.
+   *  Manual writes (create_skill tool, migration-from-md) populate this.
+   *  Auto-gen writers (causal_graduate, v0.7.96) should stitch a body from
+   *  steps + trigger so get_skill_body returns substantive markdown rather
+   *  than a thin steps[] dump. */
+  body?: string;
+  /** Provenance tag — distinguishes auto-gen from manual at query time.
+   *  Conventional values: "create_skill_v091" (manual API), "migration-from-md"
+   *  (one-time SKILL.md migration), "causal_graduate" (auto-gen from session
+   *  traces), "manual-revision-<date>" (in-place updates via raw SurrealQL). */
+  source?: string;
 
   // ── Embedding controls ─────────────────────────────────────────────────
   /** Override the default `${name}: ${description}` embed target. Three
@@ -896,6 +907,11 @@ async function commitSkill(
   };
   if (data.preconditions !== undefined) record.preconditions = data.preconditions;
   if (data.postconditions !== undefined) record.postconditions = data.postconditions;
+  if (data.body !== undefined) {
+    record.body = data.body;
+    record.body_len = data.body.length;
+  }
+  if (data.source !== undefined) record.source = data.source;
   if (embedding?.length) record.embedding = embedding;
   if (data.projectId) record.project_id = data.projectId;
   if (data.extras) {
