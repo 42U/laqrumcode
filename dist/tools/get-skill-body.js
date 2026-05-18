@@ -70,6 +70,13 @@ export async function handleGetSkillBody(state, _session, args) {
             parts.push(`(This skill has no body, preconditions, steps, or postconditions stored. The row exists but is empty: ${row.id})`);
         }
     }
+    // v0.7.96 Piece C — explicit fetch IS usage. Increment success_count +
+    // last_used so the skill's invocation history reflects reality.
+    // memory:sbxbggtmj7nmafpw9ayn captured the gap: 99% of skills had
+    // success_count stuck at DEFAULT 1 because tracking only fired on
+    // auto-injection (intent ∈ SKILL_INTENTS), never on explicit fetches.
+    // Fire-and-forget; never blocks the response, never throws upward.
+    void state.store.queryExec(`UPDATE ${row.id} SET success_count += 1, last_used = time::now()`).catch(() => { });
     return {
         content: [{
                 type: "text",
