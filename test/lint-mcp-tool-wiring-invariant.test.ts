@@ -72,6 +72,27 @@ function extractFromDaemonIndex(): Set<string> {
   return new Set(matches.map((x) => x[1]));
 }
 
+/** Extract the "tool.X" first-arg strings from server.register(...) calls. */
+function extractDaemonRegisterFirstArgs(): Set<string> {
+  const file = readSrc("src/daemon/index.ts");
+  const matches = [
+    ...file.matchAll(/server\.register\(\s*"(tool\.[a-zA-Z]+)"\s*,/g),
+  ];
+  return new Set(matches.map((x) => x[1]));
+}
+
+/** Extract MCP_TO_IPC_METHOD as full key→value pairs. */
+function extractToolDefsMapPairs(): Map<string, string> {
+  const file = readSrc("src/shared/tool-defs.ts");
+  const m = file.match(/export const MCP_TO_IPC_METHOD[^{]*\{\s*([\s\S]*?)\n\};/);
+  if (!m) return new Map();
+  const pairs = new Map<string, string>();
+  for (const x of m[1].matchAll(/^\s*([a-z_]+):\s*"(tool\.[a-zA-Z]+)"/gm)) {
+    pairs.set(x[1], x[2]);
+  }
+  return pairs;
+}
+
 function diff(label: string, source: Set<string>, target: Set<string>, sourceLabel: string, targetLabel: string): string[] {
   const out: string[] = [];
   for (const t of source) {
@@ -124,6 +145,45 @@ describe("MCP tool wiring invariant (v0.7.85)", () => {
         `[0.7.85] for context on why this invariant exists.`,
       ].join("\n");
       throw new Error(msg);
+    }
+  });
+
+  // v0.7.96 hardening (added after deep-dive audit 2026-05-18). The 5-surface
+  // membership check above catches the v0.7.84 failure class (tool present
+  // in A only). It does NOT catch value-side drift: if
+  // MCP_TO_IPC_METHOD.core_memory = "tool.coreMem" but the daemon registers
+  // "tool.coreMemory", both surfaces still have the snake_case key
+  // "core_memory" so membership matches — but the IPC dispatch fails at
+  // runtime because the client sends "tool.coreMem" while the server only
+  // knows "tool.coreMemory". This test asserts that every value in
+  // MCP_TO_IPC_METHOD appears verbatim as a first-arg in
+  // server.register(...) in daemon/index.ts.
+  it("every MCP_TO_IPC_METHOD value matches a server.register first-arg", () => {
+    const map = extractToolDefsMapPairs();
+    const registered = extractDaemonRegisterFirstArgs();
+    expect(map.size, "extracted MCP_TO_IPC_METHOD pair count").toBeGreaterThan(0);
+    expect(registered.size, "extracted server.register first-arg count").toBeGreaterThan(0);
+
+    const violations: string[] = [];
+    for (const [snakeKey, dottedValue] of map.entries()) {
+      if (!registered.has(dottedValue)) {
+        violations.push(
+          `  - MCP_TO_IPC_METHOD.${snakeKey} = "${dottedValue}" but no server.register("${dottedValue}", ...) call found in src/daemon/index.ts`,
+        );
+      }
+    }
+
+    if (violations.length > 0) {
+      throw new Error(
+        [
+          `MCP_TO_IPC_METHOD value drift: values must match server.register(...) first args verbatim.`,
+          ``,
+          `Violations:`,
+          ...violations,
+          ``,
+          `This catches typos like MCP_TO_IPC_METHOD.foo = "tool.foO" vs server.register("tool.foo", ...) — the membership check passes but the dispatch fails at runtime.`,
+        ].join("\n"),
+      );
     }
   });
 });
