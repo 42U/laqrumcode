@@ -641,7 +641,16 @@ DEFINE FIELD IF NOT EXISTS completed_at ON pending_work TYPE option<datetime>;
 -- v0.7.95 append-only: pending_work formerly DELETE'd dupes + 7d-stale rows;
 -- now soft-archived via active=false + archived_at + archive_reason. Readers
 -- (fetch_pending_work, status_breakdown) filter `(active = true OR active IS NONE)`.
-DEFINE FIELD IF NOT EXISTS active ON pending_work TYPE bool DEFAULT true;
+-- v0.7.96 (2026-05-18): TYPE option<bool> + OVERWRITE. The original `TYPE bool
+-- DEFAULT true` with IF NOT EXISTS shipped without a backfill — 468 pre-existing
+-- rows had `active IS NONE`, which the SELECT guard tolerated but the claim
+-- UPDATE+RETURN AFTER at pending-work.ts:211-212 did NOT (SCHEMAFULL re-coerces
+-- on write-returns, throws `Couldn't coerce ... Expected bool but found NONE`).
+-- Result: queue was deadlocked on the highest-priority NONE row until 2026-05-18.
+-- option<bool> aligns the schema with reader semantics (NONE legitimate),
+-- OVERWRITE ensures existing installs pick up the relaxation on daemon restart.
+-- See finding memory:3k5exi93w1wi5stp0pqn for the full root cause trace.
+DEFINE FIELD OVERWRITE active ON pending_work TYPE option<bool> DEFAULT true;
 DEFINE FIELD IF NOT EXISTS archived_at ON pending_work TYPE option<datetime>;
 DEFINE FIELD IF NOT EXISTS archive_reason ON pending_work TYPE option<string>;
 DEFINE INDEX IF NOT EXISTS pw_status_idx ON pending_work FIELDS status, priority;
