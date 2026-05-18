@@ -1872,7 +1872,7 @@ export class SurrealStore {
           `SELECT id, importance, access_count,
                   vector::similarity::cosine(embedding, $vec) AS score
            FROM memory
-           WHERE id != $mid
+           WHERE id != type::record($mid)
              AND category = $cat
              AND (status = 'active' OR status IS NONE)
              AND embedding != NONE AND array::len(embedding) > 0
@@ -1961,7 +1961,7 @@ export class SurrealStore {
             `SELECT id, importance, access_count,
                     vector::similarity::cosine(embedding, $vec) AS score
              FROM memory
-             WHERE id != $mid
+             WHERE id != type::record($mid)
                AND category = $cat
                AND (status = 'active' OR status IS NONE)
                AND embedding != NONE AND array::len(embedding) > 0
@@ -2028,7 +2028,7 @@ export class SurrealStore {
           `SELECT id, importance,
                   vector::similarity::cosine(embedding, $vec) AS score
            FROM reflection
-           WHERE id != $rid
+           WHERE id != type::record($rid)
              AND category = $cat
              AND (active = true OR active IS NONE)
              AND embedding != NONE AND array::len(embedding) > 0

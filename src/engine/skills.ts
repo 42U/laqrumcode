@@ -58,7 +58,7 @@ export async function supersedeOldSkills(
     const rows = await store.queryFirst<{ id: string; score: number }>(
       `SELECT id, vector::similarity::cosine(embedding, $vec) AS score
        FROM skill
-       WHERE id != $sid
+       WHERE id != type::record($sid)
          AND name = $newName
          AND (active = NONE OR active = true)
          AND embedding != NONE AND array::len(embedding) > 0
