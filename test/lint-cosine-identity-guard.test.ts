@@ -55,12 +55,12 @@ const READ_ONLY_COSINE_SITES = new Set<string>([
   // a destructive op.
   "src/engine/surreal.ts:1038",
 
-  // commitCorrection oldText resolver (commit.ts:1037 concept, :1046 memory)
+  // commitCorrection oldText resolver (commit.ts:1053 concept, :1062 memory)
   // — vector match to find the user-named supersede target. Decays stability
   // explicitly (not silent), invoked only via the supersede MCP tool with
   // explicit user intent.
-  "src/engine/commit.ts:1037",
-  "src/engine/commit.ts:1046",
+  "src/engine/commit.ts:1053",
+  "src/engine/commit.ts:1062",
 
   // upsertConcept race-recovery KNN match — read-only fallback on UNIQUE
   // collision; returns existing id without mutating.
