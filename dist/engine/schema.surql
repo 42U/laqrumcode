@@ -675,6 +675,11 @@ DEFINE FIELD IF NOT EXISTS text_hash ON embedding_cache TYPE string;
 DEFINE FIELD IF NOT EXISTS embedding ON embedding_cache TYPE array;
 DEFINE FIELD IF NOT EXISTS model_version ON embedding_cache TYPE string;
 DEFINE FIELD IF NOT EXISTS created_at ON embedding_cache TYPE datetime DEFAULT time::now();
+-- v0.7.96 tag-don't-delete (core_memory:hoj8fvmbt7d14mskciba): retention paths
+-- mark rows pruned via pruned_at + prune_reason and leave them in place rather
+-- than DELETE. Readers (l2Get at embeddings.ts) filter `pruned_at IS NONE`.
+DEFINE FIELD IF NOT EXISTS pruned_at ON embedding_cache TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS prune_reason ON embedding_cache TYPE option<string>;
 DEFINE INDEX IF NOT EXISTS idx_ec_text_hash ON embedding_cache FIELDS text_hash UNIQUE;
 
 -- ============================================================

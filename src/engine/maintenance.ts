@@ -547,9 +547,17 @@ async function backfillTurnArchiveEmbeddings(state: GlobalPluginState): Promise<
 async function purgeStaleEmbedCache(state: GlobalPluginState): Promise<void> {
   if (!state.store.isAvailable()) return;
   try {
+    // v0.7.96 tag-don't-delete (core_memory:hoj8fvmbt7d14mskciba): was DELETE
+    // on rows >30d, now soft-tag via pruned_at + prune_reason. l2Get filters
+    // `pruned_at IS NONE` so stale cache entries are inert but recallable.
+    // Schema fields added at schema.surql for embedding_cache.
     await state.store.queryExec(
-      `LET $stale = (SELECT id FROM embedding_cache WHERE created_at < time::now() - 30d LIMIT 500);
-       FOR $row IN $stale { DELETE $row.id; };`,
+      `UPDATE embedding_cache SET
+         pruned_at = time::now(),
+         prune_reason = "stale_30d"
+       WHERE created_at < time::now() - 30d
+         AND pruned_at IS NONE
+       LIMIT 500`,
     );
   } catch (e) {
     swallow.warn("maintenance:purgeEmbedCache", e);

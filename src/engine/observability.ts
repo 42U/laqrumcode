@@ -216,14 +216,22 @@ export async function rollupDailyMetrics(
 }
 
 /**
- * Prune raw orchestrator_metrics rows older than the retention window.
- * Daily rollups preserve the aggregate signal; raw rows are operational.
+ * Tag raw orchestrator_metrics rows older than the retention window as
+ * pruned. Daily rollups preserve the aggregate signal; raw rows are
+ * operational. v0.7.96 (core_memory:hoj8fvmbt7d14mskciba): was DELETE,
+ * now soft-tag with `pruned_at` + `prune_reason` so any unique signal
+ * remains recallable. Idempotent: `AND pruned_at IS NONE` avoids
+ * re-tagging on every run.
  */
 export async function pruneRawMetrics(store: SurrealStore, retentionDays = 30): Promise<void> {
   if (!store.isAvailable()) return;
   try {
     await store.queryExec(
-      `DELETE orchestrator_metrics WHERE created_at < time::now() - ${retentionDays}d`,
+      `UPDATE orchestrator_metrics SET
+         pruned_at = time::now(),
+         prune_reason = "retention_${retentionDays}d"
+       WHERE created_at < time::now() - ${retentionDays}d
+         AND pruned_at IS NONE`,
     );
   } catch (e) {
     swallow.warn("observability:pruneRawMetrics", e);

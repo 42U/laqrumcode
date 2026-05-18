@@ -81,7 +81,11 @@ export class EmbeddingService {
         if (!this.store?.isAvailable() || !this.modelVersion)
             return null;
         try {
-            const rows = await this.store.queryFirst(`SELECT embedding FROM embedding_cache WHERE text_hash = $hash AND model_version = $mv LIMIT 1`, { hash, mv: this.modelVersion });
+            const rows = await this.store.queryFirst(`SELECT embedding FROM embedding_cache
+           WHERE text_hash = $hash
+             AND model_version = $mv
+             AND pruned_at IS NONE
+           LIMIT 1`, { hash, mv: this.modelVersion });
             const vec = rows[0]?.embedding;
             if (Array.isArray(vec) && vec.length > 0 && vec.every(Number.isFinite)) {
                 this.l2Hits++;

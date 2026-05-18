@@ -1814,9 +1814,17 @@ export class SurrealStore {
           assertRecordId(String(row.id));
           const rid = String(row.id);
           // Direct interpolation safe: assertRecordId validated above
+          // v0.7.96 tag-don't-delete (core_memory:hoj8fvmbt7d14mskciba): was
+          // DELETE after the INSERT, leaving no trace of the row in the turn
+          // table. Now tags `pruned_at` + `prune_reason` so the row stays
+          // searchable in the off-chance some unique signal in it gets
+          // recalled later. Readers on the hot path filter `pruned_at IS NONE`.
           await this.queryExec(
             `LET $data = (SELECT * FROM ONLY ${rid});
-             IF $data != NONE { INSERT INTO turn_archive $data; DELETE ${rid}; };`,
+             IF $data != NONE {
+               INSERT INTO turn_archive $data;
+               UPDATE ${rid} SET pruned_at = time::now(), prune_reason = "archived_to_turn_archive";
+             };`,
           );
         } catch { /* row already archived or deleted by concurrent call */ }
       }

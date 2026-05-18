@@ -108,7 +108,11 @@ export class EmbeddingService {
     if (!this.store?.isAvailable() || !this.modelVersion) return null;
     try {
       const rows = await this.store.queryFirst<{ embedding: number[] }>(
-        `SELECT embedding FROM embedding_cache WHERE text_hash = $hash AND model_version = $mv LIMIT 1`,
+        `SELECT embedding FROM embedding_cache
+           WHERE text_hash = $hash
+             AND model_version = $mv
+             AND pruned_at IS NONE
+           LIMIT 1`,
         { hash, mv: this.modelVersion },
       );
       const vec = rows[0]?.embedding;
