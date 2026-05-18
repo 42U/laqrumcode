@@ -133,28 +133,32 @@ describe.skipIf(!RUN_LIVE)("kongcode DB state invariants (live, read-only)", () 
     });
   });
 
-  describe("pending_work active field discipline", () => {
-    // Regression for the v0.7.95 → v0.7.96 deadlock: 468 pre-migration rows
-    // lacked the `active` field, the SELECT guard tolerated NONE, but the
-    // claim `UPDATE ... RETURN AFTER` at pending-work.ts:211-212 re-coerced
-    // and threw `Couldn't coerce ... Expected bool but found NONE`. Queue
-    // froze on the highest-priority pending row.
+  describe("active field discipline (pending_work + skill)", () => {
+    // Regression for the v0.7.95 → v0.7.96 deadlock pattern: pre-migration
+    // rows lack the `active` field, the SELECT guard tolerates NONE, but a
+    // claim `UPDATE ... RETURN AFTER` re-coerces and throws `Couldn't coerce
+    // ... Expected bool but found NONE`. pending_work had 468 NONE rows that
+    // deadlocked fetch_pending_work; skill had 52 NONE rows that were a
+    // latent landmine (no RETURN AFTER caller yet, but the moment one is
+    // added, the bomb goes off).
     //
-    // v0.7.96 healed the data and relaxed schema to option<bool>, but the
-    // reader semantics still treat NONE as equivalent to true — and a NONE
-    // row signals either a new pre-backfill migration ghost or a writer
-    // bypassing the DEFAULT. Either way, surface it.
-    it("zero pending_work rows have active IS NONE", async () => {
-      const rows = await q<{ c: number }>(
-        `SELECT count() AS c FROM pending_work WHERE active IS NONE GROUP ALL`,
-      );
-      const count = rows[0]?.c ?? 0;
-      expect(
-        count,
-        `${count} pending_work rows have active IS NONE — backfill with ` +
-          `UPDATE pending_work SET active = true WHERE active IS NONE`,
-      ).toBe(0);
-    });
+    // Both tables now use TYPE option<bool>, but a NONE row still signals
+    // either a new pre-backfill migration ghost or a writer bypassing the
+    // DEFAULT. Either way, surface it.
+    const tablesWithActiveDiscipline = ["pending_work", "skill"] as const;
+    for (const table of tablesWithActiveDiscipline) {
+      it(`zero ${table} rows have active IS NONE`, async () => {
+        const rows = await q<{ c: number }>(
+          `SELECT count() AS c FROM ${table} WHERE active IS NONE GROUP ALL`,
+        );
+        const count = rows[0]?.c ?? 0;
+        expect(
+          count,
+          `${count} ${table} rows have active IS NONE — backfill with ` +
+            `UPDATE ${table} SET active = true WHERE active IS NONE`,
+        ).toBe(0);
+      });
+    }
   });
 
   describe("concept supersede-chain integrity", () => {

@@ -416,7 +416,18 @@ DEFINE FIELD IF NOT EXISTS postconditions ON skill TYPE option<string>;
 DEFINE FIELD IF NOT EXISTS success_count ON skill TYPE int DEFAULT 1;
 DEFINE FIELD IF NOT EXISTS failure_count ON skill TYPE int DEFAULT 0;
 DEFINE FIELD IF NOT EXISTS avg_duration_ms ON skill TYPE float DEFAULT 0.0;
-DEFINE FIELD IF NOT EXISTS active ON skill TYPE bool DEFAULT true;
+-- v0.7.96 (2026-05-18): TYPE option<bool> + OVERWRITE. Same lookalike of
+-- the pending_work.active deadlock (memory:3k5exi93w1wi5stp0pqn) — 52 of
+-- 3446 skill rows had `active IS NONE` from pre-migration writes. Readers
+-- already tolerated NONE via `(active = NONE OR active = true)` guards at
+-- skills.ts:63, skills.ts:110, soul.ts:190, maintenance.ts:239, so the bomb
+-- hadn't gone off — but the moment any caller adds `UPDATE skill ... RETURN
+-- AFTER` for a claim race the 52 NONE rows throw the same coerce error
+-- pending_work hit. Relaxing to option<bool> aligns the schema with the
+-- long-standing reader semantics. OVERWRITE so existing installs pick it
+-- up on daemon restart. Healed via UPDATE SET active=true WHERE active IS
+-- NONE before this DEFINE landed.
+DEFINE FIELD OVERWRITE active ON skill TYPE option<bool> DEFAULT true;
 DEFINE FIELD IF NOT EXISTS superseded_by ON skill TYPE option<record<skill>>;
 DEFINE FIELD IF NOT EXISTS last_used ON skill TYPE option<datetime>;
 DEFINE FIELD IF NOT EXISTS created_at ON skill TYPE datetime DEFAULT time::now();
