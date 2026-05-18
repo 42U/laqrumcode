@@ -111,7 +111,7 @@ async function commitConcept(deps, data) {
             embedding = await embeddings.embed(data.name);
         }
         catch (e) {
-            swallow(`${logTag}:embed`, e);
+            swallow.warn(`${logTag}:embed`, e);
         }
     }
     // 2. Upsert the concept row (provenance passed through when supplied).
@@ -199,7 +199,7 @@ async function commitMemory(deps, data) {
             embedding = await embeddings.embed(data.embeddingText ?? data.text);
         }
         catch (e) {
-            swallow(`${logTag}:embed`, e);
+            swallow.warn(`${logTag}:embed`, e);
         }
     }
     // 2. Insert the memory row. createMemory signature is
@@ -233,7 +233,7 @@ async function commitArtifact(deps, data) {
             embedding = await embeddings.embed(`${data.path} ${data.description}`);
         }
         catch (e) {
-            swallow(`${logTag}:embed`, e);
+            swallow.warn(`${logTag}:embed`, e);
         }
     }
     // Insert the artifact row.
@@ -295,7 +295,7 @@ async function commitReflection(deps, data) {
             embedding = await embeddings.embed(data.text);
         }
         catch (e) {
-            swallow(`${logTag}:embed`, e);
+            swallow.warn(`${logTag}:embed`, e);
         }
     }
     // v0.7.93 append-only: was a cosine-≥0.85 silent-discard that dropped the
@@ -501,7 +501,7 @@ async function commitSkill(deps, data) {
             embedding = await embeddings.embed(data.embeddingText ?? `${data.name}: ${data.description}`);
         }
         catch (e) {
-            swallow(`${logTag}:embed`, e);
+            swallow.warn(`${logTag}:embed`, e);
         }
     }
     // 2. Build CREATE record. Schema-default fields (confidence=1.0,
