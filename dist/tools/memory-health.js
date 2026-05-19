@@ -10,8 +10,25 @@
  * This is the programmatic counterpart to the skills/kongcode-health
  * text-based skill — same data, structured output.
  */
+import { statSync } from "node:fs";
 import { swallow } from "../engine/errors.js";
 import { probeEmbeddingService } from "../engine/embeddings.js";
+// v0.7.96 W2-6 dist-drift detection. The running daemon loads dist/ files at
+// startup and keeps them in memory. After `npm run build` lands a new
+// dist/, the daemon STILL runs the old code until restarted. The v0.7.96
+// incident logged this: PID 34196 ran pre-Phase-X code for 12+ hours and
+// continually produced supersede corruption. Capturing the daemon-entrypoint
+// mtime at module-load (which runs once when the daemon imports this file
+// at startup) gives a snapshot; comparing against the current on-disk mtime
+// at call-time surfaces drift. memory:p5s9vfihd65pnffomztp.
+const DAEMON_ENTRYPOINT_PATH = process.argv[1] ?? "";
+let distMtimeAtStartup = 0;
+try {
+    if (DAEMON_ENTRYPOINT_PATH) {
+        distMtimeAtStartup = statSync(DAEMON_ENTRYPOINT_PATH).mtimeMs;
+    }
+}
+catch { /* startup-time stat may fail in test contexts; drift detection silently disabled */ }
 async function probeEmbeddings(embeddings) {
     const probed = await probeEmbeddingService(embeddings);
     // memory-health omits the detail field on the "ok" path. Mapping `message`
@@ -126,6 +143,30 @@ export async function handleMemoryHealth(state, _session, _args) {
             severity: "warn", area: "acan",
             message: "retrieval_outcome count is low relative to turn count — ACAN may not have enough training data",
         });
+    }
+    // W2-6: detect daemon dist-drift. If the dist file on disk has a newer
+    // mtime than when this module first loaded, the daemon is running stale
+    // code (the v0.7.96 PID-34196 incident). Push a warn-level diagnostic so
+    // operators see it in the next memory_health call.
+    if (distMtimeAtStartup > 0 && DAEMON_ENTRYPOINT_PATH) {
+        try {
+            const currentMtime = statSync(DAEMON_ENTRYPOINT_PATH).mtimeMs;
+            if (currentMtime > distMtimeAtStartup + 1000 /* 1s slack */) {
+                const ageHours = ((Date.now() - distMtimeAtStartup) / 3_600_000).toFixed(1);
+                diagnostics.push({
+                    severity: "warn",
+                    area: "daemon_dist_drift",
+                    message: `daemon dist drift detected: ${DAEMON_ENTRYPOINT_PATH} mtime advanced ` +
+                        `since daemon startup (${ageHours}h ago). The running daemon is on ` +
+                        `stale code; restart it to pick up changes. Pattern: ` +
+                        `\`ps aux | grep kongcode/dist/daemon\` then \`kill <PID>\` ` +
+                        `(auto-respawns on next IPC connect). See memory:p5s9vfihd65pnffomztp.`,
+                });
+            }
+        }
+        catch (e) {
+            swallow("memoryHealth:distMtime", e);
+        }
     }
     // Overall status.
     let status = "green";
