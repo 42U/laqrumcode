@@ -40,7 +40,7 @@ Three `db-state.test.ts` assertions pin `count() WHERE superseded_by = id` to 0 
 
 ## [0.7.96] — 2026-05-18
 
-Deep-dive audit loop. Ten commits across nine phases. Two CRITICAL bugs healed live (468 + 730 corrupted rows), three operational DELETE paths converted to append-only soft-archive, the causal_graduate auto-gen pipeline gained source attribution and substantive bodies, new Tier-0 directive extended append-only to operational data.
+Deep-dive audit loop. Thirteen commits across nine phases (including 2 pre-audit healing commits for `pending_work.active` and `skill.active`, plus the bump itself). Two CRITICAL bugs healed live (468 + 730 corrupted rows), three operational DELETE paths converted to append-only soft-archive, the causal_graduate auto-gen pipeline gained source attribution and substantive bodies, new Tier-0 directive extended append-only to operational data.
 
 ### Fixed (CRITICAL) — supersede `id != $sid` type-coercion bug
 
