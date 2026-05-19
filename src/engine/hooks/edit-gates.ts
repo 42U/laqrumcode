@@ -102,6 +102,7 @@ async function hasInvestigatedFile(
          WHERE session_id = $sid
            AND role = 'user'
            AND text CONTAINS $path
+           AND pruned_at IS NONE
        LIMIT 1`,
       { sid: session.surrealSessionId, path: filePath },
     );
@@ -151,6 +152,7 @@ async function hasInvestigatedBashCommand(
          WHERE session_id = $sid
            AND role = 'user'
            AND text CONTAINS $needle
+           AND pruned_at IS NONE
        LIMIT 1`,
       { sid: session.surrealSessionId, needle: matchedPattern },
     );

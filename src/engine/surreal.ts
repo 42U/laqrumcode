@@ -421,10 +421,12 @@ export class SurrealStore {
       `SELECT id, text, role, timestamp, 0 AS accessCount, 'turn' AS table,
               vector::similarity::cosine(embedding, $vec) AS score${emb}
        FROM turn WHERE embedding != NONE AND array::len(embedding) > 0
+         AND pruned_at IS NONE
          AND session_id = $sid ORDER BY score DESC LIMIT ${sessionTurnLim}`,
       `SELECT id, text, role, timestamp, 0 AS accessCount, 'turn' AS table,
               vector::similarity::cosine(embedding, $vec) AS score${emb}
        FROM turn WHERE embedding != NONE AND array::len(embedding) > 0
+         AND pruned_at IS NONE
          AND session_id != $sid ORDER BY score DESC LIMIT ${crossTurnLim}`,
       // Archived turns: surfaced at a smaller budget so old content stays
       // reachable after archiveOldTurns drains the live turn table. Without
@@ -514,7 +516,7 @@ export class SurrealStore {
     limit = 50,
   ): Promise<{ role: string; text: string }[]> {
     return this.queryFirst<{ role: string; text: string }>(
-      `SELECT role, text, timestamp FROM turn WHERE session_id = $sid ORDER BY timestamp ASC LIMIT $lim`,
+      `SELECT role, text, timestamp FROM turn WHERE session_id = $sid AND pruned_at IS NONE ORDER BY timestamp ASC LIMIT $lim`,
       { sid: sessionId, lim: limit },
     );
   }
@@ -533,7 +535,7 @@ export class SurrealStore {
     // tool_name/tool_result/file_paths columns to this SELECT but dropped
     // `id` from the projection silently.
     const rows = await this.queryFirst<{ id: string; role: string; text: string; tool_name?: string; tool_result?: string; file_paths?: string[] }>(
-      `SELECT id, role, text, tool_name, tool_result, file_paths, timestamp FROM turn WHERE session_id = $sid ORDER BY timestamp ASC LIMIT $lim`,
+      `SELECT id, role, text, tool_name, tool_result, file_paths, timestamp FROM turn WHERE session_id = $sid AND pruned_at IS NONE ORDER BY timestamp ASC LIMIT $lim`,
       { sid: sessionId, lim: limit },
     );
     // safeId + post-filter: SurrealDB occasionally returns rows where `id`
@@ -1432,6 +1434,7 @@ export class SurrealStore {
         `SELECT role, text, tool_name, timestamp FROM turn
          WHERE id IN (SELECT VALUE in FROM part_of WHERE out = $sid)
            AND text != NONE AND text != ""
+           AND pruned_at IS NONE
          ORDER BY timestamp DESC LIMIT $lim`,
         { sid: prevSessionId, lim: limit },
       );
@@ -1806,7 +1809,7 @@ export class SurrealStore {
       if (!(await this.shouldRunMaintenance("archiveOldTurns", 500, 7, count))) return 0;
 
       const staleRows = await this.queryFirst<{ id: string }>(
-        `SELECT id FROM turn WHERE timestamp < time::now() - 7d AND id NOT IN (SELECT VALUE memory_id FROM retrieval_outcome WHERE memory_table = 'turn') LIMIT 500`,
+        `SELECT id FROM turn WHERE timestamp < time::now() - 7d AND pruned_at IS NONE AND id NOT IN (SELECT VALUE memory_id FROM retrieval_outcome WHERE memory_table = 'turn') LIMIT 500`,
       );
       if (!staleRows.length) return 0;
       for (const row of staleRows as { id: string }[]) {

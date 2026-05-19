@@ -324,10 +324,12 @@ export class SurrealStore {
             `SELECT id, text, role, timestamp, 0 AS accessCount, 'turn' AS table,
               vector::similarity::cosine(embedding, $vec) AS score${emb}
        FROM turn WHERE embedding != NONE AND array::len(embedding) > 0
+         AND pruned_at IS NONE
          AND session_id = $sid ORDER BY score DESC LIMIT ${sessionTurnLim}`,
             `SELECT id, text, role, timestamp, 0 AS accessCount, 'turn' AS table,
               vector::similarity::cosine(embedding, $vec) AS score${emb}
        FROM turn WHERE embedding != NONE AND array::len(embedding) > 0
+         AND pruned_at IS NONE
          AND session_id != $sid ORDER BY score DESC LIMIT ${crossTurnLim}`,
             // Archived turns: surfaced at a smaller budget so old content stays
             // reachable after archiveOldTurns drains the live turn table. Without
@@ -408,7 +410,7 @@ export class SurrealStore {
         return String(rows[0]?.id ?? "");
     }
     async getSessionTurns(sessionId, limit = 50) {
-        return this.queryFirst(`SELECT role, text, timestamp FROM turn WHERE session_id = $sid ORDER BY timestamp ASC LIMIT $lim`, { sid: sessionId, lim: limit });
+        return this.queryFirst(`SELECT role, text, timestamp FROM turn WHERE session_id = $sid AND pruned_at IS NONE ORDER BY timestamp ASC LIMIT $lim`, { sid: sessionId, lim: limit });
     }
     async getSessionTurnsRich(sessionId, limit = 20) {
         // `id` MUST be in the projection. Downstream callers (writeExtractionResults
@@ -420,7 +422,7 @@ export class SurrealStore {
         // TurnData.turnId shape unchanged. R5 regression fix: R4 added the
         // tool_name/tool_result/file_paths columns to this SELECT but dropped
         // `id` from the projection silently.
-        const rows = await this.queryFirst(`SELECT id, role, text, tool_name, tool_result, file_paths, timestamp FROM turn WHERE session_id = $sid ORDER BY timestamp ASC LIMIT $lim`, { sid: sessionId, lim: limit });
+        const rows = await this.queryFirst(`SELECT id, role, text, tool_name, tool_result, file_paths, timestamp FROM turn WHERE session_id = $sid AND pruned_at IS NONE ORDER BY timestamp ASC LIMIT $lim`, { sid: sessionId, lim: limit });
         // safeId + post-filter: SurrealDB occasionally returns rows where `id`
         // is undefined/null (driver edge case mid-migration, or a projection that
         // accidentally drops the field upstream). `String(undefined)` yields
@@ -1108,6 +1110,7 @@ export class SurrealStore {
             const turns = await this.queryFirst(`SELECT role, text, tool_name, timestamp FROM turn
          WHERE id IN (SELECT VALUE in FROM part_of WHERE out = $sid)
            AND text != NONE AND text != ""
+           AND pruned_at IS NONE
          ORDER BY timestamp DESC LIMIT $lim`, { sid: prevSessionId, lim: limit });
             return turns.reverse();
         }
@@ -1433,7 +1436,7 @@ export class SurrealStore {
             // after week 1 regardless of volume.
             if (!(await this.shouldRunMaintenance("archiveOldTurns", 500, 7, count)))
                 return 0;
-            const staleRows = await this.queryFirst(`SELECT id FROM turn WHERE timestamp < time::now() - 7d AND id NOT IN (SELECT VALUE memory_id FROM retrieval_outcome WHERE memory_table = 'turn') LIMIT 500`);
+            const staleRows = await this.queryFirst(`SELECT id FROM turn WHERE timestamp < time::now() - 7d AND pruned_at IS NONE AND id NOT IN (SELECT VALUE memory_id FROM retrieval_outcome WHERE memory_table = 'turn') LIMIT 500`);
             if (!staleRows.length)
                 return 0;
             for (const row of staleRows) {

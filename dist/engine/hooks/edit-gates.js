@@ -87,6 +87,7 @@ async function hasInvestigatedFile(state, session, filePath) {
          WHERE session_id = $sid
            AND role = 'user'
            AND text CONTAINS $path
+           AND pruned_at IS NONE
        LIMIT 1`, { sid: session.surrealSessionId, path: filePath });
         if (rows.length > 0) {
             session._editGateChecked.add(filePath);
@@ -123,6 +124,7 @@ async function hasInvestigatedBashCommand(state, session, command, matchedPatter
          WHERE session_id = $sid
            AND role = 'user'
            AND text CONTAINS $needle
+           AND pruned_at IS NONE
        LIMIT 1`, { sid: session.surrealSessionId, needle: matchedPattern });
         if (rows.length > 0) {
             session._editGateChecked.add(cacheKey);
