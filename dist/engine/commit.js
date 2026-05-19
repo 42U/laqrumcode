@@ -658,7 +658,7 @@ async function commitCorrection(deps, data) {
              FROM memory
              WHERE embedding != NONE AND array::len(embedding) > 0
                AND (status = 'active' OR status IS NONE)
-               AND id != $correctionId
+               AND id != type::record($correctionId)
              ORDER BY score DESC LIMIT 5`, { vec, correctionId: memoryId }),
                 ]);
                 for (const c of conceptCandidates) {

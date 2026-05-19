@@ -108,7 +108,7 @@ export async function linkConceptHierarchy(
           `SELECT id, content,
                   vector::similarity::cosine(embedding, $vec) AS score
            FROM concept
-           WHERE id != $cid
+           WHERE id != type::record($cid)
              AND embedding != NONE AND array::len(embedding) > 0
              AND superseded_at IS NONE
            ORDER BY score DESC
@@ -117,7 +117,7 @@ export async function linkConceptHierarchy(
         )
       : await store.queryFirst<{ id: string; content: string }>(
           `SELECT id, content FROM concept
-           WHERE id != $cid AND superseded_at IS NONE
+           WHERE id != type::record($cid) AND superseded_at IS NONE
            LIMIT 50`,
           { cid: conceptId },
         );
@@ -153,7 +153,7 @@ export async function linkConceptHierarchy(
         const similar = await store.queryFirst<{ id: string; score: number }>(
           `SELECT id, vector::similarity::cosine(embedding, $vec) AS score
            FROM concept
-           WHERE id != $cid
+           WHERE id != type::record($cid)
              AND embedding != NONE AND array::len(embedding) > 0
              AND superseded_at IS NONE
            ORDER BY score DESC

@@ -1095,7 +1095,7 @@ export class SurrealStore {
             let prevSessionQuery;
             const bindings = { lim: limit };
             if (currentSessionId) {
-                prevSessionQuery = `SELECT id, started_at FROM session WHERE id != $current ORDER BY started_at DESC LIMIT 1`;
+                prevSessionQuery = `SELECT id, started_at FROM session WHERE id != type::record($current) ORDER BY started_at DESC LIMIT 1`;
                 bindings.current = currentSessionId;
             }
             else {
