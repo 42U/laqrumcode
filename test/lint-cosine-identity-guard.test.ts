@@ -117,7 +117,10 @@ interface Hit {
   file: string;
   line: number;
   block: string;
+  precedingMarker: boolean;
 }
+
+const MARKER_PATTERN = /\/\/\s*COSINE_GUARD_OK:/;
 
 function scan(file: string): Hit[] {
   const text = readFileSync(file, "utf-8");
@@ -136,7 +139,12 @@ function scan(file: string): Hit[] {
       if (/`\s*,?\s*$/.test(lines[j] ?? "") || /^\s*\);/.test(lines[j] ?? "")) break;
     }
     const block = lines.slice(Math.max(0, i - 3), blockEnd + 1).join("\n");
-    hits.push({ file: rel, line: i + 1, block });
+    // Look backwards up to 10 lines for the COSINE_GUARD_OK marker.
+    let precedingMarker = false;
+    for (let j = Math.max(0, i - 10); j < i; j++) {
+      if (MARKER_PATTERN.test(lines[j] ?? "")) { precedingMarker = true; break; }
+    }
+    hits.push({ file: rel, line: i + 1, block, precedingMarker });
   }
   return hits;
 }
@@ -155,6 +163,15 @@ describe("D2 — cosine + destructive op requires identity guard", () => {
         READ_ONLY_COSINE_SITES.has(`${h.file}:${h.line - 1}`) ||
         READ_ONLY_COSINE_SITES.has(`${h.file}:${h.line + 1}`)
       ) return false;
+      // v0.7.97 W3-1: marker-comment fallback. New cosine sites can
+      // bypass the line-number whitelist by annotating with
+      // `// COSINE_GUARD_OK: <reason>` in the 10 lines immediately
+      // preceding the cosine SQL. Eliminates the recurring whitelist
+      // line-shift tax (3 fixup commits in v0.7.96/97 alone) by
+      // anchoring approval on content rather than position. The marker
+      // is self-documenting at the call site — future readers see the
+      // read-only-ness justified inline.
+      if (h.precedingMarker) return false;
       // Otherwise, require an identity guard in the SQL block.
       return !IDENTITY_GUARDS.some(re => re.test(h.block));
     });
