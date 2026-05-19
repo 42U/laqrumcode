@@ -4,6 +4,80 @@ All notable changes to KongCode are documented here. The 0.7.x series introduced
 
 ## [Unreleased]
 
+Wave 3 polish: `COSINE_GUARD_OK` marker-comment support to retire the recurring whitelist-shift tax (`test/lint-cosine-identity-guard.test.ts`), memory + reflection corruption audit (verified clean — `memory:4wtboehkbfvl5f0vc5hk`), `create_skill` MCP tool now sets `source="create_skill_tool"` so manual authors are distinguishable from causal_graduate auto-gen, mid-task correction recovering 6 wrongly-archived skills via append-only undo (`memory:4n8j4f3durnaugepouto`).
+
+## [0.7.97] — 2026-05-18
+
+Wave 2 of the v0.7.96 deep-dive audit loop. Eight commits closing deferred items from Wave 1's audit + post-release polish. QA gate: auditor SHIP, validator 8/9 PASS.
+
+### Fixed — `type::record()` extended to 5 more id-not-equal sites (W2-1)
+
+Phase X (v0.7.96) fixed 4 supersede guards. The auditor flagged 9 other `id != $var` patterns; 5 of them have the same Thing-vs-string trap and got wrapped: `concept-links.ts:111/120/156` (concept narrower/broader/related_to KNN), `commit.ts:1066` (commitCorrection memory resolver), `surreal.ts:1416` (prevSession lookup). The 4 NOT wrapped are correctly exempt (`session_id` is a string field; pending-work direct-interpolation embeds parser-side as Thing).
+
+### Fixed — turn-table readers filter `pruned_at IS NONE` (W2-3)
+
+Phase 7 (v0.7.96) converted `archiveOldTurns` to INSERT+UPDATE-with-pruned_at. W2-3 added the filter to 8 reader sites including the `archiveOldTurns` candidate SELECT itself (idempotency — without it, every run re-prunes the same rows).
+
+### Backfilled — 3329 legacy causal_graduate skills (W2-2, data-only)
+
+Single bulk UPDATE backfilled `source="causal_graduate_legacy_backfill_2026_05_18"` + body derived from existing description for all pre-Phase-8 auto-gen skills. `get_skill_body` now returns substantive markdown for every causal_graduate skill.
+
+### Consolidated — 1945 duplicate skills → 491 canonicals (W2-5, data-only)
+
+After Phase X.5's 730-row heal, 491 distinct skill names had N>1 active rows (`harden-llm-json-parsing` had 96 copies). W2-5 picked a canonical per name and append-only-superseded the rest. Active count 3352 → 1407.
+
+### Added — self-supersede invariant tests (W2-4)
+
+Three `db-state.test.ts` assertions pin `count() WHERE superseded_by = id` to 0 on skill/memory/reflection. Would have caught Phase X's 730-row accumulation at CI time.
+
+### Added — daemon dist-drift detection (W2-6)
+
+`memory_health` captures the daemon entrypoint mtime at module-load and surfaces drift on every call. Closes the v0.7.96 ops gap (`memory:p5s9vfihd65pnffomztp`).
+
+### Chore — history.txt untracked (W2-7)
+
+`git rm --cached` + `.gitignore` rule.
+
+## [0.7.96] — 2026-05-18
+
+Deep-dive audit loop. Ten commits across nine phases. Two CRITICAL bugs healed live (468 + 730 corrupted rows), three operational DELETE paths converted to append-only soft-archive, the causal_graduate auto-gen pipeline gained source attribution and substantive bodies, new Tier-0 directive extended append-only to operational data.
+
+### Fixed (CRITICAL) — supersede `id != $sid` type-coercion bug
+
+`supersedeOldSkills` + 3 dedup-pass SELECTs filtered self via `WHERE id != $sid` where `$sid` was bound as JS string. SurrealDB v3 strict typing makes `Thing != string` always TRUE — exclude-self never worked. Every new skill self-superseded immediately: SELECT matched self, cosine self-sim = 1.0 passed 0.82 threshold, UPDATE wrote `active=false, superseded_by=self_id`. **730 wrongly-deactivated rows healed** (286 self-ref + 444 historical cross-name). Fix at `skills.ts:61, surreal.ts:1875/1964/2031`: wrap with `type::record($X)`. See `memory:b530jbmpybcz0n82mme1`.
+
+### Fixed (CRITICAL) — pending_work.active deadlock
+
+468 pre-v0.7.95 rows had `active IS NONE` on `TYPE bool` (non-optional). SELECT guard tolerated NONE; claim `UPDATE ... RETURN AFTER` re-coerced and threw `Couldn't coerce ... Expected 'bool' but found 'NONE'`. Queue deadlocked. Fix: heal data + schema-relax to `TYPE option<bool> + OVERWRITE`. See `memory:3k5exi93w1wi5stp0pqn`.
+
+### Fixed — tag-don't-delete refactor (3 retention sites)
+
+`archiveOldTurns`, `pruneRawMetrics`, `purgeStaleEmbedCache` converted from DELETE to UPDATE-with-pruned_at-tag. New `pruned_at option<datetime>` + `prune_reason option<string>` fields on `embedding_cache`. Reader (`l2Get`) updated to filter pruned. Per new Tier-0 directive `core_memory:hoj8fvmbt7d14mskciba`.
+
+### Fixed — hot-path embed swallows → swallow.warn (5 sites)
+
+`commit.ts:457/553/601/681/883` upgraded from `swallow(...)` (hidden behind `KONGCODE_DEBUG=1`) to `swallow.warn(...)` so embed failures are operator-visible.
+
+### Added — causal_graduate skills carry source + body
+
+`CommitSkillData` gained first-class `body` + `source` fields. `memory-daemon.ts` writer now passes `source="causal_graduate"` + stitched markdown body. Closes the 99% bodyless-skill gap (`memory:wa82gq3sq82gxxqi8733`).
+
+### Added — `get_skill_body` increments success_count
+
+Explicit MCP-tool fetches now register as usage signal (fire-and-forget UPDATE). Closes the gap where 99% of skills were stuck at DEFAULT success_count=1.
+
+### Added — `qa-fix-6-agents` skill rebuilt
+
+The skill had self-superseded its own row in the DB. Rebuilt with 6665-char kongcode-grounded body covering the 2-pair-then-implementer-+-verifier pattern, convergence interpretation, wave-loop semantics, and four real-incident references.
+
+### Added — `db-state.test.ts` integration suite + MCP_TO_IPC_METHOD value-side lint
+
+Promoted 3 one-shot probe scripts into a daemon-socket-gated integration test. Lint extended to catch value-side typos in IPC method mappings.
+
+### Fixed — engine cleanups, README accuracy, mcp-server inputSchema drift
+
+4 stale `file:line` citations in `maintenance.ts`; dead export `getReflectionCount` removed; `backfillConceptEmbeddings` hardened with `name IS NOT NONE` filter; README test badge / `/introspect trends` / skill suite section; `mcp-server.ts` schemas aligned with `tool-defs.ts` for `create_knowledge_gems.links.items.edge`, `gems.items.importance`, `commit_work_results.results`.
+
 ## [0.7.95] — 2026-05-17
 
 Closes every remaining item from the v0.7.93+v0.7.94 deferred lists. The founder rule "complete all of the deferred tasks 1 by 1 until everything is 100% done" applied — no more `Out of scope` carryover.
