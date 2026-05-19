@@ -161,6 +161,34 @@ describe.skipIf(!RUN_LIVE)("kongcode DB state invariants (live, read-only)", () 
     }
   });
 
+  describe("supersede self-reference integrity (W2-4)", () => {
+    // Regression for the Phase X type::record bug (commit e6f426d). Before
+    // the fix, `WHERE id != $sid` with $sid bound as a JS string failed to
+    // exclude self under SurrealDB v3 strict type comparison (Thing != string
+    // is always TRUE). Every new skill self-superseded immediately, leaving
+    // active=false + superseded_by=id. 730 rows healed in v0.7.96 X.5.
+    //
+    // Any non-zero count here = either the type::record fix regressed OR a
+    // new untested writer landed without the guard. Surface it loudly.
+    const tablesWithSupersede = ["skill", "memory", "reflection"] as const;
+    for (const table of tablesWithSupersede) {
+      it(`zero ${table} rows have superseded_by pointing to themselves`, async () => {
+        const rows = await q<{ c: number }>(
+          `SELECT count() AS c FROM ${table}
+             WHERE superseded_by != NONE AND id = superseded_by GROUP ALL`,
+        );
+        const count = rows[0]?.c ?? 0;
+        expect(
+          count,
+          `${count} ${table} rows have superseded_by = id (self-ref). ` +
+            `Run the heal in kongcode-heal-skill-corruption skill ` +
+            `(skill:j12hn8rf00muaww4rv0g) and ensure all id != $X SELECTs ` +
+            `use type::record($X).`,
+        ).toBe(0);
+      });
+    }
+  });
+
   describe("concept supersede-chain integrity", () => {
     it("every soft-superseded concept's superseder has the same name", async () => {
       const rows = await q<{ id: string; name: string; superseded_by: string }>(
