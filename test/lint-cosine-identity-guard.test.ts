@@ -33,14 +33,16 @@ const SRC_DIR = resolve(REPO_ROOT, "src");
 const READ_ONLY_COSINE_SITES = new Set<string>([
   // vectorSearch — multi-table retrieval, read-only. Lines are the
   // `vector::similarity::cosine` line within each SELECT statement.
+  // Line numbers shift +2 from W2-3 (commit bd52bb0 added pruned_at IS NONE
+  // to 2 turn queries; subsequent SELECTs in the same batch shift +2).
   "src/engine/surreal.ts:422",  // turn (same-session)
-  "src/engine/surreal.ts:426",  // turn (cross-session)
-  "src/engine/surreal.ts:434",  // turn_archive
-  "src/engine/surreal.ts:439",  // concept
-  "src/engine/surreal.ts:445",  // memory
-  "src/engine/surreal.ts:450",  // artifact
-  "src/engine/surreal.ts:455",  // monologue
-  "src/engine/surreal.ts:460",  // identity_chunk
+  "src/engine/surreal.ts:427",  // turn (cross-session, +1)
+  "src/engine/surreal.ts:436",  // turn_archive (+2)
+  "src/engine/surreal.ts:441",  // concept (+2)
+  "src/engine/surreal.ts:447",  // memory (+2)
+  "src/engine/surreal.ts:452",  // artifact (+2)
+  "src/engine/surreal.ts:457",  // monologue (+2)
+  "src/engine/surreal.ts:462",  // identity_chunk (+2)
 
   // tagBoostedConcepts — read-only ranking for tag boost.
   "src/engine/surreal.ts:883",
