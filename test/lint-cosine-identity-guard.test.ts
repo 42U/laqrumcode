@@ -45,17 +45,17 @@ const READ_ONLY_COSINE_SITES = new Set<string>([
   "src/engine/surreal.ts:462",  // identity_chunk (+2)
 
   // tagBoostedConcepts — read-only ranking for tag boost.
-  "src/engine/surreal.ts:883",
+  "src/engine/surreal.ts:885",
 
   // graphExpand kNN — cosine used as a scoreExpr in neighbor-fetch SELECT.
   // Read-only ranking, no destructive op on matched neighbors.
-  "src/engine/surreal.ts:915",
+  "src/engine/surreal.ts:917",
 
   // upsertConcept dedup-candidate scan — KNN over concepts with the same
   // superseded_at IS NONE filter. Race-recovery / first-write path; the
   // upsert decision uses the result for a content-equality match, not for
   // a destructive op.
-  "src/engine/surreal.ts:1038",
+  "src/engine/surreal.ts:1040",
 
   // commitCorrection oldText resolver (commit.ts:1053 concept, :1062 memory)
   // — vector match to find the user-named supersede target. Decays stability
@@ -66,7 +66,7 @@ const READ_ONLY_COSINE_SITES = new Set<string>([
 
   // upsertConcept race-recovery KNN match — read-only fallback on UNIQUE
   // collision; returns existing id without mutating.
-  "src/engine/surreal.ts:1127",
+  "src/engine/surreal.ts:1129",
 
   // findRelevantSkills (skills.ts) and findSimilarReflections
   // (reflection.ts) — read-only retrieval.
