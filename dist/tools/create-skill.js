@@ -44,9 +44,16 @@ export async function handleCreateSkill(state, session, args) {
         steps,
         preconditions,
         postconditions,
+        body,
+        // v0.7.97 W3-3: tag with `create_skill_tool` so manual MCP-tool
+        // authors are distinguishable from causal_graduate auto-gen at
+        // query time. Pre-fix, rows landed with source=NONE and showed up
+        // as orphans in source-distribution audits (this is the bug that
+        // caused me to wrongly archive 6 legitimate skills earlier this
+        // turn — including kongcode-heal-skill-corruption itself).
+        source: "create_skill_tool",
         embeddingText: `${name}: ${description}\n\n${body}`,
         sessionId: session.sessionId,
-        extras: { body },
     });
     return {
         content: [{
