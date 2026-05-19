@@ -4,6 +4,11 @@ node_modules/
 .kongcode-handoff.json
 .orphaned_at
 
+# SurrealQL CLI scratchpad — accumulates working queries from probe/audit
+# sessions. Local-only by design; durable queries live in test/integration/
+# or saved findings. Untracked via `git rm --cached` 2026-05-18 (W2-7).
+history.txt
+
 # Internal upgrade scaffolding (Claude-Code-driven self-upgrade runs).
 # Stays local for the dev who's running an upgrade; never ships in releases.
 .upgrade/
