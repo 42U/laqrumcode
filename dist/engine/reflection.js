@@ -80,20 +80,3 @@ export function formatReflectionContext(reflections) {
     });
     return `\n<reflection_context>\n[Lessons from past sessions — avoid repeating these mistakes]\n${lines.join("\n\n")}\n</reflection_context>`;
 }
-/**
- * Get reflection count (for /stats display).
- */
-export async function getReflectionCount(store) {
-    try {
-        if (!store.isAvailable())
-            return 0;
-        const rows = await store.queryFirst(`SELECT count() AS count FROM reflection
-       WHERE (active = true OR active IS NONE)
-       GROUP ALL`);
-        return Number(rows[0]?.count ?? 0);
-    }
-    catch (e) {
-        swallow.warn("reflection:count", e);
-        return 0;
-    }
-}

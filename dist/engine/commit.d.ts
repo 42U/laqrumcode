@@ -211,6 +211,17 @@ export interface CommitSkillData {
     })[];
     preconditions?: string;
     postconditions?: string;
+    /** Full markdown body. When set, `get_skill_body` returns this verbatim.
+     *  Manual writes (create_skill tool, migration-from-md) populate this.
+     *  Auto-gen writers (causal_graduate, v0.7.96) should stitch a body from
+     *  steps + trigger so get_skill_body returns substantive markdown rather
+     *  than a thin steps[] dump. */
+    body?: string;
+    /** Provenance tag — distinguishes auto-gen from manual at query time.
+     *  Conventional values: "create_skill_v091" (manual API), "migration-from-md"
+     *  (one-time SKILL.md migration), "causal_graduate" (auto-gen from session
+     *  traces), "manual-revision-<date>" (in-place updates via raw SurrealQL). */
+    source?: string;
     /** Override the default `${name}: ${description}` embed target. Three
      *  current writers use three different embed strings; preserved here via
      *  this field rather than forced-unifying at the API boundary. */

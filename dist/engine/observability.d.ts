@@ -61,8 +61,12 @@ export interface CooldownState {
  */
 export declare function rollupDailyMetrics(store: SurrealStore, day: string): Promise<void>;
 /**
- * Prune raw orchestrator_metrics rows older than the retention window.
- * Daily rollups preserve the aggregate signal; raw rows are operational.
+ * Tag raw orchestrator_metrics rows older than the retention window as
+ * pruned. Daily rollups preserve the aggregate signal; raw rows are
+ * operational. v0.7.96 (core_memory:hoj8fvmbt7d14mskciba): was DELETE,
+ * now soft-tag with `pruned_at` + `prune_reason` so any unique signal
+ * remains recallable. Idempotent: `AND pruned_at IS NONE` avoids
+ * re-tagging on every run.
  */
 export declare function pruneRawMetrics(store: SurrealStore, retentionDays?: number): Promise<void>;
 export declare function computeTrends(store: SurrealStore, windowDays?: number): Promise<TrendReport>;

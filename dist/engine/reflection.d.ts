@@ -31,7 +31,3 @@ export declare function retrieveReflections(queryVec: number[], limit?: number, 
  * Format reflections as a context block for the LLM.
  */
 export declare function formatReflectionContext(reflections: Reflection[]): string;
-/**
- * Get reflection count (for /stats display).
- */
-export declare function getReflectionCount(store: SurrealStore): Promise<number>;
