@@ -720,8 +720,18 @@ DEFINE INDEX IF NOT EXISTS idx_ec_text_hash ON embedding_cache FIELDS text_hash 
 -- on insert, which is again unique vs the completed row. Net result: same
 -- protection against the 620-duplicate-causal_graduate class of bug, without
 -- the partial-WHERE-index syntax dependency.
-DEFINE INDEX IF NOT EXISTS pw_session_worktype_status_unique ON pending_work
-  FIELDS session_id, work_type, status UNIQUE;
+-- v0.7.99 (2026-05-20): added `active` to the unique columns. Pre-fix the
+-- index was on (session_id, work_type, status), but v0.7.95's soft-archive
+-- conversion sets `active=false` + archive_reason WITHOUT transitioning
+-- `status` out of 'processing'. A stuck soft-archived 'processing' row
+-- still occupied the unique slot, blocking fresh claims for the same
+-- (session, work_type) — drained 0 of 209 items on first retry. Adding
+-- `active` makes the index strictly more permissive: (s, w, 'processing',
+-- true) and (s, w, 'processing', false) can coexist. Readers don't see
+-- the false row (fetch_pending_work filters `(active=true OR IS NONE)`).
+-- OVERWRITE forces existing installs to drop+rebuild on daemon restart.
+DEFINE INDEX OVERWRITE pw_session_worktype_status_unique ON pending_work
+  FIELDS session_id, work_type, status, active UNIQUE;
 DEFINE INDEX IF NOT EXISTS pw_session_idx ON pending_work FIELDS session_id;
 DEFINE INDEX IF NOT EXISTS pw_worktype_idx ON pending_work FIELDS work_type;
 
