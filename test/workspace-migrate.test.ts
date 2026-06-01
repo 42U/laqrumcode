@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtemp, writeFile, mkdir, rm, readdir, stat } from "node:fs/promises";
+import { mkdtemp, writeFile, mkdir, rm, readdir, stat, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { hasMigratableFiles, migrateWorkspace } from "../src/engine/workspace-migrate.js";
@@ -147,6 +147,58 @@ description: Deploy the application
     // Should create both a skill record and an artifact record
     expect(store._records.some(r => (r as any).name === "deploy")).toBe(true);
     expect(store._records.some(r => (r as any).type === "skill-definition")).toBe(true);
+  });
+
+  it("leaves a slash-discovery stub on disk instead of archiving an ingested SKILL.md", async () => {
+    await mkdir(join(dir, "skills", "deploy"), { recursive: true });
+    await writeFile(join(dir, "skills", "deploy", "SKILL.md"), `---
+name: deploy
+description: Deploy the application
+---
+
+# Deploy
+
+1. Build the project
+2. Run tests
+`);
+    const result = await migrateWorkspace(dir, mockStore() as any, mockEmbeddings() as any);
+    expect(result.skills).toBe(1);
+
+    // The stub stays on disk for slash discovery — NOT moved into the archive.
+    const stubExists = await stat(join(dir, "skills", "deploy", "SKILL.md")).then(() => true).catch(() => false);
+    expect(stubExists).toBe(true);
+    const archived = await stat(join(dir, ".kongbrain-archive", "skills", "deploy", "SKILL.md")).then(() => true).catch(() => false);
+    expect(archived).toBe(false);
+
+    // Its on-disk body is now the 5-line stub pointing at get_skill_body.
+    const onDisk = await readFile(join(dir, "skills", "deploy", "SKILL.md"), "utf-8");
+    expect(onDisk).toContain("name: deploy");
+    expect(onDisk).toContain("get_skill_body");
+    expect(onDisk).not.toContain("Build the project"); // full body no longer on disk
+  });
+
+  it("skips an already-DB-resident stub SKILL.md (mints no duplicate row, leaves it untouched)", async () => {
+    await mkdir(join(dir, "skills", "kongcode-release"), { recursive: true });
+    const stub = `---
+name: kongcode-release
+description: Ship a new kongcode version
+---
+
+Body in kongcode DB. Call \`mcp__plugin_kongcode_kongcode__get_skill_body\` with \`name="kongcode-release"\` to load full instructions.
+`;
+    await writeFile(join(dir, "skills", "kongcode-release", "SKILL.md"), stub);
+    const store = mockStore();
+    const result = await migrateWorkspace(dir, store as any, mockEmbeddings() as any);
+
+    // Already a stub → not re-ingested as a junk skill row.
+    expect(result.skills).toBe(0);
+    expect(store._records.some(r => (r as any).name === "kongcode-release")).toBe(false);
+
+    // Stub left byte-identical on disk, not archived.
+    const onDisk = await readFile(join(dir, "skills", "kongcode-release", "SKILL.md"), "utf-8");
+    expect(onDisk).toBe(stub);
+    const archived = await stat(join(dir, ".kongbrain-archive", "skills", "kongcode-release", "SKILL.md")).then(() => true).catch(() => false);
+    expect(archived).toBe(false);
   });
 
   it("NEVER touches README.md", async () => {

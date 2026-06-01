@@ -4,6 +4,21 @@ All notable changes to KongCode are documented here. The 0.7.x series introduced
 
 ## [Unreleased]
 
+## [0.7.101] — 2026-05-31
+
+Stop `migrateWorkspace` from deleting the curated slash-command skill stubs.
+
+### Fixed
+- **Skill stubs survive workspace migration** — `archiveFiles` now skips `SKILL.md` (like `SOUL.md`), so the DB-resident slash-discovery stubs at `skills/<name>/SKILL.md` are never unlinked. An `introspect action=migrate` had been archiving all 15 curated stubs (audit-drift, kongcode-release, …) into `.kongbrain-archive/`, silently removing their slash commands.
+- **No junk re-ingest** — new `isSkillStub()` detects an already-DB-resident stub (body referencing `get_skill_body`); the migrate loop leaves it in place and mints no duplicate skill row instead of parsing the pointer text into a skill.
+- **Stub generation** — new `writeSkillStub()` writes the canonical 6-line stub; after ingesting a genuinely-full `SKILL.md`, `ingestSkill` replaces the on-disk file with a stub (body→DB, stub→disk) instead of archiving it away.
+
+### Data
+- Restored the 15 curated stubs to the working tree (`git checkout HEAD -- skills/`). A live DB probe confirmed the prior migration left **0** junk skill rows and **0** junk artifacts (its `CREATE`s failed on a `last_used=NULL` coercion), so only the on-disk stubs were ever lost.
+
+### Tests
+- Two regression tests in `test/workspace-migrate.test.ts`: an ingested full skill leaves a stub on disk (not archived), and an already-stub `SKILL.md` is skipped (no duplicate row, byte-identical on disk). Full suite: 1025 passing.
+
 ## [0.7.100] — 2026-05-31
 
 Skill subsystem overhaul: kill the duplicate-skill firehose, retrieve *diverse* skills, and stop the corpus from re-bloating. Folds in the prior Wave-3 polish.

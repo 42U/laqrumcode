@@ -47,3 +47,8 @@ export declare function hasMigratableFiles(workspaceDir: string): Promise<boolea
  * (README.md, package.json, src/, docs/, etc.) are never touched.
  */
 export declare function migrateWorkspace(workspaceDir: string, store: SurrealStore, embeddings: EmbeddingService): Promise<MigrationResult>;
+/** True if a SKILL.md is already a DB-resident stub (body points at get_skill_body). */
+export declare function isSkillStub(content: string): boolean;
+/** Write the canonical 5-line DB-resident stub for a skill, idempotently.
+ *  Matches the committed format so slash discovery and get_skill_body agree. */
+export declare function writeSkillStub(skillMdPath: string, name: string, description: string): Promise<void>;

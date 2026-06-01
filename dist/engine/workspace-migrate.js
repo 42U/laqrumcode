@@ -128,10 +128,18 @@ export async function migrateWorkspace(workspaceDir, store, embeddings) {
             const name = basename(file.absPath);
             // SKILL.md files → create skill records in the graph
             if (name === "SKILL.md") {
+                // Already a DB-resident stub → the body is in the DB. Leave the stub in
+                // place (slash discovery) and mint nothing; re-ingesting would create a
+                // junk duplicate row whose body is just the get_skill_body pointer.
+                if (isSkillStub(file.content)) {
+                    result.skipped++;
+                    result.details.push(`Stub left in place (already migrated): ${file.relPath}`);
+                    continue;
+                }
                 const created = await ingestSkill(file, store, embeddings);
                 if (created) {
                     result.skills++;
-                    result.details.push(`Skill: ${file.relPath}`);
+                    result.details.push(`Skill: ${file.relPath} (body→DB, stub left on disk)`);
                 }
                 else {
                     result.skipped++;
@@ -338,12 +346,43 @@ async function tryReadFile(absPath, rootDir) {
         return null;
     }
 }
+// ── DB-resident skill stubs ──────────────────────────────────────────────────
+// A skill's full body lives in the `skill` table; on disk it's a tiny stub so
+// Claude Code's slash-command discovery can list it. The stub frontmatter
+// (name + description) drives `/skill` discovery; the body just points the agent
+// at get_skill_body. NEVER write a full body to disk (founder rule: no .md
+// proliferation) and NEVER archive a stub (that removes the slash command).
+/** True if a SKILL.md is already a DB-resident stub (body points at get_skill_body). */
+export function isSkillStub(content) {
+    return /get_skill_body|Body in kongcode DB/i.test(content);
+}
+/** Write the canonical 5-line DB-resident stub for a skill, idempotently.
+ *  Matches the committed format so slash discovery and get_skill_body agree. */
+export async function writeSkillStub(skillMdPath, name, description) {
+    const desc = description.replace(/\r?\n/g, " ").trim();
+    const stub = `---\n` +
+        `name: ${name}\n` +
+        `description: ${desc}\n` +
+        `---\n\n` +
+        `Body in kongcode DB. Call \`mcp__plugin_kongcode_kongcode__get_skill_body\` ` +
+        `with \`name="${name}"\` to load full instructions.\n`;
+    await mkdir(dirname(skillMdPath), { recursive: true });
+    await writeFile(skillMdPath, stub, "utf-8");
+}
 /**
  * Parse a SKILL.md file (YAML frontmatter + markdown body) and create
  * a proper `skill` record in SurrealDB. The skill is immediately usable
  * by the graph retrieval system.
+ *
+ * If the file is ALREADY a DB-resident stub, this is a no-op (returns false):
+ * the body is already in the DB, so re-ingesting would mint a junk duplicate
+ * row. For a genuine full skill, after ingesting we REPLACE the on-disk file
+ * with a stub so it stays slash-discoverable instead of being archived away.
  */
 async function ingestSkill(file, store, embeddings) {
+    // Already migrated to the DB — leave the stub in place, create nothing.
+    if (isSkillStub(file.content))
+        return false;
     const { frontmatter, body } = parseFrontmatter(file.content);
     if (!frontmatter && !body)
         return false;
@@ -415,6 +454,15 @@ async function ingestSkill(file, store, embeddings) {
             migrated_from: "openclaw-default",
         },
     });
+    // The full body now lives in the DB. Replace the on-disk file with a stub so
+    // the skill stays slash-discoverable instead of being archived away. (Stubs
+    // are skipped by archiveFiles, so this write survives the archive pass.)
+    try {
+        await writeSkillStub(file.absPath, skillName, description);
+    }
+    catch (e) {
+        swallow.warn("migrate:writeStub", e);
+    }
     return true;
 }
 /**
@@ -604,6 +652,10 @@ async function archiveFiles(workspaceDir, files) {
     const movedPaths = [];
     for (const file of files) {
         if (basename(file.absPath).toUpperCase() === "SOUL.MD")
+            continue;
+        // SKILL.md is a DB-resident slash-discovery stub (full body lives in the
+        // skill table). Archiving it would remove the slash command, so leave it.
+        if (basename(file.absPath).toUpperCase() === "SKILL.MD")
             continue;
         const relFromRoot = relative(workspaceDir, file.absPath);
         const destPath = join(archiveDir, relFromRoot);
