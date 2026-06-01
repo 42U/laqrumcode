@@ -14,7 +14,7 @@
  */
 import { swallow } from "./errors.js";
 import { crossEncoderScorePairs } from "./graph-context.js";
-import { recordSkillOutcome } from "./skills.js";
+import { recordSkillOutcome, shouldRecordSkillOutcome } from "./skills.js";
 import { parseDatetimeMs } from "./observability.js";
 export function classifyItem(item) {
     const table = item.table;
@@ -69,10 +69,10 @@ export function recordToolOutcome(sessionId, success) {
         entry.toolResults.push({ success });
     }
 }
-export function stageSkills(sessionId, skillIds) {
+export function stageSkills(sessionId, skills) {
     const entry = _pendingRetrievalBySession.get(sessionId);
-    if (entry && skillIds.length > 0) {
-        entry.skillIds = skillIds;
+    if (entry && skills.length > 0) {
+        entry.skillDocs = skills;
         entry.skillStageTime = Date.now();
     }
 }
@@ -89,7 +89,7 @@ export async function evaluateRetrieval(sessionId, responseTurnId, responseText,
     // We delete in the finally to guarantee cleanup whether evaluate succeeds,
     // throws, or short-circuits.
     const pending = _pendingRetrievalBySession.get(sessionId);
-    if (!pending || (pending.items.length === 0 && !pending.skillIds?.length)) {
+    if (!pending || (pending.items.length === 0 && !pending.skillDocs?.length)) {
         _pendingRetrievalBySession.delete(sessionId);
         return;
     }
@@ -107,16 +107,35 @@ export async function evaluateRetrieval(sessionId, responseTurnId, responseText,
     }
 }
 async function evaluateRetrievalInner(sessionId, responseTurnId, responseText, store, pending) {
-    const { items, toolResults, queryEmbedding, indexMap, skillIds, skillStageTime } = pending;
-    // Skill outcome runs unconditionally — the retrieval-quality filters below
-    // apply to memory/concept scoring only, not to skill reinforcement.
+    const { items, toolResults, queryEmbedding, indexMap, skillDocs, skillStageTime } = pending;
+    // toolSuccess: did a majority of this turn's tools succeed? null = no tools
+    // ran. Used for skill attribution (below) and memory signal scoring (later).
     const toolSuccess = toolResults.length > 0
         ? toolResults.filter((r) => r.success).length / toolResults.length >= 0.5
         : null;
-    if (skillIds && skillIds.length > 0) {
+    // Skill outcome (v0.8.x step 3a): attribute the turn outcome ONLY to skills
+    // the response actually ENGAGED, and only when there's a real tool outcome to
+    // judge. Engagement = lexical overlap of skill-text vs response (always
+    // available, deterministic — same blend as computeSignals) combined with the
+    // cross-encoder when the reranker is loaded (70/30, mirroring the memory
+    // path); reranker offline → lexical-only, still works. Replaces the old
+    // blanket `toolSuccess ?? true` that credited EVERY injected skill on every
+    // OK/no-tool turn — the bias that left failure_count=0 corpus-wide. Skill
+    // texts are staged at retrieval time, so no per-eval DB fetch.
+    if (skillDocs && skillDocs.length > 0 && responseText.length > 0) {
         const elapsed = skillStageTime ? Date.now() - skillStageTime : 0;
-        const skillSuccess = toolSuccess ?? true;
-        await Promise.allSettled(skillIds.map(sid => recordSkillOutcome(sid, skillSuccess, elapsed, store)));
+        const respLower = responseText.toLowerCase();
+        await Promise.allSettled(skillDocs.map(async ({ id, text }) => {
+            if (!text)
+                return;
+            const specific = Math.max(keyTermOverlap(text, respLower), trigramOverlap(text, respLower));
+            const lexical = 0.6 * specific + 0.4 * unigramOverlap(text, respLower);
+            const ce = await crossEncoderScorePairs(text, [responseText]);
+            const engagement = (ce && ce[0] != null) ? 0.7 * ce[0] + 0.3 * lexical : lexical;
+            const verdict = shouldRecordSkillOutcome(engagement, toolSuccess);
+            if (verdict)
+                await recordSkillOutcome(id, verdict.success, elapsed, store);
+        }));
     }
     // Skip scoring for tool-heavy turns with minimal assistant text.
     // CE scoring can't meaningfully compare a 20-char transition phrase

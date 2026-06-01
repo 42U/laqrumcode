@@ -1377,7 +1377,7 @@ tier0FromWrapper = []) {
                 }
                 const skillCtx = cached.skills.length > 0 ? formatSkillContext(cached.skills) : "";
                 if (cached.skills.length > 0)
-                    stageSkills(session.sessionId, cached.skills.map(s => s.id));
+                    stageSkills(session.sessionId, cached.skills.map(s => ({ id: s.id, text: `${s.name}: ${s.description}` })));
                 const reflCtx = cached.reflections.length > 0 ? formatReflectionContext(cached.reflections) : "";
                 const injectedContext = await formatContextMessage(contextNodes, store, session, skillCtx + reflCtx, tier0, tier1);
                 const recentTurns = getRecentTurns(messages, budgets.conversation, budgets.toolHistory, contextWindow, session);
@@ -1442,7 +1442,7 @@ tier0FromWrapper = []) {
                 ? queryCausalContext(topIds, queryVec, 2, 0.4, store).catch(e => { swallow("graph-context:causal", e); return []; })
                 : Promise.resolve([]),
             SKILL_INTENTS.has(currentIntent)
-                ? findRelevantSkills(queryVec, 5, store).catch(e => { swallow("graph-context:skills", e); return []; })
+                ? findRelevantSkills(queryVec, 5, store, { queryText, rerank: crossEncoderScorePairs }).catch(e => { swallow("graph-context:skills", e); return []; })
                 : Promise.resolve([]),
             retrieveReflections(queryVec, 5, store, session.projectId || undefined)
                 .catch(e => { swallow("graph-context:reflections", e); return []; }),
@@ -1499,7 +1499,7 @@ tier0FromWrapper = []) {
         let skillContext = "";
         if (skillsFound.length > 0) {
             skillContext = formatSkillContext(skillsFound);
-            stageSkills(session.sessionId, skillsFound.map(s => s.id));
+            stageSkills(session.sessionId, skillsFound.map(s => ({ id: s.id, text: `${s.name}: ${s.description}` })));
         }
         let reflectionContext = "";
         if (reflectionsFound.length > 0)

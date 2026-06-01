@@ -1537,7 +1537,7 @@ async function graphTransformInner(
     }
 
         const skillCtx = cached.skills.length > 0 ? formatSkillContext(cached.skills) : "";
-        if (cached.skills.length > 0) stageSkills(session.sessionId, cached.skills.map(s => s.id));
+        if (cached.skills.length > 0) stageSkills(session.sessionId, cached.skills.map(s => ({ id: s.id, text: `${s.name}: ${s.description}` })));
         const reflCtx = cached.reflections.length > 0 ? formatReflectionContext(cached.reflections) : "";
 
         const injectedContext = await formatContextMessage(contextNodes, store, session, skillCtx + reflCtx, tier0, tier1);
@@ -1607,7 +1607,7 @@ async function graphTransformInner(
         ? queryCausalContext(topIds, queryVec, 2, 0.4, store).catch(e => { swallow("graph-context:causal", e); return [] as VectorSearchResult[]; })
         : Promise.resolve([] as VectorSearchResult[]),
       SKILL_INTENTS.has(currentIntent)
-        ? findRelevantSkills(queryVec, 5, store).catch(e => { swallow("graph-context:skills", e); return [] as import("./skills.js").Skill[]; })
+        ? findRelevantSkills(queryVec, 5, store, { queryText, rerank: crossEncoderScorePairs }).catch(e => { swallow("graph-context:skills", e); return [] as import("./skills.js").Skill[]; })
         : Promise.resolve([] as import("./skills.js").Skill[]),
       retrieveReflections(queryVec, 5, store, session.projectId || undefined)
         .catch(e => { swallow("graph-context:reflections", e); return [] as import("./reflection.js").Reflection[]; }),
@@ -1671,7 +1671,7 @@ async function graphTransformInner(
     let skillContext = "";
     if (skillsFound.length > 0) {
       skillContext = formatSkillContext(skillsFound);
-      stageSkills(session.sessionId, skillsFound.map(s => s.id));
+      stageSkills(session.sessionId, skillsFound.map(s => ({ id: s.id, text: `${s.name}: ${s.description}` })));
     }
     let reflectionContext = "";
     if (reflectionsFound.length > 0) reflectionContext = formatReflectionContext(reflectionsFound);

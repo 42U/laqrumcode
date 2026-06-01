@@ -31,7 +31,10 @@ export declare function registerRetrievalQualityCleanup(state: GlobalPluginState
 export declare function getStagedItems(sessionId: string): RetrievedItem[];
 export declare function stageRetrieval(sessionId: string, items: RetrievedItem[], queryEmbedding?: number[], indexMap?: Map<number, string>): void;
 export declare function recordToolOutcome(sessionId: string, success: boolean): void;
-export declare function stageSkills(sessionId: string, skillIds: string[]): void;
+export declare function stageSkills(sessionId: string, skills: Array<{
+    id: string;
+    text: string;
+}>): void;
 /**
  * Evaluate retrieval quality after assistant response.
  */

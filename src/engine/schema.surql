@@ -400,8 +400,16 @@ DEFINE FIELD IF NOT EXISTS success ON causal_chain TYPE bool DEFAULT true;
 DEFINE FIELD IF NOT EXISTS confidence ON causal_chain TYPE float DEFAULT 0.5;
 DEFINE FIELD IF NOT EXISTS description ON causal_chain TYPE option<string>;
 DEFINE FIELD IF NOT EXISTS created_at ON causal_chain TYPE datetime DEFAULT time::now();
+-- v0.8.0: graduation watermark. NONE = not yet synthesized into a skill.
+-- The causal_graduate fetch handler filters `graduated_at IS NONE` so each
+-- chain is graduated at most once; the commit handler stamps time::now() on
+-- the eligible-type chains it consumed. Pre-fix the fetch had no watermark,
+-- so every one of N per-session causal_graduate work items re-synthesized the
+-- SAME global chain set into duplicate skills (memory:2gp8m8j597c46y6z5lpg).
+DEFINE FIELD IF NOT EXISTS graduated_at ON causal_chain TYPE option<datetime>;
 DEFINE INDEX IF NOT EXISTS cc_session_idx ON causal_chain FIELDS session_id;
 DEFINE INDEX IF NOT EXISTS cc_confidence_idx ON causal_chain FIELDS confidence;
+DEFINE INDEX IF NOT EXISTS cc_graduated_idx ON causal_chain FIELDS graduated_at;
 
 -- ============================================================
 -- COGNITIVE: Skill Library (Procedural Memory)

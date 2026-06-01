@@ -239,6 +239,11 @@ export interface CommitSkillData {
   // ── Optional core fields ───────────────────────────────────────────────
   preconditions?: string;
   postconditions?: string;
+  /** Default true. When false, skip the creation-time semantic-dedup pre-check
+   *  (used by migration/import and by tests that intentionally seed near-dup
+   *  skill rows). Production graduation/extraction leaves it on so a recurring
+   *  pattern reuses the existing canonical instead of minting a redundant row. */
+  dedupOnCreate?: boolean;
   /** Full markdown body. When set, `get_skill_body` returns this verbatim.
    *  Manual writes (create_skill tool, migration-from-md) populate this.
    *  Auto-gen writers (causal_graduate, v0.7.96) should stitch a body from
@@ -870,6 +875,17 @@ async function commitSubagent(
   return { id: subagentId, edges };
 }
 
+/** Creation-time semantic-dedup threshold (v0.8.x). An ACTIVE skill within this
+ *  cosine of a new one is treated as the same procedure → reuse it instead of
+ *  minting a redundant row (this is what stops the corpus re-bloating: the
+ *  daemon graduates a new skill for every recurring task and the LLM renames it
+ *  each time, so name-exact supersede misses the twin). 0.85 is conservative by
+ *  design — a PERMANENT skip — given measured separation (distinct ≤0.66,
+ *  redundant ≥0.80) it only blocks near-identical skills and leaves margin
+ *  against long-body cosine inflation (the v0.7.92 over-supersede footgun). The
+ *  weekly consolidateMemories Pass 4 (0.80, reversible) sweeps the 0.80–0.85 band. */
+const SKILL_CREATE_DEDUP = 0.85;
+
 async function commitSkill(
   deps: CommitDeps,
   data: CommitSkillData,
@@ -892,6 +908,27 @@ async function commitSkill(
     try {
       embedding = await embeddings.embed(data.embeddingText ?? `${data.name}: ${data.description}`);
     } catch (e) { swallow.warn(`${logTag}:embed`, e); }
+  }
+
+  // 1b. Creation-time semantic dedup. If an ACTIVE skill is already within
+  //     SKILL_CREATE_DEDUP cosine, this is the same procedure under new wording
+  //     — return that canonical's id instead of creating a redundant row. This
+  //     is the source-level guard against re-bloat (the name-exact supersede in
+  //     step 6 can't see semantic twins). Skippable via dedupOnCreate:false.
+  if (data.dedupOnCreate !== false && embedding?.length && store.isAvailable()) {
+    try {
+      const near = await store.queryFirst<{ id: string; score: number }>(
+        // COSINE_GUARD_OK: read-only pre-check, no destructive op — decides only whether to CREATE; skill namespace has no name/category identity axis to scope by.
+        `SELECT id, vector::similarity::cosine(embedding, $vec) AS score
+         FROM skill
+         WHERE (active = NONE OR active = true) AND embedding != NONE AND array::len(embedding) > 0
+         ORDER BY score DESC LIMIT 1`,
+        { vec: embedding },
+      );
+      if (near[0] && (near[0].score ?? 0) >= SKILL_CREATE_DEDUP) {
+        return { id: String(near[0].id), edges: 0 };
+      }
+    } catch (e) { swallow.warn(`${logTag}:createDedup`, e); }
   }
 
   // 2. Build CREATE record. Schema-default fields (confidence=1.0,
@@ -1050,6 +1087,7 @@ async function commitCorrection(
       if (vec?.length) {
         const [conceptCandidates, memoryCandidates] = await Promise.all([
           store.queryFirst<{ id: string; score: number; stability: number }>(
+            // COSINE_GUARD_OK: read-only supersede-candidate search; the destructive supersede UPDATE is a separate guarded step downstream.
             `SELECT id, vector::similarity::cosine(embedding, $vec) AS score, stability
              FROM concept
              WHERE embedding != NONE AND array::len(embedding) > 0
@@ -1059,6 +1097,7 @@ async function commitCorrection(
             { vec, floor: COMMIT_STABILITY_FLOOR },
           ),
           store.queryFirst<{ id: string; score: number }>(
+            // COSINE_GUARD_OK: read-only supersede-candidate search; the destructive supersede UPDATE is a separate guarded step downstream.
             `SELECT id, vector::similarity::cosine(embedding, $vec) AS score
              FROM memory
              WHERE embedding != NONE AND array::len(embedding) > 0

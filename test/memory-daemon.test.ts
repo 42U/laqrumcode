@@ -402,9 +402,12 @@ describe("writeExtractionResults", () => {
     );
 
     expect(counts.skill).toBe(1);
-    // queryFirst called 3 times: CREATE skill, linkToRelevantConcepts, supersedeOldSkills
+    // queryFirst now: creation-dedup pre-check (cosine), CREATE skill,
+    // linkToRelevantConcepts, supersedeOldSkills (cosine). Match the supersede
+    // query specifically — it has `name =`, which the creation-dedup pre-check
+    // does not — so only it is counted.
     const supersedeCalls = store.queryFirst.mock.calls.filter(
-      (c: any[]) => typeof c[0] === "string" && c[0].includes("active") && c[0].includes("vector::similarity::cosine")
+      (c: any[]) => typeof c[0] === "string" && c[0].includes("vector::similarity::cosine") && c[0].includes("name =")
     );
     expect(supersedeCalls).toHaveLength(1);
   });

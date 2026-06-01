@@ -88,7 +88,12 @@ export async function handleSessionEnd(
     );
   }
 
-  // Causal chain graduation
+  // Causal chain graduation. The per-session unique index keeps this to ≤1 per
+  // session; the v0.8.0 graduation watermark (graduated_at on causal_chain)
+  // makes any cross-session duplicates harmless — each fetches no ungraduated
+  // chains and self-completes empty. We deliberately do NOT globally coalesce
+  // here: a single stuck `processing` row would then starve ALL future
+  // graduation (observed twice: pending_work:xz4cpp8..., :3w9rh8...).
   queueOps.push(
     store.queryExec(`CREATE pending_work CONTENT $data`, {
       data: {

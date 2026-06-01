@@ -4,7 +4,27 @@ All notable changes to KongCode are documented here. The 0.7.x series introduced
 
 ## [Unreleased]
 
-Wave 3 polish: `COSINE_GUARD_OK` marker-comment support to retire the recurring whitelist-shift tax (`test/lint-cosine-identity-guard.test.ts`), memory + reflection corruption audit (verified clean — `memory:4wtboehkbfvl5f0vc5hk`), `create_skill` MCP tool now sets `source="create_skill_tool"` so manual authors are distinguishable from causal_graduate auto-gen, mid-task correction recovering 6 wrongly-archived skills via append-only undo (`memory:4n8j4f3durnaugepouto`).
+## [0.7.100] — 2026-05-31
+
+Skill subsystem overhaul: kill the duplicate-skill firehose, retrieve *diverse* skills, and stop the corpus from re-bloating. Folds in the prior Wave-3 polish.
+
+### Added
+- **Skill retrieval diversity** — `findRelevantSkills` now does cosine recall → optional cross-encoder rerank (0.6/0.4 blend, reusing the bge-reranker) → proven-utility nudge → a **hard novelty gate** (a candidate ≥ 0.72 cosine to an already-selected skill is skipped). Replaces ineffective soft MMR. Verified live: a focused query went from 8 near-identical skills to a diverse set.
+- **Creation-time skill dedup** (`commitSkill`) — a new skill ≥ 0.85 cosine to an existing active one reuses that canonical instead of minting a redundant row (`CommitSkillData.dedupOnCreate`, default on). Prevents corpus re-bloat at the source.
+- **`causal_graduate` graduation watermark** — `causal_chain.graduated_at` (+ index); the fetch handler filters `graduated_at IS NONE` and the commit handler stamps consumed chains, so each chain graduates once. Stops the per-session re-synthesis that produced thousands of duplicate skills.
+- **Skill semantic consolidation** — new Pass 4 in `consolidateMemories` (weekly, cosine ≥ 0.80) collapses redundant skill families via soft-archive.
+
+### Fixed
+- **Skill-outcome attribution** — `recordSkillOutcome` now credits only skills the response *engaged* (lexical overlap, blended with the cross-encoder when available) and only when there's a real tool outcome; removes the blanket `toolSuccess ?? true` that left `failure_count` zero corpus-wide.
+- **Monologue write dedup** — `createMonologue` exact-matches `(session_id, category, content)` before insert (mirrors `createMemory`), so re-extraction can't duplicate soul-input traces.
+- Wave-3 polish: `COSINE_GUARD_OK` marker-comment support, `create_skill` sets `source="create_skill_tool"`, memory/reflection corruption audit (clean — `memory:4wtboehkbfvl5f0vc5hk`), 6 wrongly-archived skills recovered (`memory:4n8j4f3durnaugepouto`).
+
+### Data
+- One-time skill-corpus consolidation applied to the live graph: **1342 → 492 active skills** (850 redundant soft-archived, reversible via `superseded_by`).
+
+### Known follow-ups
+- ~5 drain-via-subagent sub-strategies remain (0.66–0.72 apart); collapsing further risks merging genuinely distinct skills.
+- Comments in the v0.7.100 diff label the feature era "v0.8.x"; the shipped version is 0.7.100 per the patch-bump decision.
 
 ## [0.7.97] — 2026-05-18
 

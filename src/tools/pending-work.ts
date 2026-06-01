@@ -312,9 +312,16 @@ async function buildWorkPayload(
     }
 
     case "causal_graduate": {
+      // v0.8.0: `graduated_at IS NONE` is the watermark. Without it, every
+      // per-session causal_graduate item fetched the IDENTICAL global chain
+      // aggregate and re-synthesized the same skills (the duplicate-skill
+      // explosion — memory:2gp8m8j597c46y6z5lpg). The commit handler stamps
+      // graduated_at on the chains it consumes, so subsequent items (and the
+      // backlog of per-session duplicates) see no eligible chains and
+      // self-complete empty. Mirrors soul_evolve's `created_at > $since`.
       const groups = await store.queryFirst<{ chain_type: string; cnt: number; descriptions: string[] }>(
         `SELECT chain_type, count() AS cnt, array::group(description) AS descriptions
-         FROM causal_chain WHERE success = true AND confidence >= 0.7
+         FROM causal_chain WHERE success = true AND confidence >= 0.7 AND graduated_at IS NONE
          GROUP BY chain_type`,
       );
       const eligible = groups.filter(g => g.cnt >= 3);
@@ -602,6 +609,31 @@ async function commitResults(
       for (const parsed of skills) {
         await createSkillRecord(parsed, item, state);
         created++;
+      }
+      // v0.8.0: advance the graduation watermark. Stamp graduated_at on every
+      // ungraduated chain whose type cleared the cnt>=3 eligibility bar (same
+      // bar the fetch handler applies), so the next causal_graduate item finds
+      // no eligible chains and self-completes empty instead of re-synthesizing
+      // duplicate skills. Guarded on created>0: a no-op LLM return leaves
+      // chains ungraduated for a later retry. Sub-threshold types (cnt<3) stay
+      // ungraduated so their pattern can still accumulate toward a future skill.
+      if (created > 0) {
+        try {
+          const groups = await state.store.queryFirst<{ chain_type: string; cnt: number }>(
+            `SELECT chain_type, count() AS cnt FROM causal_chain
+             WHERE success = true AND confidence >= 0.7 AND graduated_at IS NONE
+             GROUP BY chain_type`,
+          );
+          const types = groups.filter(g => g.cnt >= 3).map(g => g.chain_type);
+          if (types.length > 0) {
+            await state.store.queryExec(
+              `UPDATE causal_chain SET graduated_at = time::now()
+               WHERE success = true AND confidence >= 0.7 AND graduated_at IS NONE
+                 AND chain_type IN $types`,
+              { types },
+            );
+          }
+        } catch (e) { swallow("pending-work:graduateWatermark", e); }
       }
       return { skills_created: created };
     }

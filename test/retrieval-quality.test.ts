@@ -307,7 +307,10 @@ describe("stageSkills + evaluateRetrieval skill outcome", () => {
     stageRetrieval("session1", [
       makeItem({ text: "SurrealDB query optimization" }),
     ]);
-    stageSkills("session1", ["skill:s1", "skill:s2"]);
+    stageSkills("session1", [
+      { id: "skill:s1", text: "optimize a surrealdb query with an index hint" },
+      { id: "skill:s2", text: "speed up surrealdb query using an index hint" },
+    ]);
     recordToolOutcome("session1", true);
 
     await evaluateRetrieval(
@@ -333,7 +336,9 @@ describe("stageSkills + evaluateRetrieval skill outcome", () => {
     };
 
     stageRetrieval("session1", [makeItem()]);
-    stageSkills("session1", ["skill:s1"]);
+    stageSkills("session1", [
+      { id: "skill:s1", text: "handle a surrealdb websocket connection reset after a failed query" },
+    ]);
     recordToolOutcome("session1", false);
     recordToolOutcome("session1", false);
 
@@ -368,27 +373,29 @@ describe("stageSkills + evaluateRetrieval skill outcome", () => {
   });
 
   it("stageSkills no-ops when nothing is staged", () => {
-    stageSkills("session-not-staged", ["skill:s1"]);
+    stageSkills("session-not-staged", [{ id: "skill:s1", text: "x" }]);
     expect(getStagedItems("session-not-staged")).toHaveLength(0);
   });
 
-  it("defaults to success when no tool outcomes recorded", async () => {
+  it("records NOTHING when there is no tool outcome to judge (no default-to-success)", async () => {
     const execCalls: { sql: string }[] = [];
     const mockStore = {
       isAvailable: () => true,
       queryFirst: async () => [],
-      queryExec: async (sql: string, params: any) => { execCalls.push({ sql }); },
+      queryExec: async (sql: string) => { execCalls.push({ sql }); },
       updateUtilityCache: async () => {},
     };
 
     stageRetrieval("session1", [makeItem({ text: "deployment procedure" })]);
-    stageSkills("session1", ["skill:s1"]);
-    // No recordToolOutcome calls — toolSuccess will be null → defaults true
+    stageSkills("session1", [{ id: "skill:s1", text: "follow the deployment procedure step by step" }]);
+    // No recordToolOutcome → toolSuccess is null. The old code wrongly defaulted
+    // to success and recorded; the fix records nothing (that default was the bias
+    // that left failure_count=0 corpus-wide). Engagement is high here, but with
+    // no tool outcome there's nothing to judge the skill on.
 
-    await evaluateRetrieval("session1", "turn:103", "I followed the deployment procedure", mockStore as any);
+    await evaluateRetrieval("session1", "turn:103", "I followed the deployment procedure step by step", mockStore as any);
 
     const skillUpdates = execCalls.filter(c => c.sql.includes("UPDATE skill:"));
-    expect(skillUpdates).toHaveLength(1);
-    expect(skillUpdates[0].sql).toContain("success_count");
+    expect(skillUpdates).toHaveLength(0);
   });
 });

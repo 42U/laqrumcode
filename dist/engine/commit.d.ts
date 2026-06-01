@@ -211,6 +211,11 @@ export interface CommitSkillData {
     })[];
     preconditions?: string;
     postconditions?: string;
+    /** Default true. When false, skip the creation-time semantic-dedup pre-check
+     *  (used by migration/import and by tests that intentionally seed near-dup
+     *  skill rows). Production graduation/extraction leaves it on so a recurring
+     *  pattern reuses the existing canonical instead of minting a redundant row. */
+    dedupOnCreate?: boolean;
     /** Full markdown body. When set, `get_skill_body` returns this verbatim.
      *  Manual writes (create_skill tool, migration-from-md) populate this.
      *  Auto-gen writers (causal_graduate, v0.7.96) should stitch a body from

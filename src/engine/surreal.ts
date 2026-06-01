@@ -1276,6 +1276,29 @@ export class SurrealStore {
     content: string,
     embedding: number[] | null,
   ): Promise<string> {
+    // Exact-content dedup on write, mirroring createMemory above. The daemon
+    // re-extracts a session's transcript on retries / re-runs, and a bare CREATE
+    // would duplicate every monologue each time. Monologue feeds soul generation
+    // (pending-work.ts soul_generate/soul_evolve), so dupes directly skew
+    // identity synthesis. A byte-identical (session_id, category, content) row is
+    // a re-save → return its id. Semantically-similar-but-different traces remain
+    // siblings; consolidation can collapse them later (same philosophy as memory).
+    if (content && content.length > 0) {
+      const exact = await this.queryFirst<{ id: string }>(
+        `SELECT id FROM monologue
+         WHERE string::lowercase(content) = string::lowercase($content)
+           AND session_id = $sid
+           AND category = $cat
+         LIMIT 1`,
+        { content, sid: sessionId, cat: category },
+      );
+      if (exact.length > 0) {
+        const existingId = String(exact[0]!.id);
+        assertRecordId(existingId);
+        return existingId;
+      }
+    }
+
     const record: Record<string, unknown> = { session_id: sessionId, category, content };
     if (embedding?.length) record.embedding = embedding;
     const rows = await this.queryFirst<{ id: string }>(
@@ -2064,6 +2087,81 @@ export class SurrealStore {
               active = false,
               archived_at = time::now(),
               archive_reason = 'dedup_consolidate_pass3_reflection',
+              superseded_by = type::record($kid);`,
+            { kid: String(keep) },
+          );
+          seen.add(String(drop));
+          merged++;
+        }
+      }
+
+      // Pass 4: Vector similarity dedup for skills (v0.8.x).
+      // Skills dedup by EXACT NAME on the write path (supersedeOldSkills) but
+      // had no semantic pass — so the same insight under different LLM-chosen
+      // names (e.g. "diagnose-silent-failure" vs "diagnose-silent-process-
+      // failure") accumulated as distinct active rows. That is the duplicate
+      // class behind the causal_graduate skill explosion. This pass is the
+      // skill-table sibling of Pass 1/Pass 3: it runs OFF the hot path on the
+      // weekly cadence, so the v0.7.92 footgun (similarity-collapse on the
+      // write path wrongly deactivated 730 rows) is never re-armed. Threshold
+      // 0.80 — the maintenance backstop matching the one-time consolidation
+      // (2026-05-31) that took the corpus 1342→492 active. Measured separation
+      // is wide (distinct skills ≤0.66, redundant families ≥0.80), so 0.80
+      // safely collapses re-accumulating redundancy without merging distinct
+      // skills. (Was 0.92 — far too lenient; it missed the 0.70–0.91 families
+      // that bloated the corpus.) The commitSkill creation-time dedup (0.85)
+      // blocks most at the source; this weekly pass sweeps the 0.80–0.85 band.
+      // Soft-archive shape mirrors supersedeOldSkills (active=false +
+      // superseded_by), so recall's (active=true OR IS NONE) gate hides losers.
+      const embSkills = await this.queryFirst<{
+        id: string;
+        name: string;
+        success_count: number;
+        embedding: number[];
+      }>(
+        `SELECT id, name, success_count, embedding, created_at
+         FROM skill
+         WHERE embedding != NONE AND array::len(embedding) > 0
+           AND (active = true OR active IS NONE)
+         ORDER BY created_at ASC
+         LIMIT 50`,
+      );
+
+      for (const sk of embSkills) {
+        if (seen.has(String(sk.id))) continue;
+
+        // COSINE_GUARD_OK: read-only skill-dedup ranking — flat namespace (no category/name axis; Pass 4 exists to catch DIFFERENT-named near-dupes), so the >=0.92 threshold + per-row soft-archive keep-winner is the safety, mirroring Pass 1/Pass 3.
+        const dupes = await this.queryFirst<{
+          id: string;
+          success_count: number;
+          score: number;
+        }>(
+          `SELECT id, success_count,
+                  vector::similarity::cosine(embedding, $vec) AS score
+           FROM skill
+           WHERE id != type::record($sid)
+             AND (active = true OR active IS NONE)
+             AND embedding != NONE AND array::len(embedding) > 0
+           ORDER BY score DESC
+           LIMIT 3`,
+          { vec: sk.embedding, sid: sk.id },
+        );
+
+        for (const dupe of dupes) {
+          if (dupe.score < 0.80) break;
+          if (seen.has(String(dupe.id))) continue;
+
+          // Keep the more-proven skill (higher success_count); on a tie keep
+          // the outer (older, established) row. Mirrors Pass 1's keep-winner.
+          const keepSk = (sk.success_count ?? 0) >= (dupe.success_count ?? 0);
+          const [keep, drop] = keepSk ? [sk.id, dupe.id] : [dupe.id, sk.id];
+          assertRecordId(String(keep));
+          assertRecordId(String(drop));
+          await this.queryExec(
+            `UPDATE ${String(drop)} SET
+              active = false,
+              archived_at = time::now(),
+              archive_reason = 'dedup_consolidate_pass4_skill',
               superseded_by = type::record($kid);`,
             { kid: String(keep) },
           );
