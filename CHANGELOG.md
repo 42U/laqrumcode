@@ -4,6 +4,19 @@ All notable changes to KongCode are documented here. The 0.7.x series introduced
 
 ## [Unreleased]
 
+## [0.7.102] — 2026-05-31
+
+Fix the `pending_work` drain wedge — a systemic UNIQUE-index collision that broke both fetch and commit.
+
+### Fixed
+- **pending_work drain unwedged** — replaced the `(session_id, work_type, status, active)` compound UNIQUE index with a computed `dedup_key`: active rows key on the `session|work_type|status` triple (one active item per triple); soft-archived rows (`active=false`) key on their own record id, so unlimited archived rows per `(session, work_type)` coexist. Fixes the v0.7.95 soft-archive bug where archiving a row to `active=false` kept `status='processing'`, and a 2nd archived row in that slot collided — throwing `index already contains [...,'processing',true]` and aborting BOTH `fetch_pending_work` (stale-recovery) and `commit_work_results` (markTerminal). The queue had fully wedged: `fetch` threw on every call, commits rolled back, and the backlog grew (reproduced live 2026-05-31). No code-logic change — the existing archive logic stops colliding because `dedup_key` (a VALUE field) recomputes on every write.
+
+### Migration
+- `schema.surql` self-migrates on daemon restart: defines `dedup_key`, backfills legacy rows (VALUE fields don't compute retroactively on DEFINE; `runSchema` executes the whole file), then `OVERWRITE`-rebuilds the UNIQUE index on `dedup_key`. Verified read-only against the live graph first: 2047 rows, 832 active triples all distinct → the index builds cleanly.
+
+### Tests
+- 2 regression tests in `test/duplicate-row-fix.test.ts`: multiple archived rows for the same `(session, work_type, status)` coexist (distinct id-based keys); a second ACTIVE row for the same triple is still rejected. Full suite 1027 passing.
+
 ## [0.7.101] — 2026-05-31
 
 Stop `migrateWorkspace` from deleting the curated slash-command skill stubs.

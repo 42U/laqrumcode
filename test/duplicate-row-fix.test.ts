@@ -653,3 +653,49 @@ describe("seedCognitiveBootstrap mutex", () => {
     expect(second.identitySeeded).toBe(6);
   });
 });
+
+// ── pending_work dedup_key: soft-archive no longer collides (v0.7.102) ──────
+// Regression for the drain wedge: v0.7.95 soft-archive set active=false but
+// kept status='processing', so a 2nd archived row in the same (session,
+// work_type, status) slot collided on the old (…, status, active) UNIQUE index
+// — throwing "index already contains [...,'processing',true]" and breaking BOTH
+// fetch_pending_work (stale-recovery) and commit_work_results (markTerminal).
+// The dedup_key index keys archived rows on their own id, so they coexist.
+describe("pending_work dedup_key — soft-archive collision fix", () => {
+  itDb("multiple archived rows for the same (session, work_type, status) coexist", async () => {
+    const sid = `ded-arch-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    const create = async (): Promise<string> => {
+      const r = await store.queryFirst<{ id: string }>(
+        `CREATE pending_work CONTENT { session_id: $sid, work_type: "coalesced_extraction", status: "processing", active: true } RETURN id`,
+        { sid },
+      );
+      return String(r[0].id);
+    };
+    const archive = (id: string) =>
+      store.queryExec(`UPDATE ${id} SET active = false, archived_at = time::now(), archive_reason = "regress"`);
+
+    // Each archive frees the triple (dedup_key recomputes to the row id), so
+    // the next active create succeeds and ends up archived alongside the rest.
+    const a = await create(); await archive(a);
+    const b = await create(); await archive(b); // pre-fix: threw here
+    const c = await create(); await archive(c);
+
+    const rows = await store.queryFirst<{ id: string; dedup_key: string }>(
+      `SELECT id, dedup_key FROM pending_work WHERE session_id = $sid`, { sid },
+    );
+    expect(rows.length).toBe(3);
+    expect(new Set(rows.map(r => r.dedup_key)).size).toBe(3); // all distinct, id-based
+  });
+
+  itDb("still rejects a second ACTIVE row for the same (session, work_type, status)", async () => {
+    const sid = `ded-active-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    const mk = () => store.queryExec(
+      `CREATE pending_work CONTENT { session_id: $sid, work_type: "soul_evolve", status: "pending", active: true }`,
+      { sid },
+    );
+    await mk();
+    let threw = false;
+    try { await mk(); } catch { threw = true; }
+    expect(threw).toBe(true); // active triple collides — dedup invariant preserved
+  });
+});

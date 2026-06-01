@@ -672,6 +672,26 @@ DEFINE FIELD IF NOT EXISTS completed_at ON pending_work TYPE option<datetime>;
 DEFINE FIELD OVERWRITE active ON pending_work TYPE option<bool> DEFAULT true;
 DEFINE FIELD IF NOT EXISTS archived_at ON pending_work TYPE option<datetime>;
 DEFINE FIELD IF NOT EXISTS archive_reason ON pending_work TYPE option<string>;
+-- v0.7.102: dedup_key — computed UNIQUE key that REPLACES the
+-- (session_id, work_type, status, active) compound index below. Active rows
+-- key on the (session|work_type|status) triple → at most one active item per
+-- triple (the invariant we actually care about). Archived rows (active=false)
+-- key on their own record id, which is globally unique, so UNLIMITED
+-- soft-archived rows per (session, work_type) coexist. VALUE recomputes on
+-- every write, so the existing archive logic (set active=false) is unchanged.
+--
+-- Why: v0.7.95's soft-archive set active=false but LEFT status='processing'.
+-- The v0.7.99 fix added `active` to the index so ONE (processing,false) row
+-- could coexist with the active one — but a SECOND archived row in the same
+-- (status) slot still collided ("index already contains [...,'processing',
+-- true]"), which broke BOTH fetch_pending_work (stale-recovery) AND
+-- commit_work_results (markTerminal) and wedged the whole drain (2026-05-31).
+-- Keying archived rows on their id removes the collision entirely.
+DEFINE FIELD OVERWRITE dedup_key ON pending_work VALUE
+  IF active = true
+  THEN string::concat(session_id, '|', work_type, '|', status)
+  ELSE <string>id
+  END;
 DEFINE INDEX IF NOT EXISTS pw_status_idx ON pending_work FIELDS status, priority;
 DEFINE INDEX IF NOT EXISTS pw_active_idx ON pending_work FIELDS active;
 
@@ -738,8 +758,15 @@ DEFINE INDEX IF NOT EXISTS idx_ec_text_hash ON embedding_cache FIELDS text_hash 
 -- true) and (s, w, 'processing', false) can coexist. Readers don't see
 -- the false row (fetch_pending_work filters `(active=true OR IS NONE)`).
 -- OVERWRITE forces existing installs to drop+rebuild on daemon restart.
+-- v0.7.102: the index now keys on the computed dedup_key (defined above) so
+-- multiple soft-archived rows per (session, work_type) no longer collide.
+-- Backfill first — VALUE fields don't compute retroactively on DEFINE, and
+-- runSchema() runs this whole file, so this touch populates legacy rows at
+-- bootstrap; the WHERE makes it a no-op once every row has a key (verified
+-- 2026-05-31: WHERE matches absent-field rows; 832 active triples all distinct).
+UPDATE pending_work SET priority = priority WHERE dedup_key = NONE;
 DEFINE INDEX OVERWRITE pw_session_worktype_status_unique ON pending_work
-  FIELDS session_id, work_type, status, active UNIQUE;
+  FIELDS dedup_key UNIQUE;
 DEFINE INDEX IF NOT EXISTS pw_session_idx ON pending_work FIELDS session_id;
 DEFINE INDEX IF NOT EXISTS pw_worktype_idx ON pending_work FIELDS work_type;
 
