@@ -4,6 +4,13 @@ All notable changes to KongCode are documented here. The 0.7.x series introduced
 
 ## [Unreleased]
 
+## [0.7.110] — 2026-06-03
+
+CI recovery for v0.7.109 (test-only; the import/restore feature is unchanged).
+
+### Fixed
+- **v0.7.109 CI was red on all four platforms** — `test/restore-jsonl.test.ts`'s `beforeAll` connectivity probe called the un-timed `open()` → `s.connect(url)`, which hangs against an unreachable DB. CI ships no SurrealDB, so the probe rode the hook to its 30s budget, which vitest reports as `Hook timed out` = a FAIL (not a skip) — green locally only because the dev box has a live `:8000`. The per-test `!available` skip-guard doesn't help, because the failure is in the hook, not the bodies. Rewrote the probe to race a 10s timeout (< the 30s hook budget), holding the `Surreal` handle so `finally` tears down the still-pending socket. Mirrors the canonical sibling pattern in `test/stats-action.test.ts`. Verified by reproducing the no-DB condition locally (unroutable host → hook resolves in ~11s, suite green, no `Hook timed out`) and confirming the real-DB path still executes all 4 tests. Suite: **1084 passing** (unchanged — test-only fix). The v0.7.109 tag + its red CI run are retained as the forensic record (no force-push / tag deletion).
+
 ## [0.7.109] — 2026-06-03
 
 Data ownership — JSONL **import/restore** (GH #16 item 1), completing the export↔import round-trip.

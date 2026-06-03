@@ -98,16 +98,35 @@ function runScript(script: string, args: string[], extraEnv: Record<string, stri
 beforeAll(async () => {
   if (SKIP) return;
   schemaSql = await readFile(SCHEMA_PATH, "utf8");
+  // Probe connectivity with a 10s cap (< the 30s hook budget). open() awaits
+  // s.connect(URL) with no timeout, so against an unreachable DB (e.g. CI, which
+  // ships no SurrealDB) the connect hangs until the hook's own 30s timeout —
+  // which vitest reports as a FAIL, not a skip (this red-lit v0.7.109 CI on all
+  // four platforms). Racing a 10s timeout lets the hook resolve fast and the
+  // tests skip cleanly via itDb's !available guard. The probe handle is held in
+  // a local so finally always tears down the (possibly still-pending) socket.
+  // Mirrors the canonical sibling pattern in test/stats-action.test.ts.
+  const probe = new Surreal();
   try {
-    const probe = await open("connectivity_probe");
-    await probe.query("RETURN 'ok'");
-    await probe.close();
+    await Promise.race([
+      (async () => {
+        await probe.connect(URL);
+        await probe.signin({ username: USER, password: PASS });
+        await probe.use({ namespace: TEST_NS, database: "connectivity_probe" });
+        await probe.query("RETURN 'ok'");
+      })(),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error("SurrealDB connect timeout after 10s")), 10_000),
+      ),
+    ]);
     available = true;
   } catch (e) {
     console.warn("SurrealDB not available, skipping restore-jsonl tests:", (e as Error).message);
     available = false;
-    return;
+  } finally {
+    try { await probe.close(); } catch { /* ok */ }
   }
+  if (!available) return;
   tmpRoot = await mkdtemp(join(tmpdir(), "kc-restore-test-"));
 }, 30_000);
 
