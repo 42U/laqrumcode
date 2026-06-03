@@ -15,8 +15,23 @@
  */
 
 import { Surreal } from "/home/zero/voidorigin/kongcode/node_modules/surrealdb/dist/surrealdb.mjs";
-import { mkdir, writeFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { mkdir, writeFile, readFile } from "node:fs/promises";
+import { createWriteStream } from "node:fs";
+import { join, resolve, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+
+/** Read the kongcode version from package.json so the backup records the
+ *  schema version that produced it. restore-jsonl.mjs reads this back and
+ *  warns (does not hard-fail) on a major/minor mismatch. */
+async function readSchemaVersion() {
+  try {
+    const here = dirname(fileURLToPath(import.meta.url));
+    const pkg = JSON.parse(await readFile(join(here, "..", "package.json"), "utf8"));
+    return String(pkg.version ?? "unknown");
+  } catch {
+    return "unknown";
+  }
+}
 
 const URL = process.env.SURREAL_URL || "ws://127.0.0.1:8000/rpc";
 const USER = process.env.SURREAL_USER || "root";
@@ -83,9 +98,22 @@ async function dumpTable(db, table) {
     const rows = await db.query(`SELECT * FROM ${table}`);
     const rs = Array.isArray(rows[0]) ? rows[0] : [];
     if (rs.length === 0) return { table, count: 0, file: null };
-    const lines = rs.map(rowToJsonLine).join("\n") + "\n";
     const file = join(OUTDIR, `${table}.jsonl`);
-    await writeFile(file, lines, "utf8");
+    // Stream row-by-row. A single `rs.map(...).join("\n")` concatenates the whole
+    // table into ONE string, which throws "Invalid string length" past V8's
+    // ~512MB max-string cap — silently dropping wide/large tables (e.g.
+    // retrieval_outcome, ~3.4k wide rows) from the backup. Streaming never holds
+    // more than one line in a string, so any table size exports. Output is
+    // byte-identical (one JSON object + "\n" per row).
+    const stream = createWriteStream(file, { encoding: "utf8" });
+    const done = new Promise((res, rej) => { stream.on("error", rej); stream.on("finish", res); });
+    for (const r of rs) {
+      if (!stream.write(rowToJsonLine(r) + "\n")) {
+        await new Promise((res) => stream.once("drain", res));
+      }
+    }
+    stream.end();
+    await done;
     return { table, count: rs.length, file };
   } catch (e) {
     return { table, count: 0, file: null, error: String(e?.message ?? e) };
@@ -118,10 +146,21 @@ async function main() {
     else if (r.error) console.log(`  edge ${t.padEnd(28)} ERROR ${r.error}`);
   }
 
+  const schemaVersion = await readSchemaVersion();
+  const tableCounts = Object.fromEntries(
+    [...results.nodes, ...results.edges].map(r => [r.table, r.count]),
+  );
   const metadata = {
+    // schema_version + ns/db/exported_at/table_counts are the manifest fields
+    // restore-jsonl.mjs reads. Kept inside the existing metadata.json (rather
+    // than a separate manifest.json) so the backup output stays one-file.
+    schema_version: schemaVersion,
+    ns: NS,
+    db: DB,
     source: { endpoint: URL, namespace: NS, database: DB },
     exported_at: new Date().toISOString(),
     kongcode_export_format: "jsonl-v1",
+    table_counts: tableCounts,
     row_counts: {
       nodes: Object.fromEntries(results.nodes.map(r => [r.table, r.count])),
       edges: Object.fromEntries(results.edges.map(r => [r.table, r.count])),

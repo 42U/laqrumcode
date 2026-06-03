@@ -4,6 +4,26 @@ All notable changes to KongCode are documented here. The 0.7.x series introduced
 
 ## [Unreleased]
 
+## [0.7.109] — 2026-06-03
+
+Data ownership — JSONL **import/restore** (GH #16 item 1), completing the export↔import round-trip.
+
+### Added
+- **`scripts/restore-jsonl.mjs` + `kongcode-restore-jsonl` skill** — reads a `backup-jsonl` dump back into a graph: the import half of the data-ownership story (export shipped earlier; this closes #16-1). Node tables restore before edge tables. Default merge is skip-if-exists by id; flags `--overwrite` (UPDATE by id), `--merge-by-hash` (skip rows whose `content_hash` already exists in the target), and `--dry-run` (report would-create/skip counts, write nothing). Type fidelity on re-insert: the computed `pending_work.dedup_key` is stripped, 27 schema-derived datetime fields are re-wrapped ISO→`DateTime`, 5 `record<>` fields → `RecordId`, and record ids are preserved. Edges are `RELATE`d only when both endpoints exist (missing-endpoint rows skipped + logged — never a dangling edge). A warn-only `schema_version` check flags a major/minor mismatch without hard-failing.
+
+### Fixed
+- **Backup silently dropped wide tables** — `backup-jsonl`'s `dumpTable` built the whole table as one `rs.map(rowToJsonLine).join("\n")` string, which throws "Invalid string length" past V8's ~512 MB max-string cap; the per-table `catch` then omitted the table from the dump with nothing surfaced in the data. Confirmed live: `retrieval_outcome` is **42,270 rows / 836 MB** on the production graph — a guaranteed throw, so it was being left out of every backup. Rewritten to stream row-by-row via `createWriteStream` (backpressure-aware; `error`/`finish` awaited so a real write failure still surfaces as the per-table error). Output is byte-identical (one JSON object + `\n` per row); any table size now exports.
+- **`--dry-run` wrote edges** — under `--dry-run`, `restoreEdgeTable` still `RELATE`d edges whose endpoints already existed in the target (it never received the `flags`). Now `flags` is threaded through with a guard before the write, so a dry run reports accurate would-create counts and writes nothing.
+
+### Tests
+- `test/restore-jsonl.test.ts` (4) — live round-trip (export→import with exact counts + `schema_version`/`table_counts` manifest), missing-endpoint skip, `--merge-by-hash` dedupe, and the new `--dry-run` regression (pre-seeds both endpoints — the exact bug condition — asserts the edge is NOT written under dry-run, then IS on a real restore). Suite: **1084 passing**. The backup fix was verified live against the production graph read-only: `retrieval_outcome.jsonl` exports at 42,270 rows with an empty `errors[]`.
+
+### Known follow-ups
+- **Sequential restore is slow on large graphs** — edges are `RELATE`d one statement at a time, so a full restore of a multi-hundred-thousand-edge graph (e.g. ~388k `related_to`) takes minutes. v1-acceptable for backup/restore; a batched-insert pass is the planned optimization.
+
+### Roadmap
+- #16 item 1 (export + import) complete. Deferred to 0.8.0: per-user namespaces (auth Phase 3), cloud (#7), sharing (Phase 4), TLS (Phase 5).
+
 ## [0.7.108] — 2026-06-03
 
 ### Fixed
