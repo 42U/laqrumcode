@@ -8,13 +8,13 @@ export declare function createIntrospectToolDef(state: GlobalPluginState, sessio
     label: string;
     description: string;
     parameters: import("@sinclair/typebox").TObject<{
-        action: import("@sinclair/typebox").TUnion<[import("@sinclair/typebox").TLiteral<"status">, import("@sinclair/typebox").TLiteral<"count">, import("@sinclair/typebox").TLiteral<"verify">, import("@sinclair/typebox").TLiteral<"query">, import("@sinclair/typebox").TLiteral<"migrate">, import("@sinclair/typebox").TLiteral<"trends">]>;
+        action: import("@sinclair/typebox").TUnion<[import("@sinclair/typebox").TLiteral<"status">, import("@sinclair/typebox").TLiteral<"count">, import("@sinclair/typebox").TLiteral<"verify">, import("@sinclair/typebox").TLiteral<"query">, import("@sinclair/typebox").TLiteral<"migrate">, import("@sinclair/typebox").TLiteral<"trends">, import("@sinclair/typebox").TLiteral<"stats">]>;
         table: import("@sinclair/typebox").TOptional<import("@sinclair/typebox").TString>;
         filter: import("@sinclair/typebox").TOptional<import("@sinclair/typebox").TString>;
         record_id: import("@sinclair/typebox").TOptional<import("@sinclair/typebox").TString>;
     }>;
     execute: (_toolCallId: string, params: {
-        action: "status" | "count" | "verify" | "query" | "migrate" | "trends";
+        action: "status" | "count" | "verify" | "query" | "migrate" | "trends" | "stats";
         table?: string;
         filter?: string;
         record_id?: string;
@@ -100,6 +100,55 @@ export declare function createIntrospectToolDef(state: GlobalPluginState, sessio
             text: string;
         }[];
         details: {
+            window_7d: {
+                concepts: number;
+                memories: number;
+                skills: number;
+                sessions: number;
+                turns: number;
+                tokens_in: number;
+                tokens_out: number;
+            };
+            window_30d: {
+                concepts: number;
+                memories: number;
+                skills: number;
+                sessions: number;
+                turns: number;
+                tokens_in: number;
+                tokens_out: number;
+            };
+            drain: {
+                spawns_today: number;
+                daily_budget: number;
+                spawns_7d: number;
+                spawns_30d: number;
+                today_key: string;
+            };
+            graph_counts: {
+                concept: number;
+                memory: number;
+                skill: number;
+                turn: number;
+                artifact: number;
+            };
+            db_size: {
+                bytes: number | null;
+                external: boolean;
+                alert_gb: number;
+            };
+            alerts: {
+                code: string;
+                severity: "warn" | "critical";
+                message: string;
+            }[];
+        };
+    } | {
+        content: {
+            type: "text";
+            text: string;
+        }[];
+        details: {
             templates: string[];
             count?: undefined;
         };
@@ -114,3 +163,74 @@ export declare function createIntrospectToolDef(state: GlobalPluginState, sessio
         };
     }>;
 };
+interface SpendingCounts {
+    today: number;
+    last7d: number;
+    last30d: number;
+    /** Today's UTC date key (YYYY-MM-DD) the counts are anchored to. */
+    today_key: string;
+}
+/** Read the auto-drain spending ledger and bucket spawns into today / 7d / 30d.
+ *  Tolerant of a missing dir/file (returns all-zero) and of malformed lines
+ *  (skipped). Counts only entries with the full {date, ts, pid} shape so a
+ *  stray hand-written marker can't inflate the totals — same strictness as
+ *  auto-drain.ts:readSpending. The legacy {date,count} file contributes to
+ *  today's bucket only (its count has no per-spawn timestamps to bucket by). */
+export declare function readSpendingStats(cacheDir: string, now?: number): SpendingCounts;
+/** Recursively sum file sizes under `dir`. SurrealKV stores the managed DB as
+ *  a directory tree (manifest/, sstables/, vlog/, wal/), so a single statSync
+ *  of the dir reports only the inode size, not the data. Walk it. Returns
+ *  null if the dir doesn't exist or can't be read. Depth-capped to bound
+ *  pathological trees / symlink loops (the surrealkv layout is shallow). */
+export declare function dirSizeBytes(dir: string, depth?: number): number | null;
+export declare function statsAction(state: GlobalPluginState): Promise<{
+    content: {
+        type: "text";
+        text: string;
+    }[];
+    details: {
+        window_7d: {
+            concepts: number;
+            memories: number;
+            skills: number;
+            sessions: number;
+            turns: number;
+            tokens_in: number;
+            tokens_out: number;
+        };
+        window_30d: {
+            concepts: number;
+            memories: number;
+            skills: number;
+            sessions: number;
+            turns: number;
+            tokens_in: number;
+            tokens_out: number;
+        };
+        drain: {
+            spawns_today: number;
+            daily_budget: number;
+            spawns_7d: number;
+            spawns_30d: number;
+            today_key: string;
+        };
+        graph_counts: {
+            concept: number;
+            memory: number;
+            skill: number;
+            turn: number;
+            artifact: number;
+        };
+        db_size: {
+            bytes: number | null;
+            external: boolean;
+            alert_gb: number;
+        };
+        alerts: {
+            code: string;
+            severity: "warn" | "critical";
+            message: string;
+        }[];
+    };
+}>;
+export {};

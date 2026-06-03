@@ -131,7 +131,7 @@ const TOOLS = [
       properties: {
         action: {
           type: "string",
-          enum: ["status", "count", "verify", "query", "migrate"],
+          enum: ["status", "count", "verify", "query", "migrate", "trends", "stats"],
           description: "Diagnostic action to perform",
         },
         table: { type: "string", description: "Table name (for count/verify)" },
@@ -528,7 +528,7 @@ async function shutdown(): Promise<void> {
 
 async function main(): Promise<void> {
   const server = new Server(
-    { name: "kongcode", version: "0.7.106" },
+    { name: "kongcode", version: "0.7.107" },
     { capabilities: { tools: {} } },
   );
 

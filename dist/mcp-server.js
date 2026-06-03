@@ -108,7 +108,7 @@ const TOOLS = [
             properties: {
                 action: {
                     type: "string",
-                    enum: ["status", "count", "verify", "query", "migrate"],
+                    enum: ["status", "count", "verify", "query", "migrate", "trends", "stats"],
                     description: "Diagnostic action to perform",
                 },
                 table: { type: "string", description: "Table name (for count/verify)" },
@@ -490,7 +490,7 @@ async function shutdown() {
 }
 // ── Main ──────────────────────────────────────────────────────────────────────
 async function main() {
-    const server = new Server({ name: "kongcode", version: "0.7.106" }, { capabilities: { tools: {} } });
+    const server = new Server({ name: "kongcode", version: "0.7.107" }, { capabilities: { tools: {} } });
     // Register tool list handler
     server.setRequestHandler(ListToolsRequestSchema, async () => ({
         tools: TOOLS,

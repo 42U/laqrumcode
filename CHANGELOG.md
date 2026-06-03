@@ -4,6 +4,16 @@ All notable changes to KongCode are documented here. The 0.7.x series introduced
 
 ## [Unreleased]
 
+## [0.7.107] — 2026-06-03
+
+Cost/usage visibility — `introspect action="stats"` (GH #16 item 3).
+
+### Added
+- **`introspect action="stats"`** — a read-only usage/cost report: last-7d & last-30d sessions, turns, token usage (in/out, summed from the `session` ledger), and concepts/memories/skills extracted; auto-drain spawns today vs the daily budget (50, `KONGCODE_AUTO_DRAIN_MAX_DAILY`) + 7d/30d totals; graph counts; managed-DB size on disk (`n/a (external)` when `SURREAL_URL` is set); and alerts for drain budget ≥80% and DB size over threshold (default 2GB, `KONGCODE_DB_SIZE_ALERT_GB`). No schema change — it aggregates data already tracked. The spending-ledger reader is a layering-clean local parser (no engine→daemon import) that mirrors `auto-drain.ts`'s ndjson format (verified field-by-field). The pre-existing `trends` action was also surfaced in the tool enum.
+
+### Tests
+- `test/stats-action.test.ts` (10) — ledger 7d/30d/today bucketing, malformed-line tolerance, legacy-file merge, recursive dir-size, and live-DB window aggregation + budget math. Suite: **1076 passing**.
+
 ## [0.7.106] — 2026-06-03
 
 Quick-fix batch (low-risk, no data-model change).

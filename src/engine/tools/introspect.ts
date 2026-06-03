@@ -3,6 +3,8 @@
  * Ported from kongbrain with SurrealStore injection.
  */
 
+import { readFileSync, readdirSync, statSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { Type } from "@sinclair/typebox";
 import type { GlobalPluginState, SessionState } from "../state.js";
 import { assertRecordId } from "../surreal.js";
@@ -116,7 +118,8 @@ const introspectSchema = Type.Object({
     Type.Literal("query"),
     Type.Literal("migrate"),
     Type.Literal("trends"),
-  ], { description: "Action: status (health overview), count (row counts), verify (confirm record), query (predefined reports), migrate (default: ingest workspace .md files; filter=backfill_derived_from for pre-0.7.23 orphan provenance, filter=backfill_project_id for pre-0.7.26 unscoped concepts/memories — ask user first), trends (daily rolling means + anomaly flags from orchestrator_metrics_daily)." }),
+    Type.Literal("stats"),
+  ], { description: "Action: status (health overview), count (row counts), verify (confirm record), query (predefined reports), migrate (default: ingest workspace .md files; filter=backfill_derived_from for pre-0.7.23 orphan provenance, filter=backfill_project_id for pre-0.7.26 unscoped concepts/memories — ask user first), trends (daily rolling means + anomaly flags from orchestrator_metrics_daily), stats (usage/cost report: 7d/30d sessions+turns+tokens+extractions, auto-drain spawns vs daily budget, graph counts, DB size on disk)." }),
   table: Type.Optional(Type.String({ description: "Table name for count/query actions." })),
   filter: Type.Optional(Type.String({ description: "For count: active, inactive, recent_24h, with_embedding, unresolved. For query: template name. For migrate: backfill_derived_from (pre-0.7.23 orphan edges) or backfill_project_id (pre-0.7.26 missing project scope on concepts/memories)." })),
   record_id: Type.Optional(Type.String({ description: "Record ID for verify action (e.g. memory:abc123)." })),
@@ -129,7 +132,7 @@ export function createIntrospectToolDef(state: GlobalPluginState, session: Sessi
     description: "Inspect your memory database. Use for ALL database queries — NEVER use curl or bash to access SurrealDB directly. Actions: status (health + table counts), count (filtered row counts), verify (confirm record exists), query (predefined reports).",
     parameters: introspectSchema,
     execute: async (_toolCallId: string, params: {
-      action: "status" | "count" | "verify" | "query" | "migrate" | "trends";
+      action: "status" | "count" | "verify" | "query" | "migrate" | "trends" | "stats";
       table?: string; filter?: string; record_id?: string;
     }) => {
       const { store } = state;
@@ -145,6 +148,7 @@ export function createIntrospectToolDef(state: GlobalPluginState, session: Sessi
           case "query": return await queryAction(store, params.table, params.filter);
           case "migrate": return await migrateAction(state, params.filter);
           case "trends": return await trendsAction(state);
+          case "stats": return await statsAction(state);
         }
       } catch (err) {
         return { content: [{ type: "text" as const, text: `Introspect failed: ${err}` }], details: null };
@@ -628,6 +632,282 @@ async function trendsAction(state: GlobalPluginState) {
 
 function pad(s: string | number, w: number): string {
   return String(s).padStart(w, " ");
+}
+
+// ── stats action (usage/cost visibility — GH #16 item 3) ──────────────────
+//
+// LAYERING NOTE: src/engine/tools/ must NOT import from src/daemon/. The
+// auto-drain spending ledger lives at <cacheDir>/auto-drain-spending.ndjson
+// and is WRITTEN by src/daemon/auto-drain.ts. Rather than reach across the
+// layer boundary into the daemon module, we re-implement a minimal READ-ONLY
+// parser here that mirrors auto-drain.ts's on-disk format exactly:
+//   - append-only ndjson, one {date, ts, pid} object per spawn (UTC YYYY-MM-DD)
+//   - a legacy single-object {date, count} JSON file (auto-drain-spending.json)
+//     that predates the ndjson migration; its count is authoritative only for
+//     its own recorded date.
+// This is a pure consumer — it never writes — so there is no race with the
+// daemon's appends. If the on-disk schema in auto-drain.ts changes, this
+// reader must change in lockstep (the test fixture pins the current shape).
+
+/** Default DB-size alert threshold in GB. Override via KONGCODE_DB_SIZE_ALERT_GB. */
+const DEFAULT_DB_SIZE_ALERT_GB = 2;
+/** Default auto-drain daily budget — mirrors daemon/index.ts drainMaxDaily. */
+const DEFAULT_DRAIN_MAX_DAILY = 50;
+
+interface SpendingCounts {
+  today: number;
+  last7d: number;
+  last30d: number;
+  /** Today's UTC date key (YYYY-MM-DD) the counts are anchored to. */
+  today_key: string;
+}
+
+/** Read the auto-drain spending ledger and bucket spawns into today / 7d / 30d.
+ *  Tolerant of a missing dir/file (returns all-zero) and of malformed lines
+ *  (skipped). Counts only entries with the full {date, ts, pid} shape so a
+ *  stray hand-written marker can't inflate the totals — same strictness as
+ *  auto-drain.ts:readSpending. The legacy {date,count} file contributes to
+ *  today's bucket only (its count has no per-spawn timestamps to bucket by). */
+export function readSpendingStats(cacheDir: string, now = Date.now()): SpendingCounts {
+  const todayKey = new Date(now).toISOString().slice(0, 10);
+  const day7Ms = now - 7 * 86_400_000;
+  const day30Ms = now - 30 * 86_400_000;
+  let today = 0;
+  let last7d = 0;
+  let last30d = 0;
+
+  // Legacy single-object file: only its same-day count is meaningful (no ts to
+  // window). Add it to today/7d/30d when its date matches today.
+  try {
+    const legacyRaw = readFileSync(join(resolve(cacheDir), "auto-drain-spending.json"), "utf-8");
+    const parsed = JSON.parse(legacyRaw) as { date?: string; count?: number };
+    if (parsed && parsed.date === todayKey && Number.isFinite(parsed.count)) {
+      const c = parsed.count as number;
+      today += c; last7d += c; last30d += c;
+    }
+  } catch { /* absent or unreadable */ }
+
+  try {
+    const raw = readFileSync(join(resolve(cacheDir), "auto-drain-spending.ndjson"), "utf-8");
+    for (const line of raw.split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      try {
+        const d = JSON.parse(trimmed) as { date?: string; ts?: number; pid?: number };
+        if (!d || typeof d.date !== "string" || !Number.isFinite(d.ts) || !Number.isFinite(d.pid)) continue;
+        const ts = d.ts as number;
+        if (d.date === todayKey) today++;
+        if (ts >= day7Ms) last7d++;
+        if (ts >= day30Ms) last30d++;
+      } catch { /* skip malformed line */ }
+    }
+  } catch { /* file absent → zeros */ }
+
+  return { today, last7d, last30d, today_key: todayKey };
+}
+
+/** Recursively sum file sizes under `dir`. SurrealKV stores the managed DB as
+ *  a directory tree (manifest/, sstables/, vlog/, wal/), so a single statSync
+ *  of the dir reports only the inode size, not the data. Walk it. Returns
+ *  null if the dir doesn't exist or can't be read. Depth-capped to bound
+ *  pathological trees / symlink loops (the surrealkv layout is shallow). */
+export function dirSizeBytes(dir: string, depth = 0): number | null {
+  if (depth > 8) return 0;
+  let total = 0;
+  let entries: import("node:fs").Dirent[];
+  try {
+    entries = readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return depth === 0 ? null : 0;
+  }
+  for (const e of entries) {
+    const full = join(dir, e.name);
+    if (e.isDirectory()) {
+      total += dirSizeBytes(full, depth + 1) ?? 0;
+    } else if (e.isFile()) {
+      try { total += statSync(full).size; } catch { /* vanished mid-walk */ }
+    }
+    // Symlinks/sockets/etc. are skipped — not part of the data footprint.
+  }
+  return total;
+}
+
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  const units = ["KB", "MB", "GB", "TB"];
+  let v = n / 1024;
+  let i = 0;
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+  return `${v.toFixed(1)} ${units[i]}`;
+}
+
+interface StatsWindow { sessions: number; turns: number; tokens_in: number; tokens_out: number }
+
+/** Aggregate session-table token/turn counts since `time::now() - <interval>`.
+ *  Mirrors the introspect `sessions` query columns. Tolerant of a degraded
+ *  store (returns zeros). */
+async function windowStats(store: any, interval: "7d" | "30d"): Promise<StatsWindow> {
+  try {
+    const rows = await store.queryFirst(
+      `SELECT count() AS sessions,
+              math::sum(turn_count) AS turns,
+              math::sum(total_input_tokens) AS tokens_in,
+              math::sum(total_output_tokens) AS tokens_out
+       FROM session WHERE started_at > time::now() - ${interval} GROUP ALL`,
+    );
+    const r = rows?.[0] ?? {};
+    const num = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) ? v : 0);
+    return {
+      sessions: num(r.sessions),
+      turns: num(r.turns),
+      tokens_in: num(r.tokens_in),
+      tokens_out: num(r.tokens_out),
+    };
+  } catch {
+    return { sessions: 0, turns: 0, tokens_in: 0, tokens_out: 0 };
+  }
+}
+
+/** Count rows of `table` created since `time::now() - <interval>`. */
+async function createdSince(store: any, table: string, interval: "7d" | "30d"): Promise<number> {
+  try {
+    const rows = await store.queryFirst(
+      `SELECT count() AS n FROM type::table($t) WHERE created_at > time::now() - ${interval} GROUP ALL`,
+      { t: table },
+    );
+    return rows?.[0]?.n ?? 0;
+  } catch {
+    return 0;
+  }
+}
+
+/** Total row count for `table`. */
+async function totalCount(store: any, table: string): Promise<number> {
+  try {
+    const rows = await store.queryFirst(
+      `SELECT count() AS n FROM type::table($t) GROUP ALL`, { t: table },
+    );
+    return rows?.[0]?.n ?? 0;
+  } catch {
+    return 0;
+  }
+}
+
+export async function statsAction(state: GlobalPluginState) {
+  const { store, config } = state;
+
+  // Budget + alert thresholds (env-configurable, mirroring daemon defaults).
+  const maxDaily = (() => {
+    const env = process.env.KONGCODE_AUTO_DRAIN_MAX_DAILY;
+    if (env !== undefined) { const n = Number(env); return Number.isFinite(n) && n >= 0 ? n : DEFAULT_DRAIN_MAX_DAILY; }
+    return DEFAULT_DRAIN_MAX_DAILY;
+  })();
+  const dbSizeAlertGb = (() => {
+    const env = process.env.KONGCODE_DB_SIZE_ALERT_GB;
+    if (env !== undefined) { const n = Number(env); return Number.isFinite(n) && n > 0 ? n : DEFAULT_DB_SIZE_ALERT_GB; }
+    return DEFAULT_DB_SIZE_ALERT_GB;
+  })();
+
+  // Token + session windows.
+  const [w7, w30] = await Promise.all([windowStats(store, "7d"), windowStats(store, "30d")]);
+
+  // Knowledge extraction windows (concepts/memories/skills) + graph totals.
+  const [
+    concepts7, concepts30, memories7, memories30, skills7, skills30,
+    conceptsTotal, memoriesTotal, skillsTotal, turnsTotal, artifactsTotal,
+  ] = await Promise.all([
+    createdSince(store, "concept", "7d"), createdSince(store, "concept", "30d"),
+    createdSince(store, "memory", "7d"), createdSince(store, "memory", "30d"),
+    createdSince(store, "skill", "7d"), createdSince(store, "skill", "30d"),
+    totalCount(store, "concept"), totalCount(store, "memory"), totalCount(store, "skill"),
+    totalCount(store, "turn"), totalCount(store, "artifact"),
+  ]);
+
+  // Auto-drain spend from the ledger.
+  const spend = readSpendingStats(config.paths.cacheDir);
+
+  // DB size on disk. Managed DBs live under config.paths.dataDir; an external
+  // DB (SURREAL_URL set) has unknown on-disk footprint from this process's
+  // vantage point — report n/a. We check the env directly because bootstrap
+  // only spawns a managed child when SURREAL_URL is unset.
+  const externalDb = !!process.env.SURREAL_URL;
+  let dbSizeBytes: number | null = null;
+  if (!externalDb) {
+    dbSizeBytes = dirSizeBytes(config.paths.dataDir);
+  }
+
+  // Alerts.
+  const alerts: Array<{ code: string; severity: "warn" | "critical"; message: string }> = [];
+  if (maxDaily > 0 && spend.today >= Math.ceil(maxDaily * 0.8)) {
+    alerts.push({
+      code: "drain.budget_near_cap",
+      severity: spend.today >= maxDaily ? "critical" : "warn",
+      message: `auto-drain spawns today (${spend.today}) are at ${Math.round((spend.today / maxDaily) * 100)}% of the daily budget (${maxDaily}) for ${spend.today_key}`,
+    });
+  }
+  const dbSizeAlertBytes = dbSizeAlertGb * 1024 ** 3;
+  if (dbSizeBytes != null && dbSizeBytes > dbSizeAlertBytes) {
+    alerts.push({
+      code: "db.size_over_threshold",
+      severity: "warn",
+      message: `DB size on disk (${formatBytes(dbSizeBytes)}) exceeds the ${dbSizeAlertGb}GB alert threshold (KONGCODE_DB_SIZE_ALERT_GB)`,
+    });
+  }
+
+  const details = {
+    window_7d: { ...w7, concepts: concepts7, memories: memories7, skills: skills7 },
+    window_30d: { ...w30, concepts: concepts30, memories: memories30, skills: skills30 },
+    drain: { spawns_today: spend.today, daily_budget: maxDaily, spawns_7d: spend.last7d, spawns_30d: spend.last30d, today_key: spend.today_key },
+    graph_counts: { concept: conceptsTotal, memory: memoriesTotal, skill: skillsTotal, turn: turnsTotal, artifact: artifactsTotal },
+    db_size: { bytes: dbSizeBytes, external: externalDb, alert_gb: dbSizeAlertGb },
+    alerts,
+  };
+
+  const lines: string[] = [];
+  lines.push("USAGE & COST REPORT");
+  lines.push("═══════════════════════════════════");
+  lines.push("");
+  lines.push("                       last 7d        last 30d");
+  lines.push(`  sessions:          ${pad(w7.sessions, 10)}    ${pad(w30.sessions, 10)}`);
+  lines.push(`  turns:             ${pad(w7.turns, 10)}    ${pad(w30.turns, 10)}`);
+  lines.push(`  tokens in:         ${pad(w7.tokens_in, 10)}    ${pad(w30.tokens_in, 10)}`);
+  lines.push(`  tokens out:        ${pad(w7.tokens_out, 10)}    ${pad(w30.tokens_out, 10)}`);
+  lines.push(`  concepts:          ${pad(concepts7, 10)}    ${pad(concepts30, 10)}`);
+  lines.push(`  memories:          ${pad(memories7, 10)}    ${pad(memories30, 10)}`);
+  lines.push(`  skills:            ${pad(skills7, 10)}    ${pad(skills30, 10)}`);
+  lines.push("");
+  lines.push("AUTO-DRAIN SPEND");
+  lines.push("═══════════════════════════════════");
+  const budgetStr = maxDaily > 0 ? `${spend.today} / ${maxDaily}` : `${spend.today} / unlimited`;
+  lines.push(`  spawns today:      ${budgetStr}  (${spend.today_key})`);
+  lines.push(`  spawns last 7d:    ${spend.last7d}`);
+  lines.push(`  spawns last 30d:   ${spend.last30d}`);
+  lines.push("");
+  lines.push("GRAPH COUNTS");
+  lines.push("═══════════════════════════════════");
+  lines.push(`  concepts:  ${pad(conceptsTotal, 8)}   memories:  ${pad(memoriesTotal, 8)}   skills: ${pad(skillsTotal, 8)}`);
+  lines.push(`  turns:     ${pad(turnsTotal, 8)}   artifacts: ${pad(artifactsTotal, 8)}`);
+  lines.push("");
+  lines.push("DB SIZE ON DISK");
+  lines.push("═══════════════════════════════════");
+  if (externalDb) {
+    lines.push("  n/a (external DB via SURREAL_URL)");
+  } else if (dbSizeBytes == null) {
+    lines.push(`  n/a (data dir not found: ${config.paths.dataDir})`);
+  } else {
+    lines.push(`  ${formatBytes(dbSizeBytes)}  (${config.paths.dataDir}, alert >${dbSizeAlertGb}GB)`);
+  }
+  if (alerts.length > 0) {
+    lines.push("");
+    lines.push("ALERTS");
+    lines.push("═══════════════════════════════════");
+    for (const a of alerts) {
+      const sev = a.severity === "critical" ? "[!!]" : "[!]";
+      lines.push(`  ${sev} ${a.code}: ${a.message}`);
+    }
+  }
+
+  return { content: [{ type: "text" as const, text: lines.join("\n") }], details };
 }
 
 async function queryAction(store: any, table?: string, template?: string) {

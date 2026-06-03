@@ -60,7 +60,7 @@ export const MCP_TOOLS = [
         inputSchema: {
             type: "object",
             properties: {
-                action: { type: "string", enum: ["status", "count", "verify", "query", "migrate"], description: "Diagnostic action to perform" },
+                action: { type: "string", enum: ["status", "count", "verify", "query", "migrate", "trends", "stats"], description: "Diagnostic action to perform" },
                 table: { type: "string", description: "Table name (for count/verify)" },
                 filter: { type: "string", enum: ["active", "inactive", "recent_24h", "with_embedding", "unresolved"], description: "Filter preset (for count)" },
                 record_id: { type: "string", description: "Record ID (for verify)" },
