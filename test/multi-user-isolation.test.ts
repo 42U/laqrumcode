@@ -14,7 +14,7 @@
  * already covered by bootstrap reuse behavior and needs a live SurrealDB.
  */
 
-import { describe, it, expect, afterEach, vi } from "vitest";
+import { describe, it, expect, afterEach } from "vitest";
 import { mkdirSync, rmSync, writeFileSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -34,13 +34,29 @@ function tcpRow(slot: number, localHost: string, port: number, st: string, inode
   return `   ${slot}: ${local} 00000000:0000 ${st} 00000000:00000000 00:00000000 00000000  1000        0 ${inode} 1 0000 ...`;
 }
 
+// Cross-platform getuid mock. process.getuid is ABSENT on Windows, so
+// vi.spyOn(process, "getuid") throws there. Assign/restore the property
+// directly (deleting it to simulate the non-POSIX/Windows path) so these
+// POSIX-semantics tests run on every CI platform.
+function withGetuid<T>(uid: number | undefined, fn: () => T): T {
+  const p = process as { getuid?: () => number };
+  const orig = p.getuid;
+  if (uid === undefined) delete p.getuid;
+  else p.getuid = () => uid;
+  try {
+    return fn();
+  } finally {
+    if (orig === undefined) delete p.getuid;
+    else p.getuid = orig;
+  }
+}
+
 describe("pickPort (GH #13 UID-offset managed port)", () => {
   const origPort = process.env.KONGCODE_SURREAL_PORT;
 
   afterEach(() => {
     if (origPort === undefined) delete process.env.KONGCODE_SURREAL_PORT;
     else process.env.KONGCODE_SURREAL_PORT = origPort;
-    vi.restoreAllMocks();
   });
 
   it("KONGCODE_SURREAL_PORT override always wins", () => {
@@ -50,40 +66,26 @@ describe("pickPort (GH #13 UID-offset managed port)", () => {
 
   it("offsets the legacy base port by getuid() % 10000", () => {
     delete process.env.KONGCODE_SURREAL_PORT;
-    vi.spyOn(process, "getuid").mockReturnValue(1234);
-    expect(pickPort()).toBe(LEGACY_MANAGED_SURREAL_PORT + 1234);
+    withGetuid(1234, () => expect(pickPort()).toBe(LEGACY_MANAGED_SURREAL_PORT + 1234));
   });
 
   it("wraps the UID offset with mod 10000 to stay in range", () => {
     delete process.env.KONGCODE_SURREAL_PORT;
-    vi.spyOn(process, "getuid").mockReturnValue(412345); // 412345 % 10000 = 2345
-    expect(pickPort()).toBe(LEGACY_MANAGED_SURREAL_PORT + 2345);
+    // 412345 % 10000 = 2345
+    withGetuid(412345, () => expect(pickPort()).toBe(LEGACY_MANAGED_SURREAL_PORT + 2345));
   });
 
   it("two distinct UIDs get distinct ports (collision avoidance)", () => {
     delete process.env.KONGCODE_SURREAL_PORT;
-    const spy = vi.spyOn(process, "getuid");
-    spy.mockReturnValue(1000);
-    const a = pickPort();
-    spy.mockReturnValue(1001);
-    const b = pickPort();
+    const a = withGetuid(1000, () => pickPort());
+    const b = withGetuid(1001, () => pickPort());
     expect(a).not.toBe(b);
   });
 
   it("falls back to the legacy flat port when getuid is unavailable (Windows)", () => {
     delete process.env.KONGCODE_SURREAL_PORT;
-    // Simulate non-POSIX: process.getuid does not exist.
-    vi.spyOn(process, "getuid").mockReturnValue(undefined as unknown as number);
-    // The implementation checks `typeof process.getuid === "function"`; a mock
-    // is still a function, so to truly exercise the Windows path we delete it.
-    const orig = process.getuid;
-    // @ts-expect-error — intentionally removing for the non-POSIX simulation.
-    delete process.getuid;
-    try {
-      expect(pickPort()).toBe(LEGACY_MANAGED_SURREAL_PORT);
-    } finally {
-      process.getuid = orig;
-    }
+    // Truly exercise the non-POSIX path: getuid is removed entirely.
+    withGetuid(undefined, () => expect(pickPort()).toBe(LEGACY_MANAGED_SURREAL_PORT));
   });
 });
 
@@ -135,7 +137,10 @@ describe("findListenerUidViaProc (GH #13 owner guard)", () => {
     return { procRoot, pid };
   }
 
-  it("resolves the owner UID of the LISTEN socket on the port", () => {
+  // POSIX-only: /proc + statSync().uid resolution. On Windows statSync().uid is
+  // always 0 and the production guard never calls this path (caller gates on
+  // getuid), so the uid-resolution assertion is meaningless there.
+  it.skipIf(process.platform === "win32")("resolves the owner UID of the LISTEN socket on the port", () => {
     const { procRoot } = layout({ port: 18765, inode: "987654" });
     const uid = findListenerUidViaProc(18765, procRoot);
     // Owner of the pid dir is whoever created the temp tree == the test runner.
@@ -143,7 +148,7 @@ describe("findListenerUidViaProc (GH #13 owner guard)", () => {
     expect(uid).not.toBeNull();
   });
 
-  it("matches IPv6 loopback (::1) rows in net/tcp6", () => {
+  it.skipIf(process.platform === "win32")("matches IPv6 loopback (::1) rows in net/tcp6", () => {
     root = makeTmpDir("proc-v6");
     const procRoot = join(root, "proc");
     mkdirSync(join(procRoot, "net"), { recursive: true });

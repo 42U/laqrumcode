@@ -4,6 +4,11 @@ All notable changes to KongCode are documented here. The 0.7.x series introduced
 
 ## [Unreleased]
 
+## [0.7.104] — 2026-06-03
+
+### Fixed
+- **Windows CI for the Phase 1 isolation tests** — `test/multi-user-isolation.test.ts` made POSIX-only assumptions that failed on the win32 runner (v0.7.103 CI was red on Windows only; macOS/Linux green). `vi.spyOn(process, "getuid")` throws when `getuid` is absent (Windows), and the `findListenerUidViaProc` uid-resolution tests expected `null` where Windows `statSync().uid` returns `0`. Replaced the spy with a cross-platform `withGetuid` assign/restore helper, and gated the two `/proc` uid-resolution tests with `skipIf(win32)`. Production code unchanged.
+
 ## [0.7.103] — 2026-06-03
 
 Multi-user auth — Phase 1 of 5 (GH #13): strict per-OS-user isolation so two users on one machine can't collide on ports or read each other's memory graph.
