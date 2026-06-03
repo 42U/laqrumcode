@@ -170,6 +170,18 @@ async function initializeStack() {
                 // legacy port (8000/8042) and returned its URL. Either way, point
                 // the store at whatever bootstrap chose.
                 config.surreal.url = result.surrealServer.url;
+                // Phase 2: bootstrap also resolves which credential to use for the
+                // chosen target — the GENERATED per-user cred for a managed instance,
+                // or the CONFIGURED creds (root / SURREAL_USER) for an external one.
+                // Adopt them so SurrealStore connects with the right secret. External
+                // / SURREAL_URL targets get back exactly config.surreal.user/pass, so
+                // this assignment is a no-op for them (auth path unchanged).
+                if (result.surrealServer.user) {
+                    config.surreal.user = result.surrealServer.user;
+                }
+                if (result.surrealServer.pass) {
+                    config.surreal.pass = result.surrealServer.pass;
+                }
             }
             log.info(`[bootstrap] complete in ${result.totalDurationMs}ms ` +
                 `(npm=${result.npmInstall.ran ? "ran" : "skip"}, ` +

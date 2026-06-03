@@ -12,6 +12,8 @@ export interface BootstrapResult {
         url: string;
         pid: number | null;
         managed: boolean;
+        user: string;
+        pass: string;
     };
     embeddingModel: {
         path: string;
@@ -61,6 +63,53 @@ export interface BootstrapInput {
  *  unusual install layouts).
  */
 export declare function resolvePluginDir(): string;
+export interface ManagedSurrealCred {
+    user: string;
+    pass: string;
+}
+/** Read-or-create the managed-instance credential. Idempotent: if the file
+ *  already exists and parses to a {user, pass} with non-empty strings, it is
+ *  returned unchanged — this is what lets a freshly-booting daemon reuse the
+ *  exact secret a previously-spawned detached child (Option A) is already
+ *  running with. Otherwise a fresh credential is generated and written.
+ *
+ *  - user: `kong_<uid>` on POSIX (matches the iKong per-user naming precedent),
+ *    plain `kong` where getuid is unavailable (Windows).
+ *  - pass: 24 random bytes, base64url (~32 chars, URL/CLI-safe, no padding).
+ *  - File perms tightened to 0600 best-effort (cross-platform: chmod is a
+ *    no-op-ish on Windows and is wrapped in try/catch so it never throws).
+ *
+ *  Never throws on a read parse error — a corrupt/legacy file is treated as
+ *  absent and regenerated (the managed child would then be respawned with the
+ *  new secret on its next lifecycle, same graceful-migration path as a
+ *  pre-Phase-2 root:root child). */
+export declare function getOrCreateManagedCred(cacheDir: string): ManagedSurrealCred;
+/** Resolve which credential the daemon should use to connect to a REUSED /
+ *  DISCOVERED SurrealDB. This is the security-critical Phase-2 decision,
+ *  extracted as a pure function so it is unit-testable without standing up the
+ *  full bootstrap (npm ci + binary/model downloads).
+ *
+ *  Inputs:
+ *   - discoveredPid: findExistingKongcodeSurreal's returned pid. Non-null ⟺ a
+ *     managed-surface port for which we hold a LIVE pid file (it is OUR managed
+ *     child). Null ⟺ an EXTERNAL DB (8000/8042) whose lifecycle we don't own.
+ *   - credFileExists: managedCredFileExists(cacheDir).
+ *   - configured: the user-configured creds (config.surreal.user/pass, i.e.
+ *     root:root by default or SURREAL_USER/SURREAL_PASS).
+ *   - generated: the persisted/generated managed cred (only meaningful when the
+ *     file exists; pass the result of getOrCreateManagedCred).
+ *
+ *  Decision table:
+ *   pid !== null && credFileExists  → GENERATED  (our child, spawned with it)
+ *   pid !== null && !credFileExists → root:root  (pre-Phase-2 child; graceful
+ *                                                 migration — don't break it)
+ *   pid === null                    → CONFIGURED (external; auth UNCHANGED) */
+export declare function resolveReusedTargetCred(args: {
+    discoveredPid: number | null;
+    credFileExists: boolean;
+    configured: ManagedSurrealCred;
+    generated: ManagedSurrealCred;
+}): ManagedSurrealCred;
 /**
  * Find the OS-user (UID) that owns the process LISTENING on a loopback TCP
  * `port`, using only the Linux `/proc` filesystem.

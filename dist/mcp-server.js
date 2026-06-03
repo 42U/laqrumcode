@@ -400,6 +400,16 @@ async function initialize() {
             if (result.surrealServer.managed) {
                 // Point the store at the managed child instead of the default ws://localhost:8000.
                 config.surreal.url = result.surrealServer.url;
+                // Phase 2: a managed child is spawned with a GENERATED per-user cred,
+                // not root:root — adopt it so this relay connects with the matching
+                // secret. (External targets have managed=false and never reach here,
+                // so their configured-creds auth path is unchanged.)
+                if (result.surrealServer.user) {
+                    config.surreal.user = result.surrealServer.user;
+                }
+                if (result.surrealServer.pass) {
+                    config.surreal.pass = result.surrealServer.pass;
+                }
             }
             log.info(`[bootstrap] complete in ${result.totalDurationMs}ms ` +
                 `(npm=${result.npmInstall.ran ? "ran" : "skip"}, ` +
@@ -480,7 +490,7 @@ async function shutdown() {
 }
 // ── Main ──────────────────────────────────────────────────────────────────────
 async function main() {
-    const server = new Server({ name: "kongcode", version: "0.7.104" }, { capabilities: { tools: {} } });
+    const server = new Server({ name: "kongcode", version: "0.7.105" }, { capabilities: { tools: {} } });
     // Register tool list handler
     server.setRequestHandler(ListToolsRequestSchema, async () => ({
         tools: TOOLS,

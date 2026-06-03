@@ -2,16 +2,18 @@ import {
   chmodSync,
   createWriteStream,
   existsSync,
+  mkdirSync,
   readdirSync,
   readFileSync,
   readlinkSync,
   statSync,
+  writeFileSync,
 } from "node:fs";
 import { mkdir, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn, execFile, execFileSync, type ChildProcess } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { promisify } from "node:util";
 import { log } from "./log.js";
 
@@ -60,7 +62,7 @@ interface Manifest {
 export interface BootstrapResult {
   npmInstall: { ran: boolean; durationMs: number };
   surrealBinary: { path: string; provisioned: boolean; sizeBytes: number };
-  surrealServer: { url: string; pid: number | null; managed: boolean };
+  surrealServer: { url: string; pid: number | null; managed: boolean; user: string; pass: string };
   embeddingModel: { path: string; provisioned: boolean; sizeBytes: number };
   rerankerModel: { path: string | null; provisioned: boolean; sizeBytes: number; skipped: boolean };
   nodeLlamaCpp: { mainPath: string | null; provisioned: boolean };
@@ -455,6 +457,127 @@ async function ensureRerankerModel(
 }
 
 const SURREAL_PID_FILENAME = "surreal.pid";
+
+/** Phase 2 (multi-user auth, after GH #13): the MANAGED SurrealDB child no
+ *  longer uses the root:root default. Instead we generate a per-user/-machine
+ *  credential and persist it next to the kongcode home so a reused detached
+ *  child (Option A) and the connecting daemon agree on the same secret.
+ *
+ *  Stored at ~/.kongcode/surreal-cred.json — sibling of cache/ and data/, since
+ *  cacheDir resolves to ~/.kongcode/cache. Derived from cacheDir's parent so
+ *  tests that inject a temp cacheDir get an injectable, isolated cred path. */
+const SURREAL_CRED_FILENAME = "surreal-cred.json";
+
+export interface ManagedSurrealCred {
+  user: string;
+  pass: string;
+}
+
+/** Resolve the cred-file path from the bootstrap cacheDir. cacheDir is
+ *  ~/.kongcode/cache in production, so the parent is ~/.kongcode. Keeping it a
+ *  sibling of cacheDir (rather than inside it) means a `rm -rf cache/` to force
+ *  a re-download of the binary/model does NOT nuke the credential and orphan a
+ *  still-running managed child that was spawned with it. */
+function surrealCredPath(cacheDir: string): string {
+  return join(dirname(cacheDir), SURREAL_CRED_FILENAME);
+}
+
+/** Read-or-create the managed-instance credential. Idempotent: if the file
+ *  already exists and parses to a {user, pass} with non-empty strings, it is
+ *  returned unchanged — this is what lets a freshly-booting daemon reuse the
+ *  exact secret a previously-spawned detached child (Option A) is already
+ *  running with. Otherwise a fresh credential is generated and written.
+ *
+ *  - user: `kong_<uid>` on POSIX (matches the iKong per-user naming precedent),
+ *    plain `kong` where getuid is unavailable (Windows).
+ *  - pass: 24 random bytes, base64url (~32 chars, URL/CLI-safe, no padding).
+ *  - File perms tightened to 0600 best-effort (cross-platform: chmod is a
+ *    no-op-ish on Windows and is wrapped in try/catch so it never throws).
+ *
+ *  Never throws on a read parse error — a corrupt/legacy file is treated as
+ *  absent and regenerated (the managed child would then be respawned with the
+ *  new secret on its next lifecycle, same graceful-migration path as a
+ *  pre-Phase-2 root:root child). */
+export function getOrCreateManagedCred(cacheDir: string): ManagedSurrealCred {
+  const path = surrealCredPath(cacheDir);
+  // Read existing.
+  if (existsSync(path)) {
+    try {
+      const raw = readFileSync(path, "utf-8");
+      const parsed = JSON.parse(raw) as Partial<ManagedSurrealCred>;
+      if (
+        parsed &&
+        typeof parsed.user === "string" && parsed.user.length > 0 &&
+        typeof parsed.pass === "string" && parsed.pass.length > 0
+      ) {
+        return { user: parsed.user, pass: parsed.pass };
+      }
+      log.warn(`[bootstrap] managed surreal cred file at ${path} is malformed — regenerating`);
+    } catch (e) {
+      log.warn(`[bootstrap] failed to read managed surreal cred file (${(e as Error).message}) — regenerating`);
+    }
+  }
+  // Generate fresh.
+  const uid = typeof process.getuid === "function" ? process.getuid() : null;
+  const user = uid === null ? "kong" : `kong_${uid}`;
+  const pass = randomBytes(24).toString("base64url");
+  const cred: ManagedSurrealCred = { user, pass };
+  try {
+    // Ensure parent (~/.kongcode) exists; cacheDir's own mkdir happens later,
+    // but the cred sits one level up so we create that level here.
+    mkdirSync(dirname(path), { recursive: true });
+  } catch { /* parent may already exist; writeFileSync will surface real errors */ }
+  try {
+    writeFileSync(path, JSON.stringify(cred, null, 2), "utf-8");
+    try { chmodSync(path, 0o600); } catch { /* best-effort; no-op on Windows */ }
+  } catch (e) {
+    // If we can't persist, we still return the in-memory cred so the spawn
+    // proceeds; the risk is a reused child later not matching. Log loudly.
+    log.warn(`[bootstrap] could not persist managed surreal cred to ${path}: ${(e as Error).message}`);
+  }
+  return cred;
+}
+
+/** Does a persisted managed credential already exist on disk? Used by the
+ *  reuse branch to decide whether a discovered managed child was (very likely)
+ *  spawned with the generated cred (file present) or is a pre-Phase-2 root:root
+ *  child (file absent → graceful migration: keep talking to it as root:root). */
+function managedCredFileExists(cacheDir: string): boolean {
+  return existsSync(surrealCredPath(cacheDir));
+}
+
+/** Resolve which credential the daemon should use to connect to a REUSED /
+ *  DISCOVERED SurrealDB. This is the security-critical Phase-2 decision,
+ *  extracted as a pure function so it is unit-testable without standing up the
+ *  full bootstrap (npm ci + binary/model downloads).
+ *
+ *  Inputs:
+ *   - discoveredPid: findExistingKongcodeSurreal's returned pid. Non-null ⟺ a
+ *     managed-surface port for which we hold a LIVE pid file (it is OUR managed
+ *     child). Null ⟺ an EXTERNAL DB (8000/8042) whose lifecycle we don't own.
+ *   - credFileExists: managedCredFileExists(cacheDir).
+ *   - configured: the user-configured creds (config.surreal.user/pass, i.e.
+ *     root:root by default or SURREAL_USER/SURREAL_PASS).
+ *   - generated: the persisted/generated managed cred (only meaningful when the
+ *     file exists; pass the result of getOrCreateManagedCred).
+ *
+ *  Decision table:
+ *   pid !== null && credFileExists  → GENERATED  (our child, spawned with it)
+ *   pid !== null && !credFileExists → root:root  (pre-Phase-2 child; graceful
+ *                                                 migration — don't break it)
+ *   pid === null                    → CONFIGURED (external; auth UNCHANGED) */
+export function resolveReusedTargetCred(args: {
+  discoveredPid: number | null;
+  credFileExists: boolean;
+  configured: ManagedSurrealCred;
+  generated: ManagedSurrealCred;
+}): ManagedSurrealCred {
+  const { discoveredPid, credFileExists, configured, generated } = args;
+  if (discoveredPid !== null) {
+    return credFileExists ? generated : { user: "root", pass: "root" };
+  }
+  return configured;
+}
 
 /** Tables that are unique to kongcode's schema — used as a fingerprint to
  *  distinguish "this is our DB" from "this is a SurrealDB someone else
@@ -934,6 +1057,11 @@ export async function bootstrap(input: BootstrapInput): Promise<BootstrapResult>
         url: input.surrealUrlOverride,
         pid: null,
         managed: false,
+        // SURREAL_URL points at an EXTERNAL, user-run SurrealDB. Auth path is
+        // UNCHANGED from pre-Phase-2: use exactly the configured creds
+        // (config.surreal.user/pass = root, or SURREAL_USER/SURREAL_PASS).
+        user: input.surrealUser,
+        pass: input.surrealPass,
       },
       embeddingModel,
       rerankerModel,
@@ -976,10 +1104,30 @@ export async function bootstrap(input: BootstrapInput): Promise<BootstrapResult>
     input.surrealPass,
   );
   if (existing) {
+    // Per-target credential resolution (Phase 2):
+    //  - existing.pid !== null  ⟺ a managed-surface port for which we hold a
+    //    live pid file → this is OUR managed child.
+    //      · cred file present → it was spawned with the generated cred → use it.
+    //      · cred file absent  → it's a pre-Phase-2 root:root child. GRACEFUL
+    //        MIGRATION: keep talking to it as root:root so we don't break the
+    //        running instance; it adopts the per-user cred on its next respawn
+    //        (spawnManagedSurreal always uses the generated cred now).
+    //  - existing.pid === null  ⟺ an EXTERNAL DB (8000/8042, lifecycle not
+    //    ours). Auth path UNCHANGED: use the configured creds verbatim.
+    const credFileExists = managedCredFileExists(input.cacheDir);
+    const { user, pass } = resolveReusedTargetCred({
+      discoveredPid: existing.pid,
+      credFileExists,
+      configured: { user: input.surrealUser, pass: input.surrealPass },
+      // Only read/mint the cred when the file actually exists (managed child
+      // path); for external targets credFileExists is irrelevant and we avoid
+      // a needless file write.
+      generated: credFileExists ? getOrCreateManagedCred(input.cacheDir) : { user: "", pass: "" },
+    });
     return {
       npmInstall,
       surrealBinary,
-      surrealServer: { url: existing.url, pid: existing.pid, managed: existing.pid !== null },
+      surrealServer: { url: existing.url, pid: existing.pid, managed: existing.pid !== null, user, pass },
       embeddingModel,
       rerankerModel,
       nodeLlamaCpp,
@@ -988,12 +1136,18 @@ export async function bootstrap(input: BootstrapInput): Promise<BootstrapResult>
     };
   }
 
+  // Fresh managed spawn (no existing kongcode DB found). Phase 2: drop the
+  // root:root default — generate (or reuse a persisted) per-user credential
+  // and spawn the child with it. getOrCreateManagedCred is idempotent, so if a
+  // cred file already exists (e.g. a prior managed child that has since died)
+  // we reuse the same secret rather than minting a new one.
+  const managedCred = getOrCreateManagedCred(input.cacheDir);
   managedSurreal = await spawnManagedSurreal(
     surrealBinary.path,
     input.dataDir,
     port,
-    input.surrealUser,
-    input.surrealPass,
+    managedCred.user,
+    managedCred.pass,
     input.cacheDir,
   );
   await waitForSurrealReady(port);
@@ -1003,7 +1157,7 @@ export async function bootstrap(input: BootstrapInput): Promise<BootstrapResult>
   return {
     npmInstall,
     surrealBinary,
-    surrealServer: { url, pid: managedSurreal.pid ?? null, managed: true },
+    surrealServer: { url, pid: managedSurreal.pid ?? null, managed: true, user: managedCred.user, pass: managedCred.pass },
     embeddingModel,
     rerankerModel,
     nodeLlamaCpp,

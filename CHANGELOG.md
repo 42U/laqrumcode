@@ -4,6 +4,23 @@ All notable changes to KongCode are documented here. The 0.7.x series introduced
 
 ## [Unreleased]
 
+## [0.7.105] — 2026-06-03
+
+Multi-user auth — Phase 2 of 5: per-user credentials for managed SurrealDB instances.
+
+### Added
+- **Per-user managed credential** — a kongcode-auto-spawned SurrealDB no longer uses `root:root`. `getOrCreateManagedCred` mints a random credential (`randomBytes(24)` base64url; user `kong_<uid>` on POSIX / `kong` on Windows) stored `0600` at `~/.kongcode/surreal-cred.json`, and the managed instance is spawned + connected with it — defense-in-depth atop Phase 1's port-owner guard (a reachable managed instance still can't be accessed without the secret). `BootstrapResult.surrealServer` now carries `{user, pass}`, resolved per-target by the pure `resolveReusedTargetCred`.
+
+### Unchanged (by design, QA-verified)
+- **External / `SURREAL_URL` auth is untouched** — a discovered external DB (8000/8042) or an explicit `SURREAL_URL` keeps the user-configured creds (`root` or `SURREAL_USER`/`SURREAL_PASS`), verbatim. Two independent QA streams confirmed the external arms never return a generated cred (no production-graph auth regression). Hardening an external DB's own creds remains the operator's infra config.
+- **Graceful migration** — an existing root:root managed child reused via Option A keeps working; it adopts the per-user cred on its next respawn.
+
+### Tests
+- `test/managed-cred.test.ts` (12) + `test/lint-managed-cred-wiring.test.ts` (3, source-wiring invariants). Suite: 1064 passing.
+
+### Roadmap
+- Phase 2 of 5 (multi-user auth, #13 + #16). Next: per-user namespace/database isolation (Phase 3).
+
 ## [0.7.104] — 2026-06-03
 
 ### Fixed
