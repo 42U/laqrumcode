@@ -13,6 +13,7 @@ import { checkGraduation, formatGraduationReport, hasSoul } from "../soul.js";
 import { computeTrends } from "../observability.js";
 import { recoverProjectIdRows, recoverDaemonOrphans } from "../recovery.js";
 import { probeEmbeddingService as probeEmbeddingsRaw } from "../embeddings.js";
+import { pickPort, LEGACY_MANAGED_SURREAL_PORT } from "../bootstrap.js";
 
 const ALLOWED_TABLES = new Set([
   "agent", "project", "task", "artifact", "concept",
@@ -793,6 +794,21 @@ async function totalCount(store: any, table: string): Promise<number> {
   }
 }
 
+/** True when the connected DB is NOT this install's managed instance — so its
+ *  on-disk size isn't ours to measure (report n/a). External covers BOTH a
+ *  `SURREAL_URL` override AND a DB that bootstrap discovered + adopted on a
+ *  non-managed port (e.g. an :8000 Docker container, where no SURREAL_URL is
+ *  set — the case the old `!!process.env.SURREAL_URL` check missed). Keyed on
+ *  the connected port vs the managed-surface ports (pickPort + legacy 18765),
+ *  matching how findExistingKongcodeSurreal decides managed-vs-external. */
+export function isConnectedDbExternal(connectedUrl: string): boolean {
+  if (process.env.SURREAL_URL) return true;
+  let port: number | null = null;
+  try { port = Number(new URL(connectedUrl).port) || null; } catch { /* unparseable */ }
+  if (port === null) return false; // can't tell → assume managed (we only walk our own dataDir)
+  return !new Set<number>([pickPort(), LEGACY_MANAGED_SURREAL_PORT]).has(port);
+}
+
 export async function statsAction(state: GlobalPluginState) {
   const { store, config } = state;
 
@@ -826,11 +842,11 @@ export async function statsAction(state: GlobalPluginState) {
   // Auto-drain spend from the ledger.
   const spend = readSpendingStats(config.paths.cacheDir);
 
-  // DB size on disk. Managed DBs live under config.paths.dataDir; an external
-  // DB (SURREAL_URL set) has unknown on-disk footprint from this process's
-  // vantage point — report n/a. We check the env directly because bootstrap
-  // only spawns a managed child when SURREAL_URL is unset.
-  const externalDb = !!process.env.SURREAL_URL;
+  // DB size on disk only means something for OUR managed instance (under
+  // config.paths.dataDir). The connected DB is external — footprint not ours to
+  // measure — when SURREAL_URL is set OR bootstrap discovered+adopted a DB on a
+  // non-managed port (e.g. an :8000 Docker container, no SURREAL_URL set).
+  const externalDb = isConnectedDbExternal(config.surreal.url);
   let dbSizeBytes: number | null = null;
   if (!externalDb) {
     dbSizeBytes = dirSizeBytes(config.paths.dataDir);
@@ -891,7 +907,7 @@ export async function statsAction(state: GlobalPluginState) {
   lines.push("DB SIZE ON DISK");
   lines.push("═══════════════════════════════════");
   if (externalDb) {
-    lines.push("  n/a (external DB via SURREAL_URL)");
+    lines.push("  n/a (external DB — not managed by this install)");
   } else if (dbSizeBytes == null) {
     lines.push(`  n/a (data dir not found: ${config.paths.dataDir})`);
   } else {

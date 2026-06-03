@@ -183,6 +183,14 @@ export declare function readSpendingStats(cacheDir: string, now?: number): Spend
  *  null if the dir doesn't exist or can't be read. Depth-capped to bound
  *  pathological trees / symlink loops (the surrealkv layout is shallow). */
 export declare function dirSizeBytes(dir: string, depth?: number): number | null;
+/** True when the connected DB is NOT this install's managed instance — so its
+ *  on-disk size isn't ours to measure (report n/a). External covers BOTH a
+ *  `SURREAL_URL` override AND a DB that bootstrap discovered + adopted on a
+ *  non-managed port (e.g. an :8000 Docker container, where no SURREAL_URL is
+ *  set — the case the old `!!process.env.SURREAL_URL` check missed). Keyed on
+ *  the connected port vs the managed-surface ports (pickPort + legacy 18765),
+ *  matching how findExistingKongcodeSurreal decides managed-vs-external. */
+export declare function isConnectedDbExternal(connectedUrl: string): boolean;
 export declare function statsAction(state: GlobalPluginState): Promise<{
     content: {
         type: "text";

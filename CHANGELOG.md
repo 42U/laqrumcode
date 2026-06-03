@@ -4,6 +4,14 @@ All notable changes to KongCode are documented here. The 0.7.x series introduced
 
 ## [Unreleased]
 
+## [0.7.108] — 2026-06-03
+
+### Fixed
+- **`introspect stats` `db_size` now correct for discovered-external DBs** — the report stat'd the managed `dataDir` even when the connected DB was an external one bootstrap *discovered* (e.g. an :8000 Docker container with no `SURREAL_URL`), showing a misleading on-disk size for a DB it doesn't own. New `isConnectedDbExternal(url)` keys "external" on the connected port (∉ `{pickPort(), 18765}`) plus the `SURREAL_URL` override — mirroring how `findExistingKongcodeSurreal` decides managed-vs-external — so `db_size` reports `n/a (external)` for adopted external DBs and only walks `dataDir` for a truly managed instance. Closes the recurring `SURREAL_URL`-only detection gap before the 0.8.0 remote/cloud work.
+
+### Tests
+- `test/stats-action.test.ts`: +4 `isConnectedDbExternal` cases (discovered :8000/:8042 → external; managed `pickPort()`/18765 → not; `SURREAL_URL` → external; unparseable → managed). Suite: **1080 passing**.
+
 ## [0.7.107] — 2026-06-03
 
 Cost/usage visibility — `introspect action="stats"` (GH #16 item 3).

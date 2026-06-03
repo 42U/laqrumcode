@@ -16,7 +16,7 @@
  * the local SurrealDB isn't reachable.
  */
 
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, afterEach } from "vitest";
 import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -26,7 +26,44 @@ import {
   readSpendingStats,
   dirSizeBytes,
   statsAction,
+  isConnectedDbExternal,
 } from "../src/engine/tools/introspect.js";
+import { pickPort, LEGACY_MANAGED_SURREAL_PORT } from "../src/engine/bootstrap.js";
+
+// ── 0. isConnectedDbExternal — db_size external detection (0.7.108) ────────
+// Regression for the discovered-external gap: the old `!!process.env.SURREAL_URL`
+// check reported the managed dataDir size for a DB adopted via discovery (e.g.
+// an :8000 Docker container with no SURREAL_URL). External must key on the
+// connected port, not just the env.
+describe("isConnectedDbExternal (db_size external detection)", () => {
+  const origUrl = process.env.SURREAL_URL;
+  afterEach(() => {
+    if (origUrl === undefined) delete process.env.SURREAL_URL;
+    else process.env.SURREAL_URL = origUrl;
+  });
+
+  it("treats a discovered non-managed port (e.g. :8000 Docker) as external", () => {
+    delete process.env.SURREAL_URL;
+    expect(isConnectedDbExternal("ws://127.0.0.1:8000/rpc")).toBe(true);
+    expect(isConnectedDbExternal("ws://127.0.0.1:8042/rpc")).toBe(true);
+  });
+
+  it("treats OUR managed instance port as not external", () => {
+    delete process.env.SURREAL_URL;
+    expect(isConnectedDbExternal(`ws://127.0.0.1:${pickPort()}/rpc`)).toBe(false);
+    expect(isConnectedDbExternal(`ws://127.0.0.1:${LEGACY_MANAGED_SURREAL_PORT}/rpc`)).toBe(false);
+  });
+
+  it("treats SURREAL_URL as external regardless of the connected port", () => {
+    process.env.SURREAL_URL = "ws://remote.example:8000/rpc";
+    expect(isConnectedDbExternal(`ws://127.0.0.1:${pickPort()}/rpc`)).toBe(true);
+  });
+
+  it("assumes managed (false) for an unparseable url", () => {
+    delete process.env.SURREAL_URL;
+    expect(isConnectedDbExternal("not-a-url")).toBe(false);
+  });
+});
 
 // ── 1. readSpendingStats — pure parser ────────────────────────────────────
 
@@ -184,11 +221,17 @@ afterAll(async () => {
 }, 15_000);
 
 /** Build a GlobalPluginState-shaped object with the real store + temp paths.
- *  statsAction only touches state.store and state.config.paths. */
+ *  statsAction touches state.store, state.config.paths, and state.config.surreal.url
+ *  (the connected url, used to decide managed-vs-external for db_size). A managed
+ *  legacy-port url keeps db_size on the temp dataDir; the SURREAL_URL test below
+ *  overrides to external. */
 function makeState(cacheDir: string, dataDir: string): GlobalPluginState {
   return {
     store,
-    config: { paths: { cacheDir, dataDir, surrealBinPath: null } },
+    config: {
+      paths: { cacheDir, dataDir, surrealBinPath: null },
+      surreal: { url: `ws://127.0.0.1:${LEGACY_MANAGED_SURREAL_PORT}/rpc` },
+    },
   } as unknown as GlobalPluginState;
 }
 
