@@ -4,6 +4,24 @@ All notable changes to KongCode are documented here. The 0.7.x series introduced
 
 ## [Unreleased]
 
+## [0.7.103] — 2026-06-03
+
+Multi-user auth — Phase 1 of 5 (GH #13): strict per-OS-user isolation so two users on one machine can't collide on ports or read each other's memory graph.
+
+### Fixed
+- **Daemon no longer crashes for a 2nd OS user** — when UDS is the primary transport (POSIX default), the daemon no longer binds the fixed TCP port (18764); the 2nd user previously died with `EADDRINUSE`. Honors an explicit `KONGCODE_DAEMON_PORT`; Windows keeps TCP as sole transport. (`src/daemon/index.ts`)
+- **Managed SurrealDB port is UID-derived** — `pickPort()` returns `18765 + getuid()%10000` (override via `KONGCODE_SURREAL_PORT`; Windows keeps flat 18765), so two users' managed instances don't collide on 18765. (`src/engine/bootstrap.ts`)
+
+### Added
+- **Cross-user ownership guard** — `findExistingKongcodeSurreal` resolves the OS owner UID of each fingerprinted SurrealDB (`/proc/net/tcp` → socket inode → PID → owner; `lsof`/`ps` fallback) and refuses to attach to one owned by another UID. Undetermined owner → conservative skip on managed-surface ports (unless we hold our own pid file), allow on external opt-in ports (8000/8042 — root-owned Docker / shared instances stay reachable). Non-POSIX: guard skipped (account-level isolation). Threat model: OS user B reading user A's private graph.
+- Legacy `18765` re-added to the discovery candidates (gated by the guard) so a pre-upgrade single-user install's data is still found after the UID-offset lands — no data loss on upgrade.
+
+### Tests
+- `test/multi-user-isolation.test.ts` (13) + `test/multi-user-guard-integration.test.ts` (9, against a live throwaway SurrealDB). Suite: **1049 passing**.
+
+### Roadmap
+- Phase 1 of the multi-user auth model (#13 + #16 auth-hardening). Next: per-user credentials (drop root:root), per-user namespaces, opt-in sharing, TLS.
+
 ## [0.7.102] — 2026-05-31
 
 Fix the `pending_work` drain wedge — a systemic UNIQUE-index collision that broke both fetch and commit.

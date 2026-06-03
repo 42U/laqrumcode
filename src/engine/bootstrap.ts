@@ -2,13 +2,15 @@ import {
   chmodSync,
   createWriteStream,
   existsSync,
+  readdirSync,
   readFileSync,
+  readlinkSync,
   statSync,
 } from "node:fs";
 import { mkdir, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { spawn, execFile, type ChildProcess } from "node:child_process";
+import { spawn, execFile, execFileSync, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { promisify } from "node:util";
 import { log } from "./log.js";
@@ -499,31 +501,244 @@ async function isKongcodeSurreal(
   }
 }
 
+/**
+ * Find the OS-user (UID) that owns the process LISTENING on a loopback TCP
+ * `port`, using only the Linux `/proc` filesystem.
+ *
+ * --- Threat model (GH #13) ---
+ * On a shared host, OS user B must never connect to OS user A's kongcode
+ * memory graph. The schema fingerprint (isKongcodeSurreal) confirms a port
+ * speaks "kongcode", but NOT *whose* kongcode it is. Without an owner check,
+ * if user A and user B collided on the same managed port (or A left a DB on
+ * the legacy 18765 that B probes), B would silently attach to A's SurrealDB
+ * and read/write A's private memory. This helper lets the caller verify the
+ * listener's UID == our UID before connecting, and skip otherwise.
+ *
+ * --- Algorithm (all reads relative to `procRoot`, default "/proc") ---
+ *  1. Parse `/proc/net/tcp` (+ `/proc/net/tcp6`) for rows in LISTEN state
+ *     (st == 0x0A) whose local address is loopback or wildcard on `port`.
+ *     Collect the socket inode (column 9). Addresses are little-endian hex;
+ *     we match 127.0.0.1 / 0.0.0.0 (v4) and ::1 / :: (v6) by comparing the
+ *     decoded port and accepting loopback-or-wildcard host.
+ *  2. For each `/proc/<pid>/fd/*` symlink, resolve the target. A socket fd
+ *     points at `socket:[<inode>]`. The first PID owning one of our inodes is
+ *     the listener.
+ *  3. The owner UID is that pid directory's owner — `statSync(/proc/<pid>).uid`
+ *     (kernel sets the dir owner to the process's real UID). We also fall back
+ *     to the `Uid:` line of `/proc/<pid>/status` if stat is unavailable.
+ *
+ * Returns the owner UID, or `null` if it cannot be determined (no /proc, no
+ * matching listener, permission denied scanning another user's fds, etc.).
+ * `null` is "unknown", NOT "ours" — callers must decide conservatively.
+ *
+ * `procRoot` is injected so tests can point at a fixture tree instead of the
+ * real kernel /proc (which can't be faked cross-platform / in CI).
+ */
+export function findListenerUidViaProc(port: number, procRoot = "/proc"): number | null {
+  const wantInodes = new Set<string>();
+  for (const file of ["net/tcp", "net/tcp6"]) {
+    let text: string;
+    try {
+      text = readFileSync(join(procRoot, file), "utf-8");
+    } catch {
+      continue; // tcp6 may be absent (IPv6 disabled); that's fine.
+    }
+    for (const line of text.split(/\r?\n/).slice(1)) {
+      // Columns: sl local_address rem_address st ... inode
+      const cols = line.trim().split(/\s+/);
+      if (cols.length < 10) continue;
+      const local = cols[1]; // "HHHHHHHH:PPPP" (hex, little-endian host)
+      const st = cols[3];
+      const inode = cols[9];
+      if (st !== "0A") continue; // 0x0A == TCP_LISTEN
+      const sep = local.lastIndexOf(":");
+      if (sep < 0) continue;
+      const hostHex = local.slice(0, sep);
+      const portHex = local.slice(sep + 1);
+      if (parseInt(portHex, 16) !== port) continue;
+      // Accept loopback or wildcard binds only (a daemon bound to a public
+      // address is not something we'd ever want to silently adopt anyway).
+      //   IPv4 (8 hex):  0100007F = 127.0.0.1 (per-word little-endian),
+      //                  00000000 = 0.0.0.0 (wildcard).
+      //   IPv6 (32 hex): 00000000000000000000000000000000 = :: (wildcard),
+      //                  00000000000000000000000001000000 = ::1 (loopback,
+      //                  last 32-bit word byte-swapped → 01000000).
+      const h = hostHex.toUpperCase();
+      const loopbackOrWildcard =
+        h === "0100007F" ||
+        h === "00000000" ||
+        h === "00000000000000000000000000000000" ||
+        h === "00000000000000000000000001000000";
+      if (loopbackOrWildcard && inode && inode !== "0") {
+        wantInodes.add(inode);
+      }
+    }
+  }
+  if (wantInodes.size === 0) return null;
+
+  const wantTargets = new Set(Array.from(wantInodes, (i) => `socket:[${i}]`));
+  let pids: string[];
+  try {
+    pids = readdirSync(procRoot).filter((n) => /^\d+$/.test(n));
+  } catch {
+    return null;
+  }
+  for (const pid of pids) {
+    const fdDir = join(procRoot, pid, "fd");
+    let fds: string[];
+    try {
+      fds = readdirSync(fdDir);
+    } catch {
+      continue; // EACCES scanning another user's fds, or process gone.
+    }
+    for (const fd of fds) {
+      let target: string;
+      try {
+        target = readlinkSync(join(fdDir, fd));
+      } catch {
+        continue;
+      }
+      if (wantTargets.has(target)) {
+        // Found the listener. Owner UID == owner of /proc/<pid>.
+        try {
+          return statSync(join(procRoot, pid)).uid;
+        } catch {
+          // Fall back to parsing the Uid: line of status.
+          try {
+            const status = readFileSync(join(procRoot, pid, "status"), "utf-8");
+            const m = status.match(/^Uid:\s+(\d+)/m);
+            if (m) return Number(m[1]);
+          } catch {
+            /* give up on this pid */
+          }
+          return null;
+        }
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * Best-effort owner-UID lookup for a loopback listener, POSIX only.
+ * Tries `/proc` first (cheap, no subprocess), then falls back to
+ * `lsof -t -iTCP@127.0.0.1:<port> -sTCP:LISTEN` + stat'ing the pid when /proc
+ * is unavailable (e.g. macOS, hardened mounts). Returns null when it cannot
+ * determine the owner or when getuid is unavailable (Windows — see caller).
+ */
+function findListenerUid(port: number): number | null {
+  if (typeof process.getuid !== "function") return null; // non-POSIX
+
+  // 1. /proc fast path.
+  if (existsSync("/proc/net/tcp")) {
+    const viaProc = findListenerUidViaProc(port, "/proc");
+    if (viaProc !== null) return viaProc;
+  }
+
+  // 2. lsof fallback (macOS / no-/proc POSIX). -t prints bare PIDs.
+  try {
+    const out = execFileSync(
+      "lsof",
+      ["-t", `-iTCP@127.0.0.1:${port}`, "-sTCP:LISTEN"],
+      { encoding: "utf-8", timeout: 2_000, stdio: ["ignore", "pipe", "ignore"] },
+    ).trim();
+    const pid = out.split(/\s+/).find((p) => /^\d+$/.test(p));
+    if (pid) {
+      // statSync of /proc may not exist here; stat the process via lsof'd pid
+      // is not directly possible without /proc, so on macOS we read the owner
+      // through `ps -o uid= -p <pid>`.
+      try {
+        const uidStr = execFileSync("ps", ["-o", "uid=", "-p", pid], {
+          encoding: "utf-8",
+          timeout: 2_000,
+          stdio: ["ignore", "pipe", "ignore"],
+        }).trim();
+        const uid = Number(uidStr);
+        if (Number.isFinite(uid)) return uid;
+      } catch {
+        /* ps unavailable */
+      }
+    }
+  } catch {
+    /* lsof unavailable or no listener */
+  }
+  return null;
+}
+
+/** Read our own SurrealDB pid file and return the live pid it points at, or
+ *  null if absent/stale. Extracted so both the reuse-pid logic and the
+ *  owner-guard "do we hold this port?" check share one source of truth. */
+function readLiveOwnSurrealPid(cacheDir: string): number | null {
+  try {
+    const raw = readFileSync(join(cacheDir, SURREAL_PID_FILENAME), "utf-8").trim();
+    const p = Number(raw);
+    if (!Number.isFinite(p) || p <= 0) return null;
+    try {
+      process.kill(p, 0); // existence probe; throws ESRCH if dead.
+      return p;
+    } catch {
+      return null; // stale pid file.
+    }
+  } catch {
+    return null; // no pid file.
+  }
+}
+
 /** Find an existing kongcode SurrealDB that the bootstrap should reuse instead
- *  of spawning a duplicate. Probes a list of candidate ports (bootstrap-managed,
- *  legacy 8000 from older Docker setups, alternate 8042 from older READMEs).
- *  For each port that responds, fingerprints the schema to confirm it's
- *  kongcode's — protecting users who run multiple SurrealDB instances for
- *  unrelated apps (e.g. trading) from accidental cross-connection.
+ *  of spawning a duplicate. Probes a list of candidate ports, fingerprints the
+ *  schema to confirm it's kongcode's, AND (GH #13) verifies the listening
+ *  process is owned by the current OS user before connecting.
+ *
+ *  --- Threat model (GH #13 cross-user data isolation) ---
+ *  The schema fingerprint proves a port speaks "kongcode" but not WHOSE. On a
+ *  shared host, OS user B must never attach to OS user A's SurrealDB and read
+ *  A's private memory graph. So for each fingerprinted port we resolve the
+ *  listener's UID (findListenerUid → /proc or lsof) and:
+ *    - UID determined and != getuid()  → SKIP (never connect; it's someone
+ *      else's daemon).
+ *    - UID determined and == getuid()  → safe to adopt.
+ *    - UID undetermined (no /proc, EACCES, lsof missing):
+ *        · managed/legacy-default ports (the UID-offset managed port + the
+ *          legacy 18765 single-user default): CONSERVATIVE — skip unless we
+ *          hold our own live SurrealDB pid file for it. These ports are the
+ *          ones a colliding 2nd user is most likely to hit.
+ *        · explicit external shared-infra ports (8000 / 8042): ALLOW (current
+ *          behavior preserved). The user deliberately runs shared SurrealDB on
+ *          those historical ports; the fingerprint + opt-in nature is the
+ *          contract there.
+ *  On non-POSIX (no getuid) the guard is skipped entirely: Windows users are
+ *  isolated by separate accounts/sessions and loopback ACLs, not by this
+ *  /proc-based check, so we keep the legacy allow behavior there.
  *
  *  Returns the first match. SURREAL_URL env var still takes precedence in the
  *  parent caller — this function only runs when the user hasn't pinned a URL. */
-async function findExistingKongcodeSurreal(
+export async function findExistingKongcodeSurreal(
   cacheDir: string,
   managedPort: number,
   user: string,
   pass: string,
+  // Test seam (GH #13): the owner-UID resolver is injected so the cross-user
+  // owner guard can be exercised against a synthetic foreign uid without
+  // requiring a second OS account. Defaults to the real /proc+lsof resolver,
+  // so the production call site (4 args) is unchanged. Mirrors the procRoot
+  // injection already used by findListenerUidViaProc.
+  resolveOwnerUid: (port: number) => number | null = findListenerUid,
 ): Promise<{ url: string; pid: number | null; port: number } | null> {
-  // Dedup'd candidate list. Order is load-bearing: legacy ports (8000 from
-  // Docker setups, alternate 8042 from older READMEs) come BEFORE the
-  // bootstrap-managed default. Reasoning: a user who's been running kongcode
-  // pre-0.6 has their canonical data on the legacy port; a managed instance
-  // on 18765 is either today's accidentally-spawned duplicate (small,
-  // disposable) or empty. Always prefer the user's pre-existing data.
-  // The fingerprint check (isKongcodeSurreal) ensures we only pick a port
-  // that actually has kongcode tables — empty/wrong-app SurrealDBs are
-  // rejected and we fall through to the next candidate.
-  const candidates = Array.from(new Set([8000, 8042, managedPort]));
+  // Dedup'd candidate list. Order is load-bearing: legacy external ports (8000
+  // from Docker setups, alternate 8042 from older READMEs) come first; then
+  // the UID-offset bootstrap-managed port for this user; then the legacy
+  // single-user managed default 18765 so an install that predates the GH #13
+  // UID-offset (its data sits on the flat 18765) is still discovered after
+  // upgrade. The legacy 18765 is gated by the owner guard below, so a 2nd user
+  // can't adopt the 1st user's flat-18765 instance.
+  const candidates = Array.from(
+    new Set([8000, 8042, managedPort, LEGACY_MANAGED_SURREAL_PORT]),
+  );
+  // Ports we treat as "our managed surface" for the conservative owner-guard
+  // branch (skip-on-unknown-owner). External shared-infra ports keep allow.
+  const managedSurfacePorts = new Set([managedPort, LEGACY_MANAGED_SURREAL_PORT]);
+  const ourLivePid = readLiveOwnSurrealPid(cacheDir);
+  const ourUid = typeof process.getuid === "function" ? process.getuid() : null;
 
   for (const port of candidates) {
     // Cheap alive-check first to avoid burning the 3s isKongcodeSurreal
@@ -543,31 +758,37 @@ async function findExistingKongcodeSurreal(
       continue;
     }
 
-    // If this is the bootstrap-managed port and we have a pid file, the
-    // returned pid lets us track the surviving detached child. For
-    // non-managed ports (8000, 8042), the user owns the process — pid stays
-    // null and shutdown handlers leave it alone.
-    let pid: number | null = null;
-    if (port === managedPort) {
-      try {
-        const raw = readFileSync(join(cacheDir, SURREAL_PID_FILENAME), "utf-8").trim();
-        const p = Number(raw);
-        if (Number.isFinite(p) && p > 0) {
-          // Verify the PID still owns a process — stale pid file from an
-          // ungracefully terminated surreal would otherwise confuse shutdown.
-          try {
-            process.kill(p, 0);
-            pid = p;
-          } catch {
-            // pid file points at a dead process; the responding instance
-            // is something else (race condition, port reuse). Still
-            // legitimate kongcode (we fingerprinted), just not ours.
-          }
-        }
-      } catch {
-        // No pid file is fine — surreal might have been started by an
-        // unrelated process (Docker, brew services, manual launch).
+    // GH #13 owner guard. Only enforced on POSIX (ourUid !== null).
+    if (ourUid !== null) {
+      const ownerUid = resolveOwnerUid(port);
+      if (ownerUid !== null && ownerUid !== ourUid) {
+        log.warn(
+          `[bootstrap] port ${port} hosts a kongcode DB owned by uid ${ownerUid} ` +
+            `(we are uid ${ourUid}) — refusing to connect to another user's graph (GH #13).`,
+        );
+        continue;
       }
+      if (ownerUid === null && managedSurfacePorts.has(port)) {
+        // Owner unknown on one of our managed-surface ports. Be conservative:
+        // only adopt it if we hold a live pid file for our own managed surreal.
+        if (ourLivePid === null) {
+          log.warn(
+            `[bootstrap] port ${port} hosts a kongcode DB but its owner UID could ` +
+              `not be determined and we hold no pid file for it — skipping to avoid ` +
+              `cross-user attach (GH #13).`,
+          );
+          continue;
+        }
+      }
+    }
+
+    // If this is one of our managed-surface ports and we have a live pid file,
+    // the returned pid lets us track the surviving detached child. For external
+    // ports (8000, 8042) the user owns the process — pid stays null and
+    // shutdown handlers leave it alone.
+    let pid: number | null = null;
+    if (managedSurfacePorts.has(port)) {
+      pid = ourLivePid;
     }
 
     log.info(
@@ -653,9 +874,30 @@ function loadManifest(pluginDir: string): Manifest {
   return JSON.parse(readFileSync(path, "utf-8"));
 }
 
-function pickPort(): number {
+/** The historical single-user managed SurrealDB port. Kept as a named constant
+ *  because it's also the legacy candidate that {@link findExistingKongcodeSurreal}
+ *  must probe (gated by the owner guard) so an upgrading single-user install's
+ *  data is still discovered. */
+export const LEGACY_MANAGED_SURREAL_PORT = 18765;
+
+/** Pick the port for the bootstrap-managed SurrealDB.
+ *
+ *  GH #13 (multi-user port collision): on a shared host, every OS user's
+ *  bootstrap previously hardcoded 18765, so the 2nd user's managed SurrealDB
+ *  collided with the 1st user's. We derive a per-user port by offsetting with
+ *  the caller's UID (mod 10000 to stay in a sane range). Two different users
+ *  almost never land on the same port; even if they did, the process-owner
+ *  guard in findExistingKongcodeSurreal prevents cross-user adoption.
+ *
+ *  - KONGCODE_SURREAL_PORT override always wins (explicit operator intent).
+ *  - POSIX: 18765 + (getuid() % 10000).
+ *  - Windows / no getuid: falls back to the legacy 18765 (Windows users are
+ *    OS-isolated by separate accounts/sessions, not by port). */
+export function pickPort(): number {
   const env = Number(process.env.KONGCODE_SURREAL_PORT);
-  return Number.isFinite(env) && env > 0 ? env : 18765;
+  if (Number.isFinite(env) && env > 0) return env;
+  const uid = typeof process.getuid === "function" ? process.getuid() : null;
+  return uid === null ? LEGACY_MANAGED_SURREAL_PORT : LEGACY_MANAGED_SURREAL_PORT + (uid % 10000);
 }
 
 /**

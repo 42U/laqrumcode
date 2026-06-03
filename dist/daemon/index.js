@@ -568,10 +568,18 @@ async function main() {
     acquireDaemonSingletonLock();
     // Resolve socket / port from env with sensible defaults.
     const socketPath = process.env.KONGCODE_DAEMON_SOCKET ?? DEFAULT_DAEMON_SOCKET_PATH;
-    const tcpPortEnv = process.env.KONGCODE_DAEMON_PORT;
-    const tcpPort = tcpPortEnv ? Number(tcpPortEnv) : DEFAULT_DAEMON_TCP_PORT;
     // Disable Unix socket if explicitly told to (Windows or paranoid setups).
     const useUds = process.env.KONGCODE_DAEMON_TRANSPORT !== "tcp" && process.platform !== "win32";
+    // GH #13 (multi-user port collision): when UDS is the primary transport, do
+    // NOT also bind a fixed TCP port. The Unix socket already lives at a
+    // per-user path ($HOME/.kongcode-daemon.sock), giving each OS user their own
+    // daemon endpoint. Binding the shared, hardcoded DEFAULT_DAEMON_TCP_PORT
+    // (127.0.0.1:18764) on top of that made the 2nd OS user's daemon crash with
+    // EADDRINUSE. An explicit KONGCODE_DAEMON_PORT still forces a TCP bind (opt-in,
+    // e.g. for clients that can only speak TCP). On Windows useUds is false, so
+    // TCP remains the sole transport and the default port is used.
+    const tcpPortEnv = process.env.KONGCODE_DAEMON_PORT;
+    const tcpPort = tcpPortEnv ? Number(tcpPortEnv) : (useUds ? null : DEFAULT_DAEMON_TCP_PORT);
     // Idle reaper config: 6s default (per user direction — anything longer
     // mostly just holds RAM for nobody). The only real value of staying
     // alive past the last disconnect is absorbing a fast close-and-reopen,
@@ -629,7 +637,7 @@ async function main() {
     const reaperExit = (reason) => () => { gracefulCleanup(reason); };
     const server = new DaemonServer({
         socketPath: useUds ? socketPath : null,
-        tcpPort: Number.isFinite(tcpPort) && tcpPort > 0 ? tcpPort : null,
+        tcpPort: typeof tcpPort === "number" && Number.isFinite(tcpPort) && tcpPort > 0 ? tcpPort : null,
         log: {
             info: (m) => log.info(m),
             warn: (m) => log.warn(m),

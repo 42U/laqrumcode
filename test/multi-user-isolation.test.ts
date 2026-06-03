@@ -1,0 +1,195 @@
+/**
+ * GH #13 — industry-grade OS-user isolation (Phase 1).
+ *
+ * Covers the two pure/POSIX-deterministic units of the fix:
+ *   1. pickPort() — UID-offset managed SurrealDB port, env override, and the
+ *      no-getuid (Windows) fallback to the legacy flat port.
+ *   2. findListenerUidViaProc() — the /proc-based owner lookup that the runtime
+ *      owner guard uses to refuse attaching to another OS user's graph. Driven
+ *      against an injected fixture /proc tree so it runs cross-platform in CI
+ *      (the real kernel /proc can't be faked, hence the procRoot injection).
+ *
+ * The higher-level findExistingKongcodeSurreal owner-guard branching is exercised
+ * indirectly here via its two building blocks; the network-fingerprint half is
+ * already covered by bootstrap reuse behavior and needs a live SurrealDB.
+ */
+
+import { describe, it, expect, afterEach, vi } from "vitest";
+import { mkdirSync, rmSync, writeFileSync, symlinkSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { pickPort, findListenerUidViaProc, LEGACY_MANAGED_SURREAL_PORT } from "../src/engine/bootstrap.js";
+
+function makeTmpDir(label: string): string {
+  const dir = join(tmpdir(), `kc-mui-${label}-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+  mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+// Build one row of /proc/net/tcp. local is "HEXHOST:HEXPORT" little-endian.
+function tcpRow(slot: number, localHost: string, port: number, st: string, inode: string): string {
+  const portHex = port.toString(16).toUpperCase().padStart(4, "0");
+  const local = `${localHost}:${portHex}`;
+  // sl local rem st tx:rx tr:when retr uid timeout inode ...
+  return `   ${slot}: ${local} 00000000:0000 ${st} 00000000:00000000 00:00000000 00000000  1000        0 ${inode} 1 0000 ...`;
+}
+
+describe("pickPort (GH #13 UID-offset managed port)", () => {
+  const origPort = process.env.KONGCODE_SURREAL_PORT;
+
+  afterEach(() => {
+    if (origPort === undefined) delete process.env.KONGCODE_SURREAL_PORT;
+    else process.env.KONGCODE_SURREAL_PORT = origPort;
+    vi.restoreAllMocks();
+  });
+
+  it("KONGCODE_SURREAL_PORT override always wins", () => {
+    process.env.KONGCODE_SURREAL_PORT = "29999";
+    expect(pickPort()).toBe(29999);
+  });
+
+  it("offsets the legacy base port by getuid() % 10000", () => {
+    delete process.env.KONGCODE_SURREAL_PORT;
+    vi.spyOn(process, "getuid").mockReturnValue(1234);
+    expect(pickPort()).toBe(LEGACY_MANAGED_SURREAL_PORT + 1234);
+  });
+
+  it("wraps the UID offset with mod 10000 to stay in range", () => {
+    delete process.env.KONGCODE_SURREAL_PORT;
+    vi.spyOn(process, "getuid").mockReturnValue(412345); // 412345 % 10000 = 2345
+    expect(pickPort()).toBe(LEGACY_MANAGED_SURREAL_PORT + 2345);
+  });
+
+  it("two distinct UIDs get distinct ports (collision avoidance)", () => {
+    delete process.env.KONGCODE_SURREAL_PORT;
+    const spy = vi.spyOn(process, "getuid");
+    spy.mockReturnValue(1000);
+    const a = pickPort();
+    spy.mockReturnValue(1001);
+    const b = pickPort();
+    expect(a).not.toBe(b);
+  });
+
+  it("falls back to the legacy flat port when getuid is unavailable (Windows)", () => {
+    delete process.env.KONGCODE_SURREAL_PORT;
+    // Simulate non-POSIX: process.getuid does not exist.
+    vi.spyOn(process, "getuid").mockReturnValue(undefined as unknown as number);
+    // The implementation checks `typeof process.getuid === "function"`; a mock
+    // is still a function, so to truly exercise the Windows path we delete it.
+    const orig = process.getuid;
+    // @ts-expect-error — intentionally removing for the non-POSIX simulation.
+    delete process.getuid;
+    try {
+      expect(pickPort()).toBe(LEGACY_MANAGED_SURREAL_PORT);
+    } finally {
+      process.getuid = orig;
+    }
+  });
+});
+
+describe("findListenerUidViaProc (GH #13 owner guard)", () => {
+  let root: string;
+
+  afterEach(() => {
+    if (root) rmSync(root, { recursive: true, force: true });
+  });
+
+  // Lay down a fixture /proc: net/tcp with a LISTEN row on `port` -> `inode`,
+  // and /proc/<pid>/fd/<fd> -> socket:[<inode>], owned (by virtue of the temp
+  // dir) by the current test user. statSync(.../<pid>).uid therefore equals the
+  // real getuid() of the test runner.
+  function layout(opts: {
+    port: number;
+    inode: string;
+    listenHost?: string; // default IPv4 loopback (little-endian 127.0.0.1)
+    pid?: number;
+    linkInode?: string; // inode the fd actually points at (default = inode)
+    state?: string; // tcp state hex (default 0A = LISTEN)
+    statusUid?: number; // if set, also writes a status file with this Uid line
+  }): { procRoot: string; pid: number } {
+    root = makeTmpDir(`proc-${opts.port}`);
+    const procRoot = join(root, "proc");
+    mkdirSync(join(procRoot, "net"), { recursive: true });
+    const host = opts.listenHost ?? "0100007F"; // 127.0.0.1
+    const st = opts.state ?? "0A";
+    writeFileSync(
+      join(procRoot, "net", "tcp"),
+      "  sl  local_address rem_address   st ...\n" +
+        tcpRow(0, host, opts.port, st, opts.inode) + "\n",
+    );
+    const pid = opts.pid ?? 4242;
+    const fdDir = join(procRoot, String(pid), "fd");
+    mkdirSync(fdDir, { recursive: true });
+    // A non-socket fd (a real file) plus the socket symlink, to prove we skip
+    // non-socket fds and match the right inode.
+    const realFile = join(root, "somefile");
+    writeFileSync(realFile, "x");
+    symlinkSync(realFile, join(fdDir, "0"));
+    symlinkSync(`socket:[${opts.linkInode ?? opts.inode}]`, join(fdDir, "7"));
+    if (opts.statusUid !== undefined) {
+      writeFileSync(
+        join(procRoot, String(pid), "status"),
+        `Name:\tsurreal\nUid:\t${opts.statusUid}\t${opts.statusUid}\t${opts.statusUid}\t${opts.statusUid}\n`,
+      );
+    }
+    return { procRoot, pid };
+  }
+
+  it("resolves the owner UID of the LISTEN socket on the port", () => {
+    const { procRoot } = layout({ port: 18765, inode: "987654" });
+    const uid = findListenerUidViaProc(18765, procRoot);
+    // Owner of the pid dir is whoever created the temp tree == the test runner.
+    expect(uid).toBe(typeof process.getuid === "function" ? process.getuid() : null);
+    expect(uid).not.toBeNull();
+  });
+
+  it("matches IPv6 loopback (::1) rows in net/tcp6", () => {
+    root = makeTmpDir("proc-v6");
+    const procRoot = join(root, "proc");
+    mkdirSync(join(procRoot, "net"), { recursive: true });
+    const inode = "55501";
+    // ::1 in /proc/net/tcp6 is stored as 00000000000000000000000001000000.
+    writeFileSync(
+      join(procRoot, "net", "tcp6"),
+      "  sl  local_address ... st ... inode\n" +
+        tcpRow(0, "00000000000000000000000001000000", 18790, "0A", inode) + "\n",
+    );
+    const fdDir = join(procRoot, "9001", "fd");
+    mkdirSync(fdDir, { recursive: true });
+    symlinkSync(`socket:[${inode}]`, join(fdDir, "3"));
+    const uid = findListenerUidViaProc(18790, procRoot);
+    expect(uid).toBe(typeof process.getuid === "function" ? process.getuid() : null);
+  });
+
+  it("returns null when no LISTEN socket matches the port (nothing to adopt)", () => {
+    const { procRoot } = layout({ port: 18765, inode: "111" });
+    expect(findListenerUidViaProc(29999, procRoot)).toBeNull();
+  });
+
+  it("ignores non-LISTEN sockets (e.g. ESTABLISHED on the same port)", () => {
+    // st = 01 (ESTABLISHED) must not be treated as a listener.
+    const { procRoot } = layout({ port: 18765, inode: "222", state: "01" });
+    expect(findListenerUidViaProc(18765, procRoot)).toBeNull();
+  });
+
+  it("ignores non-loopback / public binds", () => {
+    // 0101A8C0 == 192.168.1.1 little-endian — not loopback or wildcard.
+    const { procRoot } = layout({ port: 18765, inode: "333", listenHost: "0101A8C0" });
+    expect(findListenerUidViaProc(18765, procRoot)).toBeNull();
+  });
+
+  it("matches a wildcard (0.0.0.0) bind", () => {
+    const { procRoot } = layout({ port: 18765, inode: "444", listenHost: "00000000" });
+    expect(findListenerUidViaProc(18765, procRoot)).not.toBeNull();
+  });
+
+  it("returns null when the matching inode has no owning fd (orphan inode)", () => {
+    // Listener row references inode 999 but the fd points at a different inode.
+    const { procRoot } = layout({ port: 18765, inode: "999", linkInode: "1000" });
+    expect(findListenerUidViaProc(18765, procRoot)).toBeNull();
+  });
+
+  it("returns null when /proc is entirely absent", () => {
+    expect(findListenerUidViaProc(18765, join(tmpdir(), "definitely-not-proc-xyz"))).toBeNull();
+  });
+});
