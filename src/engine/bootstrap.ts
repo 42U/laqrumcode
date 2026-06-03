@@ -776,8 +776,15 @@ function findListenerUid(port: number): number | null {
           timeout: 2_000,
           stdio: ["ignore", "pipe", "ignore"],
         }).trim();
-        const uid = Number(uidStr);
-        if (Number.isFinite(uid)) return uid;
+        // Guard: Number("") === 0 (finite), so an empty or non-numeric `ps`
+        // result would mis-resolve to uid 0 (root) and could wrongly accept or
+        // reject a port. Require a pure digit string before trusting it; else
+        // fall through to null ("owner unknown") and let the caller be
+        // conservative.
+        if (/^\d+$/.test(uidStr)) {
+          const uid = Number(uidStr);
+          if (Number.isFinite(uid)) return uid;
+        }
       } catch {
         /* ps unavailable */
       }

@@ -542,7 +542,7 @@ async function queryOldestPending(
 ): Promise<{ oldestMs: number | null; oldestRaw: string | null }> {
   const rows = await store.queryFirst<{ created_at: unknown }>(
     `SELECT created_at FROM pending_work
-     WHERE status = "pending"${extraWhere ? " AND " + extraWhere : ""}
+     WHERE status = "pending" AND (active = true OR active IS NONE)${extraWhere ? " AND " + extraWhere : ""}
      ORDER BY created_at ASC LIMIT 1`,
   );
   const r = (rows as { created_at: unknown }[])[0];
@@ -558,7 +558,7 @@ async function detectPendingWorkBuildup(store: SurrealStore): Promise<AnomalyFla
   // Count + oldest are split into two queries because `math::min(datetime)`
   // is broken in SurrealDB 3.x — see queryOldestPending() comment.
   const countRows = await store.queryFirst<{ n: number }>(
-    `SELECT count() AS n FROM pending_work WHERE status = "pending" GROUP ALL`,
+    `SELECT count() AS n FROM pending_work WHERE status = "pending" AND (active = true OR active IS NONE) GROUP ALL`,
   );
   const c = (countRows as { n: number }[])[0];
   if (!c || c.n < 50) return null;
@@ -592,7 +592,7 @@ async function detectPendingWorkAging(store: SurrealStore): Promise<AnomalyFlag 
   // `math::min(datetime)` returns Infinity in SurrealDB 3.x.
   const countRows = await store.queryFirst<{ n: number }>(
     `SELECT count() AS n FROM pending_work
-     WHERE status = "pending" AND created_at < time::now() - 5d GROUP ALL`,
+     WHERE status = "pending" AND (active = true OR active IS NONE) AND created_at < time::now() - 5d GROUP ALL`,
   );
   const c = (countRows as { n: number }[])[0];
   if (!c || c.n === 0) return null;

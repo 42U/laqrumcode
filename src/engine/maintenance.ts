@@ -551,13 +551,22 @@ async function purgeStaleEmbedCache(state: GlobalPluginState): Promise<void> {
     // on rows >30d, now soft-tag via pruned_at + prune_reason. l2Get filters
     // `pruned_at IS NONE` so stale cache entries are inert but recallable.
     // Schema fields added at schema.surql for embedding_cache.
-    await state.store.queryExec(
-      `UPDATE embedding_cache SET
-         pruned_at = time::now(),
-         prune_reason = "stale_30d"
-       WHERE created_at < time::now() - 30d
-         AND pruned_at IS NONE
-       LIMIT 500`,
+    // GH #17: SurrealDB rejects `LIMIT` on UPDATE ("Unexpected token 'LIMIT'"),
+    // so the old single-UPDATE form threw on every run and this prune was a
+    // silent no-op (embedding_cache grew unbounded). Use the proven LET+FOR
+    // pattern (mirrors purgeStalePendingWork) — LIMIT is valid on the SELECT, so
+    // the 500-row batch cap is preserved. Soft-tag via pruned_at; l2Get filters
+    // `pruned_at IS NONE`.
+    await state.store.queryMulti(
+      `LET $stale = (SELECT id FROM embedding_cache
+         WHERE created_at < time::now() - 30d
+           AND pruned_at IS NONE
+         LIMIT 500);
+       FOR $row IN $stale {
+         UPDATE $row.id SET
+           pruned_at = time::now(),
+           prune_reason = "stale_30d";
+       };`,
     );
   } catch (e) {
     swallow.warn("maintenance:purgeEmbedCache", e);

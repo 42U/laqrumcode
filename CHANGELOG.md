@@ -4,6 +4,18 @@ All notable changes to KongCode are documented here. The 0.7.x series introduced
 
 ## [Unreleased]
 
+## [0.7.106] — 2026-06-03
+
+Quick-fix batch (low-risk, no data-model change).
+
+### Fixed
+- **GH #17 — `embedding_cache` prune was a silent no-op** — `purgeStaleEmbedCache` put `LIMIT` on an `UPDATE`, which SurrealDB rejects (`Unexpected token 'LIMIT'`), so the 30-day prune threw on every run and `embedding_cache` grew unbounded. Rewritten with the proven `LET $stale = (SELECT id … LIMIT 500); FOR … UPDATE $row.id` pattern (LIMIT on the SELECT, batch cap preserved). Mechanism + fix confirmed live.
+- **Cross-user owner guard: macOS `ps` fallback** — `findListenerUid` now validates the `ps -o uid=` output with `/^\d+$/` before `Number()`; previously empty/non-numeric output coerced to `Number("")===0` and could mis-resolve to uid 0 (root). Defense-in-depth on the GH #13 guard.
+- **False `pending_work` aging/buildup alerts** — `detectPendingWorkAging`, `detectPendingWorkBuildup`, and `queryOldestPending` now filter `(active = true OR active IS NONE)`, matching `fetch_pending_work`'s claim filter, so soft-archived (already-purged) rows no longer trigger spurious "drain now" alarms.
+
+### Tests
+- `test/maintenance-queries.test.ts` (2) — runs the #17 prune query against a live throwaway DB (would have caught the parse error) + asserts the aging count excludes soft-archived rows. Suite: **1066 passing**. A repo-wide `LIMIT`-on-`UPDATE`/`DELETE` sweep found no other occurrences.
+
 ## [0.7.105] — 2026-06-03
 
 Multi-user auth — Phase 2 of 5: per-user credentials for managed SurrealDB instances.
