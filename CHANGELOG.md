@@ -4,6 +4,20 @@ All notable changes to KongCode are documented here. The 0.7.x series introduced
 
 ## [Unreleased]
 
+## [0.7.113] — 2026-06-04
+
+Selective forget — reversible privacy controls (GH #16 item 2, Phase A).
+
+### Added
+- **`scripts/forget.mjs` + `kongcode-forget` skill** — selectively and reversibly forget stored content for privacy/declutter. Honors the D4 founder rule ("nothing should be deleted"): **nothing is DELETEd** — matching `memory` (→ `status='archived'`) and `concept` (→ `superseded_at` set) rows are soft-deactivated with `archive_reason='forget:…'`, so they stop surfacing in retrieval *immediately* (the live retrieval candidate query already filters those flags — no hot-path change) while the rows survive for forensic recovery. Selectors: `--query "<substr>"` (case-insensitive) and `--before <ISO-date>`, on `memory` + `concept`. **Dry-run by default** (prints match counts + samples); `--commit` applies; `--undo --commit` reactivates everything this tool forgot — scoped strictly to `forget:`-tagged rows (verified by a live probe not to disturb genuine supersedes or GC-archived rows).
+
+### Tests
+- `test/forget.test.ts` (4, live `kong_test`-isolated) — dry-run no-op, soft-forget with the production retrieval filter then excluding the forgotten rows (and keeping the benign), rows-still-exist (D4), and `--undo` reactivation. Independently QA-reviewed (D4-no-delete, dry-run-default safety, live undo-scoping probe, production-graph-untouched before/after diff) — CLEAN. Suite: **1108 passing**.
+
+### Known follow-ups
+- A `--max` count cap / confirmation prompt for a deliberately-broad `--query` (currently mitigated by dry-run-default + samples + full reversibility).
+- `--project` / `--session` edge-scoped selectors; never-remember redaction at ingestion (`privacy.json`).
+
 ## [0.7.112] — 2026-06-04
 
 Explicit retrieval feedback (GH #16 item 5, Phase A) + opt-in GPU pinning.
