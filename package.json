@@ -1,6 +1,6 @@
 {
   "name": "kongcode",
-  "version": "0.7.110",
+  "version": "0.7.111",
   "description": "Graph-backed persistent memory engine for Claude Code. SurrealDB + BGE-M3 vector embeddings that learn across sessions.",
   "type": "module",
   "license": "MIT",
@@ -35,7 +35,8 @@
     "url": "https://github.com/voidorigin/kongcode/issues"
   },
   "scripts": {
-    "build": "tsc && cp src/engine/schema.surql dist/engine/schema.surql",
+    "build": "tsc && cp src/engine/schema.surql dist/engine/schema.surql && npm run build:ui",
+    "build:ui": "vite build -c ui/vite.config.ts",
     "bundle": "npm run build && esbuild src/mcp-server.ts --bundle --platform=node --target=node20 --format=cjs --outfile=dist/mcp-server.bundle.cjs --external:node-llama-cpp --external:@node-llama-cpp/*",
     "bundle:daemon": "node scripts/bundle-daemon.mjs",
     "bundle:mcp": "npm run build && esbuild src/mcp-client/index.ts --bundle --platform=node --target=node20 --format=cjs --outfile=dist/mcp-client/bundle.cjs --external:ajv --external:ajv-formats",
@@ -57,9 +58,13 @@
     "surrealdb": "^2.0.3"
   },
   "devDependencies": {
+    "@preact/preset-vite": "^2.10.5",
     "@types/node": "^22.0.0",
+    "cytoscape": "^3.34.0",
     "esbuild": "^0.28.0",
+    "preact": "^10.29.2",
     "typescript": "^5.7.0",
+    "vite": "^7.3.5",
     "vitest": "^3.2.4"
   },
   "files": [

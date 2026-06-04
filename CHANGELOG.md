@@ -4,6 +4,21 @@ All notable changes to KongCode are documented here. The 0.7.x series introduced
 
 ## [Unreleased]
 
+## [0.7.111] — 2026-06-03
+
+Read-only **web UI** for the memory graph (GH #15, v1).
+
+### Added
+- **Local web UI** — a read-only browser view of the kongcode graph, served by the daemon on a dedicated loopback TCP port (`28900 + uid%10000`; `KONGCODE_UI_PORT` to override; never binds beyond `127.0.0.1`). Launch with `node scripts/open-ui.mjs` (also the `kongcode-web-ui` skill): it reads the daemon's auth token and opens `/ui/auth?token=…`, which sets an `HttpOnly; SameSite=Strict` cookie so the token never lingers in the URL bar. Four views (Preact + Vite, fully bundled/offline, no CDN): **Dashboard** (per-table counts + embedding coverage + daemon uptime), **Memory browser** and **Concept browser** (search + paginate + click-to-inspect; embeddings are never sent to the browser), and an interactive **Graph explorer** (Cytoscape; click a concept node to expand its `related_to`/`broader`/`narrower` neighborhood).
+- New `src/ui-server.ts`: the loopback server + read-only `/api/ui/*` endpoints (dashboard, memories, concepts, graph, node-detail) wrapping `SurrealStore` SELECTs. Auth reuses the hook API's bearer secret (`timingSafeEqual`); every route is gated except the one-time `/ui/auth` cookie mint; non-GET → 405; static serving is path-traversal-guarded. Wired into `startHttpApi`/`stopHttpApi` (EADDRINUSE-tolerant; inert until `dist/ui/` exists). **No write path exists** — the browser cannot mutate the graph.
+- `vite`/`preact`/`cytoscape` are build-time **devDependencies** only; the daemon serves the pre-built `dist/ui/` bundle as static bytes and never imports them at runtime. `build:ui` is folded into `npm run build`.
+
+### Tests
+- `test/ui-server.test.ts` (6, live `kong_test`-isolated) — dashboard counts/coverage, concept list + search (+ no embedding leak), case-insensitive memory search, graph neighborhood (edge + endpoint nodes), node-detail (embedding stripped), and allowlist rejection. The `beforeAll` races a 10s probe so CI's no-DB env skips cleanly (~11s, no hook timeout). Suite: **1090 passing**. Independently QA-reviewed (security surface: loopback-only bind, auth completeness, read-only enforcement, path-traversal, token handling) — CLEAN.
+
+### Notes
+- v1 is read-only by design; write surfaces (inline edit/deactivate, core-directives manager) and the retrieval-debugger views from #15 are later increments. Multi-user / remote access remains out of scope (→ 0.8.0).
+
 ## [0.7.110] — 2026-06-03
 
 CI recovery for v0.7.109 (test-only; the import/restore feature is unchanged).

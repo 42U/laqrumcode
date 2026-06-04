@@ -15,6 +15,7 @@ import { dirname, join, resolve as resolvePath } from "node:path";
 import { platform } from "node:os";
 import type { GlobalPluginState } from "./engine/state.js";
 import { log } from "./engine/log.js";
+import { startUiServer, stopUiServer } from "./ui-server.js";
 
 let server: HttpServer | null = null;
 let socketPath: string | null = null;
@@ -601,6 +602,13 @@ export async function startHttpApi(
   }, HEALTH_REFRESH_INTERVAL_MS);
   healthRefreshTimer.unref?.();
 
+  // Read-only web UI (GH #15): a dedicated 127.0.0.1 TCP listener, since the
+  // hook HTTP API below is UDS-only and a browser can't reach it. Never fatal
+  // to daemon startup; inert until the frontend bundle (dist/ui/) exists.
+  await startUiServer(state, authToken!).catch((e) => {
+    log.warn(`[http-api] UI server start failed (non-fatal): ${(e as Error).message}`);
+  });
+
   if (sock) {
     // Sweep sibling sockets whose owning MCP process is dead. Uses
     // ESRCH-only detection so a foreign-owned (EPERM) PID is left alone.
@@ -649,6 +657,7 @@ export async function startHttpApi(
 
 /** Stop the internal HTTP API and clean up socket/port files. */
 export async function stopHttpApi(): Promise<void> {
+  await stopUiServer();
   if (healthRefreshTimer) {
     clearInterval(healthRefreshTimer);
     healthRefreshTimer = null;
