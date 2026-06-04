@@ -4,6 +4,17 @@ All notable changes to KongCode are documented here. The 0.7.x series introduced
 
 ## [Unreleased]
 
+## [0.7.112] — 2026-06-04
+
+Explicit retrieval feedback (GH #16 item 5, Phase A) + opt-in GPU pinning.
+
+### Added
+- **`record_retrieval_feedback` MCP tool** — the agent records explicit feedback on an injected memory or concept (the highest-signal retrieval training data). Signals: `helpful`/`irrelevant`/`outdated` UPDATE the current session's `retrieval_outcome` row(s) for that item (set `llm_relevance`/`llm_relevant`/`llm_reason`/`feedback_source='explicit'`) — and since ACAN training already prefers `llm_relevance` over the implicit cross-encoder utilization (`acan.ts`), this relabels the training sample with **no `acan.ts` change**. `outdated` also decays the table-appropriate priority field (memory→`importance`, concept→`stability`) and hints `supersede`; `pin` boosts it. Record ids are bound via `type::record($table,$id)` (no injection); the relabel uses `RETURN id` so the 1024-dim `query_embedding` never leaves the DB. New `feedback_source` field on `retrieval_outcome`. (`mute` is a later increment — it touches the hot retrieval path.)
+- **Opt-in GPU pinning (`src/daemon/gpu-pin.ts`)** — pin *only* the kongcode daemon's node-llama-cpp CUDA context to specific GPU(s) without forcing other CUDA apps onto them (e.g. keep a training GPU free). `node-llama-cpp`'s `getLlama({gpu})` picks the backend, not a device, so by default it grabs **all** CUDA GPUs. Set `KONGCODE_CUDA_VISIBLE_DEVICES` (or write a GPU UUID to `~/.kongcode/cuda-visible-devices` — handy to re-pin a running daemon) and the daemon applies it at startup before CUDA init, also defaulting `CUDA_DEVICE_ORDER=PCI_BUS_ID`. **Strictly opt-in — a no-op by default**, so single-GPU and CPU-only setups are unaffected; an already-set `CUDA_VISIBLE_DEVICES` is left untouched. Documented under README → Configuration → "GPU selection".
+
+### Tests
+- `test/record-retrieval-feedback.test.ts` (7, live `kong_test`-isolated) + `test/gpu-pin.test.ts` (7, pure — no DB/GPU, CI-safe). Both independently QA-reviewed (the feedback tool's live IPC dispatch + SQL-injection safety; the GPU pin's no-op-by-default safety + live single-GPU placement). Suite: **1104 passing**.
+
 ## [0.7.111] — 2026-06-03
 
 Read-only **web UI** for the memory graph (GH #15, v1).

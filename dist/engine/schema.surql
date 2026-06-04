@@ -286,6 +286,9 @@ DEFINE FIELD IF NOT EXISTS context_tokens ON retrieval_outcome TYPE int DEFAULT 
 DEFINE FIELD IF NOT EXISTS was_neighbor ON retrieval_outcome TYPE bool DEFAULT false;
 DEFINE FIELD IF NOT EXISTS query_embedding ON retrieval_outcome TYPE option<array<float>>;
 DEFINE FIELD IF NOT EXISTS llm_relevance ON retrieval_outcome TYPE option<float>;
+-- Explicit feedback (GH #16-5): set by record_retrieval_feedback. ACAN training
+-- already prefers llm_relevance over utilization; this records the signal source.
+DEFINE FIELD IF NOT EXISTS feedback_source ON retrieval_outcome TYPE option<string>;
 DEFINE FIELD IF NOT EXISTS llm_relevant ON retrieval_outcome TYPE option<bool>;
 DEFINE FIELD IF NOT EXISTS llm_reason ON retrieval_outcome TYPE option<string>;
 DEFINE FIELD IF NOT EXISTS created_at ON retrieval_outcome TYPE datetime DEFAULT time::now();

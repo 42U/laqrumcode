@@ -198,6 +198,19 @@ export const MCP_TOOLS = [
     },
   },
   {
+    name: "record_retrieval_feedback",
+    description: "Record explicit feedback on a retrieved memory or concept that was injected into context — the highest-signal training data for retrieval. Use when the user reacts to an injected item ('that's wrong/outdated/not helpful', 'that was useful') or when you judge an injected memory was unhelpful or misleading. Signals: 'helpful'/'irrelevant' relabel the ACAN training sample; 'outdated' relabels + decays the item so it loses retrieval priority (follow with supersede for a fix); 'pin' boosts it so it surfaces when relevant. Pass the full record id of the injected item.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        memory_id: { type: "string", description: "Full record id of the injected memory or concept, e.g. 'memory:abc' or 'concept:xyz' (the id shown in the recalled context)." },
+        signal: { type: "string", enum: ["helpful", "irrelevant", "outdated", "pin"], description: "helpful = relevant/useful; irrelevant = wrong/not useful; outdated = stale (also decays it; pair with supersede); pin = boost so it surfaces when relevant." },
+        reason: { type: "string", description: "Optional short reason, stored as llm_reason on the training sample." },
+      },
+      required: ["memory_id", "signal"],
+    },
+  },
+  {
     name: "create_skill",
     description: "Create a new skill row in the kongcode DB. Skills are DB-resident vector-indexed procedural knowledge invokable via slash command. The full body is stored in the `skill` table and recallable via recall(scope=\"skills\"). Use this instead of authoring a SKILL.md file on disk.",
     inputSchema: {
@@ -242,6 +255,7 @@ export const MCP_TO_IPC_METHOD: Record<string, IpcMethod> = {
   cluster_scan: "tool.clusterScan",
   what_is_missing: "tool.whatIsMissing",
   supersede: "tool.supersede",
+  record_retrieval_feedback: "tool.recordRetrievalFeedback",
   create_skill: "tool.createSkill",
   get_skill_body: "tool.getSkillBody",
 };

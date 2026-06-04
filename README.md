@@ -6,12 +6,12 @@
 
 [![VoidOrigin](https://img.shields.io/badge/VOIDORIGIN-voidorigin.com-0a0a0a?style=for-the-badge&logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0ibm9uZSI+PGNpcmNsZSBjeD0iMTIiIGN5PSIxMiIgcj0iMTAiIHN0cm9rZT0iI2ZmNmIzNSIgc3Ryb2tlLXdpZHRoPSIyIi8+PGNpcmNsZSBjeD0iMTIiIGN5PSIxMiIgcj0iNCIgZmlsbD0iI2ZmNmIzNSIvPjwvc3ZnPg==&logoColor=ff6b35&labelColor=0a0a0a)](https://voidorigin.com)
 
-[![Version](https://img.shields.io/badge/v0.7.111-stable-22c55e?style=for-the-badge)](https://github.com/42U/kongcode)
+[![Version](https://img.shields.io/badge/v0.7.112-stable-22c55e?style=for-the-badge)](https://github.com/42U/kongcode)
 [![GitHub Stars](https://img.shields.io/github/stars/42U/kongcode?style=for-the-badge&logo=github&color=gold)](https://github.com/42U/kongcode)
 [![License: MIT](https://img.shields.io/github/license/42U/kongcode?style=for-the-badge&logo=opensourceinitiative&color=blue)](https://opensource.org/licenses/MIT)
 [![Node.js](https://img.shields.io/badge/Node.js-18+-339933?style=for-the-badge&logo=node.js&logoColor=white)](https://nodejs.org)
 [![SurrealDB](https://img.shields.io/badge/SurrealDB-3.0-ff00a0?style=for-the-badge&logo=surrealdb&logoColor=white)](https://surrealdb.com)
-[![Tests](https://img.shields.io/badge/Tests-1090_passing-brightgreen?style=for-the-badge&logo=vitest&logoColor=white)](https://vitest.dev)
+[![Tests](https://img.shields.io/badge/Tests-1104_passing-brightgreen?style=for-the-badge&logo=vitest&logoColor=white)](https://vitest.dev)
 
 **Graph-backed permanent memory for [Claude Code](https://claude.ai/claude-code).**
 
@@ -291,6 +291,16 @@ All env vars are optional with sensible defaults.
 | `KONGCODE_DAEMON_TRANSPORT` | `unix` | Set `tcp` for loopback TCP (Windows) |
 | `KONGCODE_NODE_LLAMA_CPP_PATH` | (auto) | Override path to node-llama-cpp install |
 | `KONGCODE_LEGACY_MONOLITH` | `0` | Set `1` for pre-0.7.0 single-process mode (emergency rollback) |
+
+### GPU selection (multi-GPU, optional)
+
+By default node-llama-cpp uses **all** available CUDA GPUs. On a multi-GPU box you can pin **only** the kongcode daemon to specific GPU(s) — without forcing other CUDA apps onto them (e.g. keep a big GPU free). Strictly opt-in: a **no-op by default**, so single-GPU and CPU-only setups are unaffected.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `KONGCODE_CUDA_VISIBLE_DEVICES` | (unset) | Pins the daemon's CUDA context to the given device(s). Prefer a GPU **UUID** (`GPU-xxxx…`, from `nvidia-smi -L`) over a numeric index — indices depend on `CUDA_DEVICE_ORDER`. |
+
+Equivalent without env: write the value (one line) to `~/.kongcode/cuda-visible-devices` — handy to (re)pin a *running* daemon without relaunching the client. An already-set `CUDA_VISIBLE_DEVICES` is left untouched (operator wins). The daemon also sets `CUDA_DEVICE_ORDER=PCI_BUS_ID` so device indices match `nvidia-smi`. Restart the daemon to apply (`kill` it; the next call respawns it).
 
 ### Auto-drain
 

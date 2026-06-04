@@ -25,6 +25,7 @@
 import { writeFileSync, unlinkSync, existsSync, readFileSync, mkdirSync, readdirSync, rmSync, openSync, writeSync, closeSync, statSync, constants as fsConstants } from "node:fs";
 import { join, dirname } from "node:path";
 import { homedir, platform } from "node:os";
+import { applyGpuPin } from "./gpu-pin.js";
 import { PROTOCOL_VERSION, DEFAULT_DAEMON_SOCKET_PATH, DEFAULT_DAEMON_TCP_PORT, DAEMON_PID_FILE, } from "../shared/ipc-types.js";
 import { DaemonServer } from "./server.js";
 import { log } from "../engine/log.js";
@@ -40,6 +41,7 @@ import { handleFetchPendingWork, handleCommitWorkResults, handleCreateKnowledgeG
 import { handleMemoryHealth } from "../tools/memory-health.js";
 import { handleLinkHierarchy } from "../tools/link-hierarchy.js";
 import { handleSupersede } from "../tools/supersede.js";
+import { handleRecordRetrievalFeedback } from "../tools/record-retrieval-feedback.js";
 import { handleRecordFinding } from "../tools/record-finding.js";
 import { handleClusterScan } from "../tools/cluster-scan.js";
 import { handleWhatIsMissing } from "../tools/what-is-missing.js";
@@ -572,6 +574,12 @@ function removeOwnPidFile() {
 }
 async function main() {
     log.info(`[daemon] starting kongcode-daemon ${DAEMON_VERSION} (pid=${process.pid})`);
+    // Pin GPU(s) before any CUDA init (node-llama-cpp). Strictly opt-in — a no-op
+    // by default, so single-GPU / CPU-only users are unaffected. See gpu-pin.ts.
+    const gpuPin = applyGpuPin();
+    if (gpuPin.applied) {
+        log.info(`[daemon] GPU pin: CUDA_VISIBLE_DEVICES=${gpuPin.value} (from ${gpuPin.source})`);
+    }
     // Acquire daemon singleton lock BEFORE binding the socket. Two daemons
     // bound to the same .kongcode-daemon.sock both run startDrainScheduler
     // and double-process pending_work — a major amplifier of the duplicate-row
@@ -764,7 +772,7 @@ async function main() {
             }
         };
     };
-    // All 12 tool handlers wired through the same wrapToolHandler adapter.
+    // All tool handlers wired through the same wrapToolHandler adapter.
     // Each one closes over daemon-owned globalState; per-session state is
     // resolved by sessionId from the IPC envelope.
     server.register("tool.introspect", wrapToolHandler(handleIntrospect, "introspect"));
@@ -776,6 +784,7 @@ async function main() {
     server.register("tool.memoryHealth", wrapToolHandler(handleMemoryHealth, "memory_health"));
     server.register("tool.linkHierarchy", wrapToolHandler(handleLinkHierarchy, "link_hierarchy"));
     server.register("tool.supersede", wrapToolHandler(handleSupersede, "supersede"));
+    server.register("tool.recordRetrievalFeedback", wrapToolHandler(handleRecordRetrievalFeedback, "record_retrieval_feedback"));
     server.register("tool.recordFinding", wrapToolHandler(handleRecordFinding, "record_finding"));
     server.register("tool.clusterScan", wrapToolHandler(handleClusterScan, "cluster_scan"));
     server.register("tool.whatIsMissing", wrapToolHandler(handleWhatIsMissing, "what_is_missing"));

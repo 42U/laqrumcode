@@ -67,6 +67,7 @@ export const IPC_METHODS = [
     "tool.memoryHealth",
     "tool.linkHierarchy",
     "tool.supersede",
+    "tool.recordRetrievalFeedback",
     "tool.recordFinding",
     "tool.clusterScan",
     "tool.whatIsMissing",
