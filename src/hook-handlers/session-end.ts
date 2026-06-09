@@ -34,6 +34,23 @@ export async function handleSessionEnd(
   const { store } = state;
   if (!store.isAvailable()) return {};
 
+  // Drain self-trigger guard (2026-06-09 spawn-storm fix): sessions spawned by
+  // the auto-drain are tagged by hook-proxy (kongcode_drain_session, from the
+  // child's KONGCODE_DRAIN_SESSION=1 env). A drain child ending is NOT a user
+  // session ending — re-triggering the scheduler from it created a ~25s spawn
+  // storm (fail → exit → SessionEnd → respawn) that burned the daily budget.
+  // Close the session row (so deferred cleanup doesn't enqueue extraction for
+  // it later) and skip the queue/handoff/trigger pipeline entirely — a drain
+  // session's own turns are tool-call plumbing, not extractable knowledge.
+  if (payload.kongcode_drain_session === true) {
+    log.info(`Session end: ${sessionId} (drain session — closing row, skipping queue + drain re-trigger)`);
+    if (session.surrealSessionId) {
+      try { await store.claimSessionForCleanup(session.surrealSessionId); } catch (e) { swallow.warn("sessionEnd:drainClaim", e); }
+    }
+    state.removeSession(sessionId);
+    return {};
+  }
+
   // The atomic DB claim is now the single source of truth for "this session
   // has been cleaned up". Without a surrealSessionId there is no row to claim,
   // so just bail — there's nothing to queue against.

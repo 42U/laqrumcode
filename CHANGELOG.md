@@ -4,6 +4,27 @@ All notable changes to KongCode are documented here. The 0.7.x series introduced
 
 ## [Unreleased]
 
+## [0.7.114] — 2026-06-09
+
+Drain-storm post-mortem fixes (2 big + 2 smaller bugs) + the CPU-mode knob.
+
+### Fixed
+- **Auto-drain failure backoff** — with every extractor dying instantly (the account hit its weekly API limit), the scheduler respawned on every trigger and burned the *entire* 50/day budget in ~20 minutes after UTC midnight, five days running (spend ledger: exactly 50/day Jun 5–9, 250 spawns, zero work, weekly quota destroyed). `spawnHeadlessDrainer` now tracks consecutive *fast* failures (exit with no queue progress in <120s) and refuses to spawn during an exponential cooldown (30 min → 6 h after 3); long runs without progress are classified neutral so slow legitimate work never accrues cooldown; any progress resets the state.
+- **Auto-drain SessionEnd self-trigger** — each drain child's *own* SessionEnd hook re-triggered the next spawn (~25 s storm cadence, `reason=session-end`). Drain subprocesses are now tagged (`KONGCODE_DRAIN_SESSION=1` in `buildDrainEnv`); `hook-proxy.cjs` — which runs inside the child's env — stamps `kongcode_drain_session: true` into the hook payload, and `handleSessionEnd` closes the drain session's row (so deferred cleanup can't enqueue extraction for it later) and skips the queue/handoff/re-trigger pipeline. Normal sessions' hook payloads are byte-identical (QA-verified — the tag branch is gated on the env var only drain children carry).
+- **`getPreviousSessionTurns` was silently dead** (a double defect, spamming 1,922 `Could not cast into 'record'` lines in the live daemon.log): it cast the kc-session UUID with `type::record()` (throws — all three callers pass kc UUIDs) and bound the previous session's Thing as a *string* into `part_of.out` (string bindings never match records). Now compares `kc_session_id` (pre-kc rows stay eligible via `IS NONE`) and binds `type::record($sid)`. Previous-session context injection works for the first time through this path.
+- **`graphTransformContext` hard 15 s deadline** — tuned for GPU-era embed+rerank latency, it tripped constantly after the daemon moved to CPU-only mode (Jun 4), degrading prompts to raw-message passthrough. New `resolveTransformTimeoutMs()`: `KONGCODE_TRANSFORM_TIMEOUT_MS` override wins, else 45 s when `KONGCODE_NO_GPU=1` (auto-set by gpu-pin in CPU mode), else 15 s; the timeout log now includes elapsed ms.
+
+### Added
+- **CPU-mode sentinel for the GPU knob** (uncommitted since Jun 4, riding along): `~/.kongcode/cuda-visible-devices` (or `KONGCODE_CUDA_VISIBLE_DEVICES`) now accepts `cpu`/`none`/`off`/`false`/`-1` → sets `KONGCODE_NO_GPU=1` at daemon module-load (before `detectResourceProfile`) → genuine CPU-only mode (`gpu:false`), not a CUDA-hide. Device pins (GPU UUIDs) work as before; still strictly opt-in/no-op by default.
+
+### Tests
+- +18: `drain-backoff` (8, pure), `transform-timeout` (5, pure), `session-end-drain-guard` (3, mocked — incl. a strict-boolean coercion pin via log-spy), `prev-session-turns` (2, live `kong_test`; the pre-fix cast-throw was reproduced empirically by QA). Suite: **1126 passing**. Independently QA-reviewed — CLEAN (hook-proxy blast radius, backoff races, NONE-semantics probe, production-untouched diff).
+
+### Known follow-ups
+- Drain-session rows keep their `cleanup_claim_token` (cosmetic; one UUID per spawn).
+- The "previous session" pick is simply the latest other session row — may select drain/smoke sessions; consider excluding trivial sessions.
+- A CPU-only box *without* the gpu-pin sentinel still gets the 15 s transform default (env override exists).
+
 ## [0.7.113] — 2026-06-04
 
 Selective forget — reversible privacy controls (GH #16 item 2, Phase A).

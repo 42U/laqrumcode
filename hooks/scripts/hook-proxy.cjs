@@ -226,6 +226,21 @@ function daemonDownResponse(eventName) {
 
 (async () => {
   const payload = await readStdin();
+  let body = payload || "{}";
+  // Drain-session tag (2026-06-09 spawn-storm fix): auto-drain subprocesses are
+  // spawned with KONGCODE_DRAIN_SESSION=1 (buildDrainEnv). The hook payload's
+  // session_id is Claude Code's own transcript id, which the daemon cannot
+  // correlate with the spawn — so stamp the flag into the payload here, where
+  // the child's env is visible. handleSessionEnd uses it to skip the drain
+  // re-trigger (pre-fix, each failed drain's own SessionEnd respawned the next
+  // one every ~25s, burning the full daily budget). Fail-open on parse errors.
+  if (process.env.KONGCODE_DRAIN_SESSION === "1") {
+    try {
+      const obj = JSON.parse(body);
+      obj.kongcode_drain_session = true;
+      body = JSON.stringify(obj);
+    } catch { /* malformed stdin — pass through unchanged */ }
+  }
   const sock = findUnixSocket();
   const port = sock ? null : readPort();
   if (!sock && !port) {
@@ -237,7 +252,7 @@ function daemonDownResponse(eventName) {
     socketPath: sock,
     port,
     eventName: HOOK_EVENT,
-    body: payload || "{}",
+    body,
   });
   if (!out) {
     // Socket/port existed but daemon didn't respond — also try respawn

@@ -1116,7 +1116,13 @@ export class SurrealStore {
             let prevSessionQuery;
             const bindings = { lim: limit };
             if (currentSessionId) {
-                prevSessionQuery = `SELECT id, started_at FROM session WHERE id != type::record($current) ORDER BY started_at DESC LIMIT 1`;
+                // currentSessionId is the kc-session UUID (the hook payload's
+                // session_id) — NOT a session Thing. The previous form cast it with
+                // type::record(), which throws "Could not cast into `record`" on
+                // every call (swallowed below → []), silently killing prev-session
+                // context since introduction. Compare against kc_session_id instead;
+                // rows predating kc ids (NONE) stay eligible as "previous".
+                prevSessionQuery = `SELECT id, started_at FROM session WHERE kc_session_id IS NONE OR kc_session_id != $current ORDER BY started_at DESC LIMIT 1`;
                 bindings.current = currentSessionId;
             }
             else {
@@ -1127,10 +1133,15 @@ export class SurrealStore {
                 return [];
             const prevSessionId = String(sessionRows[0].id);
             const turns = await this.queryFirst(`SELECT role, text, tool_name, timestamp FROM turn
-         WHERE id IN (SELECT VALUE in FROM part_of WHERE out = $sid)
+         WHERE id IN (SELECT VALUE in FROM part_of WHERE out = type::record($sid))
            AND text != NONE AND text != ""
            AND pruned_at IS NONE
-         ORDER BY timestamp DESC LIMIT $lim`, { sid: prevSessionId, lim: limit });
+         ORDER BY timestamp DESC LIMIT $lim`, 
+            // type::record($sid): SurrealDB treats string bindings as literal
+            // strings, never record references (same trap as the ACAN fetch,
+            // see the interpolation note near queryBatch) — a bare $sid string
+            // matches zero part_of.out records.
+            { sid: prevSessionId, lim: limit });
             return turns.reverse();
         }
         catch (e) {

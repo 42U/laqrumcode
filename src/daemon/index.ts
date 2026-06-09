@@ -114,6 +114,12 @@ const startedAt = Date.now();
  *  Mirrors mcp-server.ts's globalState pattern but lives in the daemon now. */
 let globalState: GlobalPluginState | null = null;
 
+// GPU/CPU selection — resolved at module load, BEFORE detectResourceProfile()
+// (which reads KONGCODE_NO_GPU) and before any CUDA init. Opt-in, no-op by
+// default. A device value pins CUDA_VISIBLE_DEVICES; a CPU sentinel
+// ('cpu'/'none'/'off') sets KONGCODE_NO_GPU=1 → gpu:false. See gpu-pin.ts.
+const gpuPin = applyGpuPin();
+
 const resourceProfile = detectResourceProfile();
 
 function setBootstrapPhase(p: BootstrapPhase, err?: Error): void {
@@ -591,11 +597,12 @@ function removeOwnPidFile(): void {
 async function main(): Promise<void> {
   log.info(`[daemon] starting kongcode-daemon ${DAEMON_VERSION} (pid=${process.pid})`);
 
-  // Pin GPU(s) before any CUDA init (node-llama-cpp). Strictly opt-in — a no-op
-  // by default, so single-GPU / CPU-only users are unaffected. See gpu-pin.ts.
-  const gpuPin = applyGpuPin();
+  // GPU/CPU selection was resolved at module load (before detectResourceProfile);
+  // log the outcome here, now that the logger is up.
   if (gpuPin.applied) {
-    log.info(`[daemon] GPU pin: CUDA_VISIBLE_DEVICES=${gpuPin.value} (from ${gpuPin.source})`);
+    log.info(gpuPin.mode === "cpu"
+      ? `[daemon] GPU pin: CPU-only (KONGCODE_NO_GPU=1, from ${gpuPin.source})`
+      : `[daemon] GPU pin: CUDA_VISIBLE_DEVICES=${gpuPin.value} (from ${gpuPin.source})`);
   }
 
   // Acquire daemon singleton lock BEFORE binding the socket. Two daemons

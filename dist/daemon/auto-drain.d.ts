@@ -36,6 +36,19 @@ interface DrainSchedulerOpts {
      *  date changes (state persisted to <cacheDir>/auto-drain-spending.json). */
     maxDaily: number;
 }
+export declare const DRAIN_FAST_FAIL_MS = 120000;
+export declare const DRAIN_FAILURE_COOLDOWN_THRESHOLD = 3;
+export declare const DRAIN_COOLDOWN_BASE_MS: number;
+export declare const DRAIN_COOLDOWN_MAX_MS: number;
+/** Pure: cooldown for the Nth consecutive fast failure (0 = no cooldown). */
+export declare function computeDrainCooldown(consecutiveFailures: number): number;
+/** Pure: classify a finished drain run. "progress" resets the failure
+ *  counter; "fast-failure" increments it; "neutral" (a long run with no queue
+ *  progress — ambiguous, e.g. a slow extractor that crashed mid-item) leaves
+ *  it unchanged so legitimate slow work never accrues a cooldown. */
+export declare function classifyDrainOutcome(runtimeMs: number, queueBefore: number, queueAfter: number): "progress" | "fast-failure" | "neutral";
+/** Test hook — reset backoff state between cases. */
+export declare function resetDrainBackoffForTest(): void;
 /** Build a minimal environment for the drain subprocess.
  *  The subprocess talks to the daemon over IPC — it never needs DB
  *  credentials, API keys, or other secrets from the parent. */

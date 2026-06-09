@@ -1188,6 +1188,19 @@ export function getTransformErrorRate() {
     const failures = recent.filter(c => !c.ok).length;
     return { total: recent.length, failures, rate: recent.length > 0 ? failures / recent.length : 0 };
 }
+/** Transform deadline: env override, else a CPU-aware default. The original
+ *  fixed 15s was tuned for GPU-era embed+rerank latency; the 2026-06-04
+ *  switch of the daemon to CPU-only mode tripped it constantly (daemon.log:
+ *  "graphTransformContext timed out" spam → raw-message fallback on every
+ *  affected prompt). KONGCODE_NO_GPU=1 is set by gpu-pin.ts at daemon startup
+ *  when CPU mode is configured, so the default self-adjusts. Exported for
+ *  tests. Resolved per call (not at import) so it sees the post-pin env. */
+export function resolveTransformTimeoutMs(env = process.env) {
+    const override = Number(env.KONGCODE_TRANSFORM_TIMEOUT_MS);
+    if (Number.isFinite(override) && override > 0)
+        return Math.floor(override);
+    return env.KONGCODE_NO_GPU === "1" ? 45_000 : 15_000;
+}
 /**
  * Main entry point for graph-based context assembly. Retrieves, scores, deduplicates,
  * and budget-trims graph nodes, then splices them into the conversation message array.
@@ -1217,8 +1230,9 @@ export async function graphTransformContext(params) {
     catch { /* non-critical — tier0 will still appear in user message */ }
     // Never throw — return raw messages on any failure
     let transformTimer;
+    const TRANSFORM_TIMEOUT_MS = resolveTransformTimeoutMs();
+    const transformStartedAt = Date.now();
     try {
-        const TRANSFORM_TIMEOUT_MS = 15_000;
         const result = await Promise.race([
             graphTransformInner(messages, session, store, embeddings, contextWindow, budgets, signal, tier0ForSys),
             new Promise((_, reject) => {
@@ -1231,7 +1245,8 @@ export async function graphTransformContext(params) {
     }
     catch (err) {
         recordTransformOutcome(false);
-        log.error("graphTransformContext fatal error, returning raw messages:", err);
+        log.error(`graphTransformContext fatal error after ${Date.now() - transformStartedAt}ms ` +
+            `(timeout=${TRANSFORM_TIMEOUT_MS}ms), returning raw messages:`, err);
         return {
             messages,
             stats: {

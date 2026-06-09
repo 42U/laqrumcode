@@ -35,6 +35,40 @@ let schedulerStarted = false;
 let schedulerTimer = null;
 let claudeBinPath = null;
 let claudeBinUnavailable = false;
+// ── Failure backoff (2026-06-09 spawn-storm fix) ─────────────────────────────
+// When every extractor dies instantly (e.g. the account hit its weekly API
+// limit), respawning on every trigger burned the entire 50/day budget in ~20
+// minutes after UTC midnight, five days running (spend ledger: exactly 50/day
+// Jun 5-9, zero work done). Track consecutive fast failures and refuse to
+// spawn during an exponential cooldown. In-memory: a daemon restart resets the
+// state, worst case re-paying DRAIN_FAILURE_COOLDOWN_THRESHOLD spawns.
+export const DRAIN_FAST_FAIL_MS = 120_000;
+export const DRAIN_FAILURE_COOLDOWN_THRESHOLD = 3;
+export const DRAIN_COOLDOWN_BASE_MS = 30 * 60_000; // 30 min
+export const DRAIN_COOLDOWN_MAX_MS = 6 * 60 * 60_000; // 6 h
+let consecutiveFastFailures = 0;
+let drainCooldownUntil = 0;
+/** Pure: cooldown for the Nth consecutive fast failure (0 = no cooldown). */
+export function computeDrainCooldown(consecutiveFailures) {
+    if (consecutiveFailures < DRAIN_FAILURE_COOLDOWN_THRESHOLD)
+        return 0;
+    const k = consecutiveFailures - DRAIN_FAILURE_COOLDOWN_THRESHOLD;
+    return Math.min(DRAIN_COOLDOWN_BASE_MS * 2 ** k, DRAIN_COOLDOWN_MAX_MS);
+}
+/** Pure: classify a finished drain run. "progress" resets the failure
+ *  counter; "fast-failure" increments it; "neutral" (a long run with no queue
+ *  progress — ambiguous, e.g. a slow extractor that crashed mid-item) leaves
+ *  it unchanged so legitimate slow work never accrues a cooldown. */
+export function classifyDrainOutcome(runtimeMs, queueBefore, queueAfter) {
+    if (queueAfter < queueBefore)
+        return "progress";
+    return runtimeMs < DRAIN_FAST_FAIL_MS ? "fast-failure" : "neutral";
+}
+/** Test hook — reset backoff state between cases. */
+export function resetDrainBackoffForTest() {
+    consecutiveFastFailures = 0;
+    drainCooldownUntil = 0;
+}
 /** The kongcode plugin install dir, derived from this daemon's own code
  *  location. Used as `--plugin-dir` on spawned drain subprocesses so they
  *  load the same kongcode MCP plugin the daemon is running, which is what
@@ -92,6 +126,11 @@ function buildDrainEnv() {
     // surrealSessionId that downstream commits then reject with
     // "Invalid record ID format".
     env.KONGCODE_SESSION_ID = randomUUID();
+    // Tag the subprocess as a drain session. hook-proxy.cjs (running inside the
+    // child's env) stamps this into every hook payload (kongcode_drain_session),
+    // letting handleSessionEnd skip the drain re-trigger — pre-fix, each failed
+    // drain's own SessionEnd respawned the next one (~25s storm, Jun 8-9).
+    env.KONGCODE_DRAIN_SESSION = "1";
     return env;
 }
 /** Look up the claude binary — env override, then PATH, then known locations.
@@ -549,6 +588,16 @@ async function spawnHeadlessDrainer(state, opts, reason) {
     if (!claudeBin) {
         return { spawned: false, reason: "claude binary not found (set KONGCODE_CLAUDE_BIN)" };
     }
+    // Failure-backoff gate: refuse to spawn while cooling down after repeated
+    // instant failures (see the backoff block above). Checked before any DB
+    // query — it's the cheapest gate and the one protecting the API budget.
+    if (Date.now() < drainCooldownUntil) {
+        const minLeft = Math.ceil((drainCooldownUntil - Date.now()) / 60_000);
+        return {
+            spawned: false,
+            reason: `failure cooldown — ${consecutiveFastFailures} consecutive fast failures, ~${minLeft}m remaining`,
+        };
+    }
     const rawCount = await getPendingCount(state);
     if (rawCount < 1) {
         return { spawned: false, reason: `queue=0 < threshold=${opts.threshold}` };
@@ -582,6 +631,9 @@ async function spawnHeadlessDrainer(state, opts, reason) {
         : "kongcode:memory-extractor-lite";
     const count = await getPendingCount(state);
     log.info(`[auto-drain] spawning headless extractor (queue=${count}, agent=${agentName}, reason=${reason})`);
+    // Captured for the exit handler's failure-backoff classification.
+    const spawnedAt = Date.now();
+    const queueBefore = count;
     // Capture drain stdout/stderr to <cacheDir>/auto-drain.log so future
     // failures aren't invisible. v0.7.85 and earlier used stdio:"ignore"
     // which silently swallowed two days of "KongCode tools are not available
@@ -678,6 +730,31 @@ async function spawnHeadlessDrainer(state, opts, reason) {
         child.on("exit", (code) => {
             log.info(`[auto-drain] extractor pid=${child.pid} exited with code=${code}`);
             releaseOnce();
+            // Failure-backoff accounting: re-check the queue and classify the run.
+            // Fire-and-forget; never throws into the exit handler.
+            void (async () => {
+                const runtimeMs = Date.now() - spawnedAt;
+                let queueAfter = queueBefore;
+                try {
+                    queueAfter = await getPendingCount(state);
+                }
+                catch { /* unknown → treat as no progress */ }
+                const outcome = classifyDrainOutcome(runtimeMs, queueBefore, queueAfter);
+                if (outcome === "progress") {
+                    consecutiveFastFailures = 0;
+                    drainCooldownUntil = 0;
+                }
+                else if (outcome === "fast-failure") {
+                    consecutiveFastFailures++;
+                    const cooldown = computeDrainCooldown(consecutiveFastFailures);
+                    if (cooldown > 0) {
+                        drainCooldownUntil = Date.now() + cooldown;
+                        log.warn(`[auto-drain] ${consecutiveFastFailures} consecutive fast failures ` +
+                            `(last: exit=${code} after ${Math.round(runtimeMs / 1000)}s, queue ${queueBefore}→${queueAfter}) — ` +
+                            `cooling down for ${Math.round(cooldown / 60_000)} minutes`);
+                    }
+                }
+            })();
         });
         child.on("error", (err) => {
             log.error(`[auto-drain] extractor pid=${child.pid} error:`, err);
