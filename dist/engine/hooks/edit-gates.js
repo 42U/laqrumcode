@@ -88,7 +88,12 @@ async function hasInvestigatedFile(state, session, filePath) {
            AND role = 'user'
            AND text CONTAINS $path
            AND pruned_at IS NONE
-       LIMIT 1`, { sid: session.surrealSessionId, path: filePath });
+       LIMIT 1`, 
+        // W2-18 (2026-06-10): bind the kc-session UUID — turn.session_id stores
+        // kc UUIDs (schema.surql:84-90), NOT session Thing ids. The old
+        // surrealSessionId binding matched zero rows always, so this DB
+        // fallback never authorized and the gate over-blocked after cache wipes.
+        { sid: session.sessionId, path: filePath });
         if (rows.length > 0) {
             session._editGateChecked.add(filePath);
             return true;
@@ -125,7 +130,9 @@ async function hasInvestigatedBashCommand(state, session, command, matchedPatter
            AND role = 'user'
            AND text CONTAINS $needle
            AND pruned_at IS NONE
-       LIMIT 1`, { sid: session.surrealSessionId, needle: matchedPattern });
+       LIMIT 1`, 
+        // W2-18: kc UUID, not Thing id — same fix as the file gate above.
+        { sid: session.sessionId, needle: matchedPattern });
         if (rows.length > 0) {
             session._editGateChecked.add(cacheKey);
             return true;

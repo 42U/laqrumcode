@@ -61,10 +61,10 @@ function mockStateForHooks(session: SessionState | null) {
     async () => [],
   );
   const queryExec = vi.fn(async () => {});
-  const relate = vi.fn(async () => {});
-  const upsertConcept = vi.fn(async () => "concept:c1");
+  const relate = vi.fn(async () => true);
+  const upsertConcept = vi.fn(async () => ({ id: "concept:c1", existed: false }));
   const createMemory = vi.fn(async () => "memory:m1");
-  const createArtifact = vi.fn(async () => "artifact:a1");
+  const createArtifact = vi.fn(async () => ({ id: "artifact:a1", existed: false }));
   const store = {
     isAvailable: () => true,
     queryFirst,
@@ -211,7 +211,8 @@ describe("SurrealStore.createArtifact — path-keyed dedup", () => {
     // a single CREATE (no preflight SELECT).
     queryFirst.mockResolvedValueOnce([{ id: "artifact:first" }]); // CREATE returns new id
     const id1 = await store.createArtifact("/tmp/foo.ts", "file", "first write", null);
-    expect(id1).toBe("artifact:first");
+    // W2-09: createArtifact now reports { id, existed } — fresh CREATE → false.
+    expect(id1).toEqual({ id: "artifact:first", existed: false });
 
     // Exactly one query: the CREATE. No preflight SELECT.
     expect(queryFirst).toHaveBeenCalledTimes(1);
@@ -229,7 +230,8 @@ describe("SurrealStore.createArtifact — path-keyed dedup", () => {
       .mockRejectedValueOnce(uniqueErr)                       // CREATE rejected by UNIQUE
       .mockResolvedValueOnce([{ id: "artifact:sibling" }]);   // fallback SELECT
     const id = await store.createArtifact("/tmp/foo.ts", "file", "second write", null);
-    expect(id).toBe("artifact:sibling");
+    // W2-09: UNIQUE-fallback path resolves to the pre-existing row → existed: true.
+    expect(id).toEqual({ id: "artifact:sibling", existed: true });
 
     expect(queryFirst).toHaveBeenCalledTimes(2);
     expect(queryFirst.mock.calls[0][0]).toContain("CREATE artifact");
@@ -248,9 +250,9 @@ describe("SurrealStore.createArtifact — path-keyed dedup", () => {
     const idA = await store.createArtifact("/tmp/a.ts", "file", "a", null);
     const idB = await store.createArtifact("/tmp/b.ts", "file", "b", null);
 
-    expect(idA).toBe("artifact:a");
-    expect(idB).toBe("artifact:b");
-    expect(idA).not.toBe(idB);
+    expect(idA).toEqual({ id: "artifact:a", existed: false });
+    expect(idB).toEqual({ id: "artifact:b", existed: false });
+    expect(idA.id).not.toBe(idB.id);
 
     // 2 queryFirst calls: CREATE A + CREATE B (no preflight SELECTs).
     expect(queryFirst).toHaveBeenCalledTimes(2);
@@ -325,7 +327,8 @@ describe("SurrealStore.upsertConcept — race-fallback after UNIQUE rejection", 
       undefined,
     );
 
-    expect(id).toBe("concept:winner-x");
+    // W2-07: race-recovery resolves to the winner's pre-existing row → existed: true.
+    expect(id).toEqual({ id: "concept:winner-x", existed: true });
     expect(queryFirst).toHaveBeenCalledTimes(4);
     // Sanity: the 4th call was the KNN fallback, not the lowercase select.
     expect(queryFirst.mock.calls[3][0]).toMatch(/vector::similarity::cosine/);
@@ -380,7 +383,7 @@ describe("SurrealStore.upsertConcept — race-fallback after UNIQUE rejection", 
       "writing pure functions",
       new Array(1024).fill(0.1),
     );
-    expect(id).toBe("concept:resolved");
+    expect(id).toEqual({ id: "concept:resolved", existed: true });
     // The lowercase race-fallback query must include the superseded_at filter.
     expect(queryFirst.mock.calls[2][0]).toMatch(/string::lowercase/);
     expect(queryFirst.mock.calls[2][0]).toMatch(/superseded_at IS NONE/);

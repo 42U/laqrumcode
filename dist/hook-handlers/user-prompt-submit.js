@@ -126,7 +126,8 @@ export async function handleUserPromptSubmit(state, payload) {
         ? detectAnomalies(state.store, state.observabilityCooldown).catch(() => [])
         : Promise.resolve([]);
     const pendingPromise = (session.userTurnCount <= 1 && state.store.isAvailable())
-        ? state.store.queryFirst(`SELECT count() AS count FROM pending_work WHERE status = "pending" GROUP ALL`).catch(() => [])
+        // W2-04: active filter matches fetch_pending_work (phantom-count fix).
+        ? state.store.queryFirst(`SELECT count() AS count FROM pending_work WHERE status = "pending" AND (active = true OR active IS NONE) GROUP ALL`).catch(() => [])
         : Promise.resolve([]);
     // Run full context retrieval pipeline (concurrent with anomaly + pending)
     const contextString = await assembleContextString(state, session, userPrompt);

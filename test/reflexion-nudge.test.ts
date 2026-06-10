@@ -15,7 +15,14 @@ import { getLastTurnGroundingTrace } from "../src/engine/retrieval-quality.js";
  * cooldown state. */
 describe("getLastTurnGroundingTrace — Reflexion nudge contract", () => {
   function setup(rows: { memory_id: string; retrieval_score: number; cited: boolean }[]) {
-    const queryFirst = vi.fn().mockResolvedValue(rows);
+    // W2-19 (2026-06-10): getLastTurnGroundingTrace is now two queries —
+    // (1) latest turn_id for the session, (2) that turn's outcome rows. The
+    // old single query was triple-dead (missing VALUE, MAX() not a fn,
+    // patcher corruption), so these contract tests only ever passed against
+    // a mock; they now mirror the real, working call sequence.
+    const queryFirst = vi.fn()
+      .mockResolvedValueOnce(rows.length > 0 ? [{ turn_id: "turn:t1" }] : [])
+      .mockResolvedValueOnce(rows);
     return { queryFirst: { queryFirst } as any, rows };
   }
 

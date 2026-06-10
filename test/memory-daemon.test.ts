@@ -28,12 +28,12 @@ function mockStore() {
       return [{ id: "skill:new1" }];
     }),
     queryExec: vi.fn(async () => {}),
-    upsertConcept: vi.fn(async () => "concept:c1"),
+    upsertConcept: vi.fn(async () => ({ id: "concept:c1", existed: false })),
     createMemory: vi.fn(async () => "memory:m1"),
     createMonologue: vi.fn(async () => "monologue:m1"),
-    createArtifact: vi.fn(async () => "artifact:a1"),
+    createArtifact: vi.fn(async () => ({ id: "artifact:a1", existed: false })),
     clearReflectionCache: vi.fn(() => {}),
-    relate: vi.fn(async () => {}),
+    relate: vi.fn(async () => true),
   } as any;
 }
 

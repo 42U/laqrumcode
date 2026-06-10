@@ -20,7 +20,7 @@
           {
             "type": "command",
             "command": "node ${CLAUDE_PLUGIN_ROOT}/hooks/scripts/hook-proxy.cjs user-prompt-submit",
-            "timeout": 15
+            "timeout": 60
           }
         ]
       }
@@ -68,7 +68,7 @@
           {
             "type": "command",
             "command": "node ${CLAUDE_PLUGIN_ROOT}/hooks/scripts/hook-proxy.cjs pre-compact",
-            "timeout": 15
+            "timeout": 60
           }
         ]
       }

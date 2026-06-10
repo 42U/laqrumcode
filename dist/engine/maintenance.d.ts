@@ -16,3 +16,14 @@
  */
 import type { GlobalPluginState } from "./state.js";
 export declare function runBootstrapMaintenance(state: GlobalPluginState): void;
+/** Seed the `skill` table from the repo-committed JSON snapshot at
+ *  `.claude-plugin/skills-seed.json`. This is how fresh kongcode installs
+ *  get the curated skills since the SKILL.md files on disk are 5-line
+ *  stubs (v0.7.84 moved the skill bodies into the DB as the founder's
+ *  no-md-proliferation directive).
+ *
+ *  Idempotent: per-row dedup by name. Existing skill rows (from prior
+ *  migrations or prior boots) are never overwritten. Newly-inserted rows
+ *  are tagged `source: "seed"` so the embedding backfill picks them up on
+ *  the same boot. */
+export declare function seedSkillsFromJson(state: GlobalPluginState): Promise<void>;

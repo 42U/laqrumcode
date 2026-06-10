@@ -179,7 +179,10 @@ export async function handleSessionStart(
   if (store.isAvailable()) {
     try {
       const rows = await store.queryFirst<{ count: number }>(
-        `SELECT count() AS count FROM pending_work WHERE status = "pending" GROUP ALL`,
+        // W2-04: active filter matches fetch_pending_work — without it this
+        // banner fired on soft-archived forensic rows and instructed the agent
+        // to spawn an extractor that fetches nothing (phantom-drain churn).
+        `SELECT count() AS count FROM pending_work WHERE status = "pending" AND (active = true OR active IS NONE) GROUP ALL`,
       );
       const count = rows[0]?.count ?? 0;
       if (count >= 1) {

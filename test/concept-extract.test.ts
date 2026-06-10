@@ -17,8 +17,8 @@ import {
 function mockStore() {
   return {
     isAvailable: () => true,
-    upsertConcept: vi.fn(async () => "concept:c1"),
-    relate: vi.fn(async () => {}),
+    upsertConcept: vi.fn(async () => ({ id: "concept:c1", existed: false })),
+    relate: vi.fn(async () => true),
     queryFirst: vi.fn(async () => []),
   } as any;
 }

@@ -119,7 +119,15 @@ export declare class SurrealStore {
         tool_result?: string;
         file_paths?: string[];
     }[]>;
-    relate(fromId: string, edge: string, toId: string): Promise<void>;
+    /** Returns true when a new edge row was written, false when a UNIQUE
+     *  (in,out) index reported the edge already exists (idempotent no-op).
+     *  W2-06 (2026-06-10): with ensureEdgeIndexes() armed, every duplicate
+     *  RELATE — hook re-fires, RPC-timeout retries, per-turn re-linking —
+     *  surfaces as a unique violation; treating it as success-without-write
+     *  is the central backstop that made 92% of production edge rows
+     *  impossible to recreate. Callers that need created-vs-existed (e.g.
+     *  decay-once) read the boolean; void-style callers are unaffected. */
+    relate(fromId: string, edge: string, toId: string): Promise<boolean>;
     ensureAgent(name: string, model?: string): Promise<string>;
     ensureProject(name: string): Promise<string>;
     createTask(description: string, projectId?: string): Promise<string>;
@@ -208,8 +216,24 @@ export declare class SurrealStore {
     tagBoostedConcepts(queryText: string, queryVec: number[], limit?: number): Promise<VectorSearchResult[]>;
     graphExpand(nodeIds: string[], queryVec: number[], hops?: number): Promise<VectorSearchResult[]>;
     bumpAccessCounts(ids: string[]): Promise<void>;
-    upsertConcept(content: string, embedding: number[] | null, source?: string, provenance?: ConceptProvenance, projectId?: string): Promise<string>;
-    createArtifact(path: string, type: string, description: string, embedding: number[] | null, projectId?: string): Promise<string>;
+    /** W2-07 (2026-06-10): returns { id, existed } — `existed: true` when the
+     *  content resolved to a pre-existing concept (exact or >0.92-cosine dedup,
+     *  including race-recovery paths). commitConcept uses the flag to skip
+     *  re-running hierarchy/related_to link scans for recurring concepts — the
+     *  per-turn re-wiring that produced ×4,541 duplicate edges on hot pairs. */
+    upsertConcept(content: string, embedding: number[] | null, source?: string, provenance?: ConceptProvenance, projectId?: string): Promise<{
+        id: string;
+        existed: boolean;
+    }>;
+    /** W2-09 (2026-06-10): returns { id, existed } — `existed: true` when the
+     *  path-unique dedup resolved to a pre-existing artifact row. commitArtifact
+     *  uses the flag to skip re-running the artifact_mentions link scan on every
+     *  re-edit of the same file (~5 duplicate edges + one wasted embed per
+     *  Write/Edit before the fix). */
+    createArtifact(path: string, type: string, description: string, embedding: number[] | null, projectId?: string): Promise<{
+        id: string;
+        existed: boolean;
+    }>;
     createMemory(text: string, embedding: number[] | null, importance: number, category?: string, sessionId?: string, projectId?: string): Promise<string>;
     createMonologue(sessionId: string, category: string, content: string, embedding: number[] | null): Promise<string>;
     getAllCoreMemory(tier?: number): Promise<CoreMemoryEntry[]>;

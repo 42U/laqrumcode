@@ -435,7 +435,9 @@ async function ingestSkill(file, store, embeddings) {
             success_count: 1,
             failure_count: 0,
             avg_duration_ms: 0,
-            last_used: null,
+            // W2-23 (2026-06-10): last_used is option<datetime> — a null binding
+            // fails coercion and killed EVERY workspace skill-file migration.
+            // Omit the key; the field stays NONE until first use.
             source: "workspace-migration",
             source_path: file.relPath,
             full_content: file.content,

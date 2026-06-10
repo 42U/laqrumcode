@@ -128,7 +128,7 @@ async function commitConcept(deps, data) {
         }
     }
     // 2. Upsert the concept row (provenance passed through when supplied).
-    const conceptId = await store.upsertConcept(data.name, embedding, data.source, data.provenance, data.projectId);
+    const { id: conceptId, existed: conceptExisted } = await store.upsertConcept(data.name, embedding, data.source, data.provenance, data.projectId);
     let edges = 0;
     // 3. Link source → concept via the requested edge, if caller provided one.
     if (data.sourceId && data.edgeName) {
@@ -141,7 +141,13 @@ async function commitConcept(deps, data) {
         }
     }
     // 4. Auto-seal: concept → other concepts (narrower/broader hierarchy).
-    if (data.linkHierarchy !== false) {
+    // W2-07 gate (2026-06-10): only on FIRST creation. Re-running the link
+    // scans on every mention of a recurring concept re-wired identical pairs
+    // every turn (the ×4,541-duplicate hot-pair mechanism). New relations for
+    // an OLD concept still get discovered symmetrically — when the new
+    // neighbor concept is born, ITS scan finds the old one. The UNIQUE
+    // (in,out) edge indexes (ensureEdgeIndexes) backstop any residual path.
+    if (data.linkHierarchy !== false && !conceptExisted) {
         const before = edges;
         try {
             await linkConceptHierarchy(conceptId, data.name, store, embeddings, logTag, embedding);
@@ -155,7 +161,8 @@ async function commitConcept(deps, data) {
         }
     }
     // 5. Auto-seal: concept → other concepts (related_to by embedding similarity).
-    if (data.linkRelated !== false && embedding && embedding.length > 0) {
+    // W2-07 gate: first-creation only — same rationale as step 4.
+    if (data.linkRelated !== false && !conceptExisted && embedding && embedding.length > 0) {
         const before = edges;
         try {
             await linkToRelevantConcepts(conceptId, "related_to", data.name, store, embeddings, logTag, 5, 0.65, embedding);
@@ -250,13 +257,19 @@ async function commitArtifact(deps, data) {
         }
     }
     // Insert the artifact row.
-    const artifactId = await store.createArtifact(data.path, data.type, data.description, embedding, data.projectId);
+    const { id: artifactId, existed: artifactExisted } = await store.createArtifact(data.path, data.type, data.description, embedding, data.projectId);
     let edges = 0;
     // Auto-seal: artifact → concepts (artifact_mentions) by similarity.
     // Previously only the dormant memory-daemon did this for artifact writes;
     // hot-path artifact creation from post-tool-use.ts left artifacts
     // disconnected from the concept graph.
-    if (artifactId && data.linkConcepts !== false && embedding && embedding.length > 0) {
+    // W2-09 gate (2026-06-10): first-creation only. createArtifact path-dedups,
+    // but the mentions link scan re-ran on EVERY re-commit of the same path
+    // (one per Write/Edit hook) — ~150 duplicate artifact_mentions edges for a
+    // file edited 30×, plus a wasted embed each time. An existing artifact's
+    // description (the link-scan input) is never updated, so re-linking adds
+    // nothing the first pass didn't.
+    if (artifactId && !artifactExisted && data.linkConcepts !== false && embedding && embedding.length > 0) {
         const before = edges;
         try {
             await linkToRelevantConcepts(artifactId, "artifact_mentions", `${data.path} ${data.description}`, store, embeddings, logTag, 5, 0.65, embedding);
@@ -775,10 +788,28 @@ async function commitCorrection(deps, data) {
         // fire, but it's cheap insurance.
         if (target.id === memoryId)
             continue;
+        // W2-10 decay-once (2026-06-10): a retried correction (RPC-timeout class)
+        // re-related supersedes AND re-applied stability decay multiplicatively
+        // (1.0 → 0.4 → 0.16), over-demoting the target. If the edge already
+        // exists, the decay already ran — record the id and skip both.
         try {
-            await store.relate(memoryId, "supersedes", target.id);
+            const already = await store.queryFirst(`SELECT id FROM supersedes WHERE in = type::record($m) AND out = type::record($t) LIMIT 1`, { m: memoryId, t: target.id });
+            if (already[0]?.id) {
+                supersededIds.push(target.id);
+                continue;
+            }
+        }
+        catch (e) {
+            swallow.warn(`${logTag}:supersedesCheck`, e);
+        }
+        try {
+            const createdEdge = await store.relate(memoryId, "supersedes", target.id);
             edges++;
             supersededIds.push(target.id);
+            // Backstop: with the UNIQUE (in,out) index armed, relate() reports
+            // existed-as-false — skip decay then too (pre-check raced).
+            if (!createdEdge)
+                continue;
         }
         catch (e) {
             swallow.warn(`${logTag}:relate`, e);

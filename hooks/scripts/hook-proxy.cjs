@@ -37,7 +37,20 @@ if (!HOOK_EVENT) {
 }
 
 const HOME = process.env.HOME || process.env.USERPROFILE || os.homedir();
-const TIMEOUT_MS = 15_000; // matches hooks.json UserPromptSubmit timeout (15s)
+// Per-event response budgets (W2-01, 2026-06-10). Invariant: each value sits
+// BELOW its hooks.json budget (so the proxy fails open instead of being
+// SIGKILLed) and ABOVE the daemon's inner deadline for that event — the
+// UserPromptSubmit transform may legitimately run to 45s in CPU mode
+// (graph-context.ts resolveTransformTimeoutMs), so: 45s transform < 55s proxy
+// < 60s hooks.json. The old flat 15s abandoned slow-but-healthy transforms,
+// discarded the daemon's work, and (worse) mis-diagnosed slow as down.
+const EVENT_TIMEOUTS_MS = {
+  "user-prompt-submit": 55_000,
+  "pre-compact": 55_000,
+  "session-start": 25_000,
+  "post-compact": 25_000,
+};
+const TIMEOUT_MS = EVENT_TIMEOUTS_MS[HOOK_EVENT] ?? 8_000;
 const CACHE_DIR = path.join(HOME, ".kongcode", "cache");
 const AUTH_TOKEN_PATH = path.join(CACHE_DIR, "auth-token");
 
@@ -115,6 +128,13 @@ function readPort() {
 }
 
 function postJson({ socketPath, port, eventName, body }) {
+  // Resolves { out, fail } where fail distinguishes the failure class:
+  //   "connect" → socket refused/missing → the daemon is genuinely down
+  //   "timeout" → the daemon accepted but is SLOW (e.g. a CPU-mode transform)
+  // W2-01 (2026-06-10): the old single "" return conflated the two, so a
+  // merely-slow daemon was diagnosed as down — a false "daemon unreachable"
+  // warning was injected into the agent's context AND a doomed extra daemon
+  // was forked, on every slow turn.
   return new Promise((resolve) => {
     const token = readAuthToken();
     const hdrs = { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) };
@@ -125,11 +145,11 @@ function postJson({ socketPath, port, eventName, body }) {
     const req = http.request(opts, (res) => {
       const chunks = [];
       res.on("data", (c) => chunks.push(c));
-      res.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
-      res.on("error", () => resolve(""));
+      res.on("end", () => resolve({ out: Buffer.concat(chunks).toString("utf8"), fail: null }));
+      res.on("error", () => resolve({ out: "", fail: "connect" }));
     });
-    req.on("error", () => resolve("")); // fail-open: empty body, parent treats as {}
-    req.setTimeout(TIMEOUT_MS, () => { req.destroy(); resolve(""); });
+    req.on("error", () => resolve({ out: "", fail: "connect" })); // refused/missing socket
+    req.setTimeout(TIMEOUT_MS, () => { req.destroy(); resolve({ out: "", fail: "timeout" }); });
     req.write(body);
     req.end();
   });
@@ -146,7 +166,16 @@ function trySpawnDaemon() {
   // running (socket not yet created) or being spawned by the MCP client.
   const pidFile = path.join(CACHE_DIR, "daemon.pid");
   try {
-    const pid = Number(fs.readFileSync(pidFile, "utf8").trim());
+    const raw = fs.readFileSync(pidFile, "utf8").trim();
+    // daemon.pid has been a JSON marker since 0.7.65
+    // ({"marker":"kongcode-daemon","pid":N,...}). Number(JSON) is NaN, which
+    // made this guard dead for ~50 releases — every unreachable-socket hook
+    // event forked a doomed daemon. Parse JSON-or-bare (mirrors
+    // readDaemonPidMarker in src/mcp-client/daemon-spawn.ts).
+    let pid = Number(raw);
+    if (!Number.isFinite(pid)) {
+      try { pid = Number(JSON.parse(raw).pid); } catch {}
+    }
     if (isPidAlive(pid)) return; // daemon or spawner is alive, don't double-spawn
   } catch {}
 
@@ -157,6 +186,17 @@ function trySpawnDaemon() {
     const holderPid = Number(fs.readFileSync(lockPath, "utf8").trim());
     if (isPidAlive(holderPid)) return;
   } catch {}
+
+  // Spawn-attempt cooldown (W2-02, 2026-06-10): even with the pid-marker
+  // parse fixed, a persistently boot-crashing daemon would be re-forked on
+  // every hook event (several per turn). One attempt per 30s, cross-process
+  // via a timestamp file — the auto-drain cooldown precedent.
+  const attemptFile = path.join(CACHE_DIR, "daemon-spawn-attempt");
+  try {
+    const last = Number(fs.readFileSync(attemptFile, "utf8").trim());
+    if (Number.isFinite(last) && Date.now() - last < 30_000) return;
+  } catch {}
+  try { fs.writeFileSync(attemptFile, String(Date.now())); } catch {}
 
   // Find daemon script relative to plugin root
   const pluginRoot = process.env.CLAUDE_PLUGIN_ROOT || path.resolve(__dirname, "..", "..");
@@ -248,14 +288,21 @@ function daemonDownResponse(eventName) {
     process.stdout.write(daemonDownResponse(HOOK_EVENT));
     return;
   }
-  const out = await postJson({
+  const { out, fail } = await postJson({
     socketPath: sock,
     port,
     eventName: HOOK_EVENT,
     body,
   });
   if (!out) {
-    // Socket/port existed but daemon didn't respond — also try respawn
+    if (fail === "timeout") {
+      // Slow ≠ down (W2-01): the daemon is alive but exceeded this event's
+      // budget. Fail open WITHOUT respawning and WITHOUT the daemon-down
+      // warning — both were false alarms that compounded the slowness.
+      process.stdout.write("{}");
+      return;
+    }
+    // Connect-class failure — the daemon is genuinely unreachable.
     trySpawnDaemon();
     process.stdout.write(daemonDownResponse(HOOK_EVENT));
     return;

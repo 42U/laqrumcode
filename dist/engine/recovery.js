@@ -120,18 +120,18 @@ export async function recoverProjectIdRows(store) {
        AND ->relevant_to->project[0] IS NOT NONE`);
     // 4. Memories via session.project_id (kc_session_id OR record-ref match)
     const memories = await backfillTable(store, `SELECT id, (SELECT project_id FROM session
-       WHERE kc_session_id = $parent.session_id OR id = $parent.session_id LIMIT 1)[0].project_id AS project_id
+       WHERE kc_session_id = $parent.session_id OR <string>id = $parent.session_id LIMIT 1)[0].project_id AS project_id
      FROM memory WHERE project_id IS NONE AND session_id IS NOT NONE`);
     // 5. Reflections (same shape as memories)
     const reflections = await backfillTable(store, `SELECT id, (SELECT project_id FROM session
-       WHERE kc_session_id = $parent.session_id OR id = $parent.session_id LIMIT 1)[0].project_id AS project_id
+       WHERE kc_session_id = $parent.session_id OR <string>id = $parent.session_id LIMIT 1)[0].project_id AS project_id
      FROM reflection WHERE project_id IS NONE AND session_id IS NOT NONE`);
     // 6. Skills via skill_from_task→task OR session traversal
     const skillsViaTask = await backfillTable(store, `SELECT id, ->skill_from_task->task[0].project_id AS project_id
      FROM skill WHERE project_id IS NONE
        AND ->skill_from_task->task[0] IS NOT NONE`);
     const skillsViaSession = await backfillTable(store, `SELECT id, (SELECT project_id FROM session
-       WHERE kc_session_id = $parent.session_id OR id = $parent.session_id LIMIT 1)[0].project_id AS project_id
+       WHERE kc_session_id = $parent.session_id OR <string>id = $parent.session_id LIMIT 1)[0].project_id AS project_id
      FROM skill WHERE project_id IS NONE AND session_id IS NOT NONE`);
     // 7. Centroid-based assignment for remaining orphans
     let centroidAssigned = 0;

@@ -14,10 +14,12 @@ import type { GlobalPluginState } from "../src/engine/state.js";
 function mockState(): GlobalPluginState {
   const store = {
     isAvailable: () => true,
-    upsertConcept: vi.fn(async () => "concept:c1"),
+    // W2-07/W2-09 signatures: { id, existed } — existed:false = fresh create,
+    // so the auto-seal linking paths run (the pre-change default behavior).
+    upsertConcept: vi.fn(async () => ({ id: "concept:c1", existed: false })),
     createMemory: vi.fn(async () => "memory:m1"),
-    createArtifact: vi.fn(async () => "artifact:a1"),
-    relate: vi.fn(async () => {}),
+    createArtifact: vi.fn(async () => ({ id: "artifact:a1", existed: false })),
+    relate: vi.fn(async () => true),
     queryFirst: vi.fn(async () => []),
   };
   const embeddings = {
@@ -215,10 +217,10 @@ describe("commitKnowledge — subagent kind", () => {
     const { createError, siblingId } = opts;
     const store = {
       isAvailable: () => true,
-      upsertConcept: vi.fn(async () => "concept:c1"),
+      upsertConcept: vi.fn(async () => ({ id: "concept:c1", existed: false })),
       createMemory: vi.fn(async () => "memory:m1"),
-      createArtifact: vi.fn(async () => "artifact:a1"),
-      relate: vi.fn(async () => {}),
+      createArtifact: vi.fn(async () => ({ id: "artifact:a1", existed: false })),
+      relate: vi.fn(async () => true),
       queryFirst: vi.fn(async (sql: string) => {
         if (sql.includes("CREATE subagent")) {
           if (createError) throw createError;

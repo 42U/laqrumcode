@@ -27,6 +27,7 @@ import { writeFileSync, unlinkSync, existsSync, readFileSync, mkdirSync, readdir
 import { join, dirname } from "node:path";
 import { homedir, platform } from "node:os";
 import { applyGpuPin } from "./gpu-pin.js";
+import { ensureEdgeIndexes } from "../engine/edge-indexes.js";
 import {
   PROTOCOL_VERSION,
   DEFAULT_DAEMON_SOCKET_PATH,
@@ -283,6 +284,12 @@ async function initializeStack(): Promise<void> {
   setBootstrapPhase("connecting-store");
   try {
     await store.initialize();
+    // W2-05: arm UNIQUE (in,out) edge indexes. Fire-and-forget — a first
+    // attempt against a still-duplicated table can take seconds and must
+    // never block boot; failures flag the table for the dedup migration.
+    void ensureEdgeIndexes(store, config.paths.cacheDir).catch((e) =>
+      log.warn(`[daemon] ensureEdgeIndexes: ${(e as Error).message}`),
+    );
     log.info("[daemon] SurrealDB connected");
   } catch (err) {
     log.error("[daemon] SurrealDB connection failed — running in degraded mode:", err);

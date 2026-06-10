@@ -563,7 +563,11 @@ async function getPendingCount(state) {
     if (!state.store.isAvailable())
         return 0;
     try {
-        const rows = await state.store.queryFirst(`SELECT count() AS count FROM pending_work WHERE status = "pending" GROUP ALL`);
+        const rows = await state.store.queryFirst(
+        // W2-04: active filter matches fetch_pending_work's claim filter. Without
+        // it the scheduler spawned extractors against soft-archived forensic rows
+        // (counted-but-unfetchable) — the post-storm empty-fetch churn.
+        `SELECT count() AS count FROM pending_work WHERE status = "pending" AND (active = true OR active IS NONE) GROUP ALL`);
         return rows[0]?.count ?? 0;
     }
     catch (e) {

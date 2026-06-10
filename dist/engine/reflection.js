@@ -26,7 +26,7 @@ export async function retrieveReflections(queryVec, limit = 3, store, projectId)
     try {
         const projectFilter = projectId
             ? ` AND (project_id IS NONE OR project_id = $pid OR scope = 'global'
-               OR session_id IN (SELECT id FROM session WHERE project_id = $pid))`
+               OR session_id IN (SELECT VALUE kc_session_id FROM session WHERE project_id = $pid))`
             : "";
         const bindings = { vec: queryVec, lim: limit };
         if (projectId)

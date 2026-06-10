@@ -160,7 +160,10 @@ async function backfillSessionTurnCounts(state) {
  *  migrations or prior boots) are never overwritten. Newly-inserted rows
  *  are tagged `source: "seed"` so the embedding backfill picks them up on
  *  the same boot. */
-async function seedSkillsFromJson(state) {
+// Exported for test/wave2-fixes.test.ts — the W2-22 regression (null →
+// option<string> coercion) made every seed CREATE fail silently; the live
+// test pins that a fresh install now seeds the full curated set.
+export async function seedSkillsFromJson(state) {
     if (!state.store.isAvailable())
         return;
     try {
@@ -186,24 +189,25 @@ async function seedSkillsFromJson(state) {
                     skipped++;
                     continue;
                 }
-                await state.store.queryExec(`CREATE skill CONTENT {
-            name: $name,
-            description: $description,
-            body: $body,
-            steps: $steps,
-            preconditions: $preconditions,
-            postconditions: $postconditions,
-            source: "seed",
-            active: true,
-            confidence: 1.0
-          }`, {
+                // W2-22 (2026-06-10): preconditions/postconditions are option<string>
+                // — binding JS null fails coercion ("found NULL"). All 15 curated
+                // seed skills lack both fields, so EVERY seed CREATE failed (swallowed
+                // per-row below): fresh installs seeded 0 of 15 skills. Build the
+                // CONTENT object conditionally and omit absent keys.
+                const data = {
                     name: s.name,
                     description: s.description,
                     body: s.body,
                     steps: s.steps ?? [],
-                    preconditions: s.preconditions ?? null,
-                    postconditions: s.postconditions ?? null,
-                });
+                    source: "seed",
+                    active: true,
+                    confidence: 1.0,
+                };
+                if (s.preconditions != null)
+                    data.preconditions = s.preconditions;
+                if (s.postconditions != null)
+                    data.postconditions = s.postconditions;
+                await state.store.queryExec(`CREATE skill CONTENT $data`, { data });
                 inserted++;
             }
             catch (e) {

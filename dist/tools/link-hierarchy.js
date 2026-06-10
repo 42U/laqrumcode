@@ -17,7 +17,7 @@
  * on top — that's the point of the tool, to make the relation explicit
  * where the substrate's pattern-match wouldn't have found it.
  */
-import { commitKnowledge } from "../engine/commit.js";
+import { commitKnowledge, linkConceptCrossLink } from "../engine/commit.js";
 import { swallow } from "../engine/errors.js";
 /** Reuse-similarity threshold.
  *  2026-06-09 recalibration (the "link_hierarchy NEVER reuses" incident,
@@ -114,21 +114,12 @@ export async function handleLinkHierarchy(state, _session, args) {
     }
     // Explicit hierarchy edges. broader goes parent→child; narrower goes child→parent.
     // Same direction convention linkConceptHierarchy uses internally.
+    // W2-13 (2026-06-10): routed through linkConceptCrossLink — its exists-guard
+    // makes a repeated/retried link_hierarchy call idempotent (the tool reuses
+    // resolved concepts by design, so the same pair recurs legitimately).
     let edgesWritten = 0;
-    try {
-        await store.relate(parentId, "broader", childId);
-        edgesWritten++;
-    }
-    catch (e) {
-        swallow("linkHierarchy:broader", e);
-    }
-    try {
-        await store.relate(childId, "narrower", parentId);
-        edgesWritten++;
-    }
-    catch (e) {
-        swallow("linkHierarchy:narrower", e);
-    }
+    edgesWritten += await linkConceptCrossLink({ store, embeddings }, parentId, childId, "broader");
+    edgesWritten += await linkConceptCrossLink({ store, embeddings }, childId, parentId, "narrower");
     return {
         content: [{
                 type: "text",

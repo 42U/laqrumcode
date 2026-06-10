@@ -138,7 +138,9 @@ export async function handleMemoryHealth(
     countRow(state, "SELECT count() AS n FROM artifact GROUP ALL"),
     countRow(state, "SELECT count() AS n FROM artifact WHERE embedding != NONE AND array::len(embedding) > 0 GROUP ALL"),
     countRow(state, "SELECT count() AS n FROM retrieval_outcome GROUP ALL"),
-    countRow(state, "SELECT count() AS n FROM pending_work WHERE status = 'pending' GROUP ALL"),
+    // W2-04: active filter matches fetch_pending_work's claim filter — without
+    // it, soft-archived forensic rows (active=false) count as phantom backlog.
+    countRow(state, "SELECT count() AS n FROM pending_work WHERE status = 'pending' AND (active = true OR active IS NONE) GROUP ALL"),
   ]);
 
   // Compute an aggregate embedding gap percentage across the main embedded tables.

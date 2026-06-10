@@ -185,6 +185,12 @@ export async function handleSubagentStop(state, payload) {
                             result_summary: resultText.slice(0, 500),
                             description: "orphan stop (no matching spawn)",
                             correlation_key: corrKey,
+                            // W2-21 (2026-06-10): schema contract (schema.surql:779-787) —
+                            // every subagent CREATE must set run_id too; SurrealDB
+                            // collapses multiple NONEs into one UNIQUE bucket, so omitting
+                            // it let only the FIRST orphan row ever land and silently
+                            // dropped every later one as a fake "sibling won race".
+                            run_id: corrKey,
                         },
                     });
                     // Wave 3: when the Stop arrived with only agent_id (and we had

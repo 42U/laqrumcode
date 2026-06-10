@@ -25,7 +25,9 @@ function isTransactionConflict(e) {
 }
 function assertRecordId(id) {
     if (!RECORD_ID_RE.test(id)) {
-        throw new Error(`Invalid record ID format: ${id.slice(0, 40)}`);
+        // String() so a non-string id (e.g. an object passed by mistake) produces
+        // the intended error instead of crashing the error path itself.
+        throw new Error(`Invalid record ID format: ${String(id).slice(0, 40)}`);
     }
 }
 /** Parse a `"table:key"` string into a SurrealDB RecordId for binding into
@@ -326,6 +328,8 @@ export class SurrealStore {
        FROM turn WHERE embedding != NONE AND array::len(embedding) > 0
          AND pruned_at IS NONE
          AND session_id = $sid ORDER BY score DESC LIMIT ${sessionTurnLim}`,
+            // COSINE_GUARD_OK: read-only vector retrieval batch (turn) — no
+            // destructive follow-on. Inline markers replace drift-prone line pins.
             `SELECT id, text, role, timestamp, 0 AS accessCount, 'turn' AS table,
               vector::similarity::cosine(embedding, $vec) AS score${emb}
        FROM turn WHERE embedding != NONE AND array::len(embedding) > 0
@@ -335,6 +339,8 @@ export class SurrealStore {
             // reachable after archiveOldTurns drains the live turn table. Without
             // this, mass archival would silently make historical conversation
             // content un-recallable via turn-scope queries.
+            // COSINE_GUARD_OK: read-only vector retrieval batch (turn_archive +
+            // concept) — no destructive follow-on.
             `SELECT id, text, role, timestamp, 0 AS accessCount, 'turn' AS table,
               vector::similarity::cosine(embedding, $vec) AS score${emb}
        FROM turn_archive WHERE embedding != NONE AND array::len(embedding) > 0
@@ -345,6 +351,8 @@ export class SurrealStore {
        FROM concept WHERE embedding != NONE AND array::len(embedding) > 0
          AND superseded_at IS NONE${projectFilter}
        ORDER BY score DESC LIMIT ${lim.concept}`,
+            // COSINE_GUARD_OK: read-only vector retrieval batch (memory + artifact)
+            // — no destructive follow-on.
             `SELECT id, text, importance, access_count AS accessCount,
               created_at AS timestamp, session_id AS sessionId, category, 'memory' AS table,
               vector::similarity::cosine(embedding, $vec) AS score${emb}
@@ -355,6 +363,8 @@ export class SurrealStore {
               vector::similarity::cosine(embedding, $vec) AS score${emb}
        FROM artifact WHERE embedding != NONE AND array::len(embedding) > 0${projectFilter}
        ORDER BY score DESC LIMIT ${lim.artifact}`,
+            // COSINE_GUARD_OK: read-only vector retrieval batch (monologue +
+            // identity_chunk) — no destructive follow-on.
             `SELECT id, content AS text, category AS source, 0.5 AS importance, 0 AS accessCount,
               timestamp, 'monologue' AS table,
               vector::similarity::cosine(embedding, $vec) AS score${emb}
@@ -440,12 +450,28 @@ export class SurrealStore {
         })).filter(r => r.turnId);
     }
     // ── Relation helpers ───────────────────────────────────────────────────
+    /** Returns true when a new edge row was written, false when a UNIQUE
+     *  (in,out) index reported the edge already exists (idempotent no-op).
+     *  W2-06 (2026-06-10): with ensureEdgeIndexes() armed, every duplicate
+     *  RELATE — hook re-fires, RPC-timeout retries, per-turn re-linking —
+     *  surfaces as a unique violation; treating it as success-without-write
+     *  is the central backstop that made 92% of production edge rows
+     *  impossible to recreate. Callers that need created-vs-existed (e.g.
+     *  decay-once) read the boolean; void-style callers are unaffected. */
     async relate(fromId, edge, toId) {
         assertRecordId(fromId);
         assertRecordId(toId);
         const safeName = edge.replace(/[^a-zA-Z0-9_]/g, "");
         assertValidEdge(safeName);
-        await this.queryExec(`RELATE ${fromId}->${safeName}->${toId}`);
+        try {
+            await this.queryExec(`RELATE ${fromId}->${safeName}->${toId}`);
+            return true;
+        }
+        catch (e) {
+            if (isUniqueViolation(e))
+                return false;
+            throw e;
+        }
     }
     // ── 5-Pillar entity operations ─────────────────────────────────────────
     async ensureAgent(name, model) {
@@ -463,11 +489,25 @@ export class SurrealStore {
         return String(created[0]?.id ?? "");
     }
     async createTask(description, projectId) {
-        const rows = await this.queryFirst(`CREATE task CONTENT { description: $desc, status: "in_progress", project_id: $pid } RETURN id`, { desc: description, pid: projectId ?? null });
+        // W2-23 (2026-06-10): omit absent keys instead of binding null. Stored
+        // NULLs poison `project_id IS NONE` backfill predicates (NULL ≠ NONE),
+        // making no-project rows permanently un-backfillable.
+        const data = { description, status: "in_progress" };
+        if (projectId)
+            data.project_id = projectId;
+        const rows = await this.queryFirst(`CREATE task CONTENT $data RETURN id`, { data });
         return String(rows[0]?.id ?? "");
     }
     async createSession(agentId = "default", kcSessionId, projectId) {
-        const rows = await this.queryFirst(`CREATE session CONTENT { agent_id: $agent_id, kc_session_id: $kc_session_id, project_id: $pid } RETURN id`, { agent_id: agentId, kc_session_id: kcSessionId ?? null, pid: projectId ?? null });
+        // W2-23: kc_session_id is option<string> — binding null fails coercion
+        // ("found NULL"), so the no-kc-id fallback path this method exists for
+        // always failed. Omit absent keys.
+        const data = { agent_id: agentId };
+        if (kcSessionId)
+            data.kc_session_id = kcSessionId;
+        if (projectId)
+            data.project_id = projectId;
+        const rows = await this.queryFirst(`CREATE session CONTENT $data RETURN id`, { data });
         return String(rows[0]?.id ?? "");
     }
     /** Idempotent session-row resolver. If a session row already exists for the
@@ -687,6 +727,9 @@ export class SurrealStore {
             return [];
         const tagWords = words.slice(0, 8);
         try {
+            // COSINE_GUARD_OK: read-only keyword/tag concept retrieval — no
+            // destructive follow-on. (Inline marker replaces a line-pinned
+            // whitelist entry that drifted on every edit above it.)
             const rows = await this.queryFirst(`SELECT id, content AS text, stability AS importance, access_count AS accessCount,
                 created_at AS timestamp, 'concept' AS table,
                 vector::similarity::cosine(embedding, $vec) AS score
@@ -712,6 +755,8 @@ export class SurrealStore {
         const reverseEdgeList = "reflects_on, skill_from_task, produced, derived_from, performed, owns";
         const FORWARD_LIMIT = 25;
         const REVERSE_LIMIT = 10;
+        // COSINE_GUARD_OK: read-only graph-expansion scoring — traversal only,
+        // no destructive follow-on.
         const scoreExpr = ", IF embedding != NONE AND array::len(embedding) > 0 THEN vector::similarity::cosine(embedding, $vec) ELSE 0 END AS score";
         const bindings = { vec: queryVec };
         const selectFields = `SELECT id, text, content, description, importance, stability,
@@ -792,9 +837,14 @@ export class SurrealStore {
         }
     }
     // ── Concept / Memory / Artifact CRUD ───────────────────────────────────
+    /** W2-07 (2026-06-10): returns { id, existed } — `existed: true` when the
+     *  content resolved to a pre-existing concept (exact or >0.92-cosine dedup,
+     *  including race-recovery paths). commitConcept uses the flag to skip
+     *  re-running hierarchy/related_to link scans for recurring concepts — the
+     *  per-turn re-wiring that produced ×4,541 duplicate edges on hot pairs. */
     async upsertConcept(content, embedding, source, provenance, projectId) {
         if (!content?.trim())
-            return "";
+            return { id: "", existed: false };
         content = content.trim();
         // Two-stage dedup. Stage 1 (fast, sub-linear): KNN pre-filter on the
         // `concept_vec_idx` HNSW index (schema.surql:62) — top-10 nearest
@@ -812,6 +862,8 @@ export class SurrealStore {
         // that branch. The hot path is the KNN one.
         let existingId = null;
         if (embedding?.length) {
+            // COSINE_GUARD_OK: read-only dedup candidate scan — the only follow-on
+            // writes are the guarded UPDATE-existing / CREATE-new below.
             const candidates = await this.queryFirst(`SELECT id, content, vector::similarity::cosine(embedding, $vec) AS score
          FROM concept
          WHERE embedding != NONE AND array::len(embedding) > 0
@@ -855,7 +907,7 @@ export class SurrealStore {
             else {
                 await this.queryExec(`UPDATE ${id} SET access_count += 1, last_accessed = time::now()`);
             }
-            return id;
+            return { id, existed: true };
         }
         const emb = embedding?.length ? embedding : undefined;
         const record = { content, source: source ?? undefined };
@@ -875,7 +927,7 @@ export class SurrealStore {
         // intact instead of throwing.
         try {
             const created = await this.queryFirst(`CREATE concept CONTENT $record RETURN id`, { record });
-            return String(created[0]?.id ?? "");
+            return { id: String(created[0]?.id ?? ""), existed: false };
         }
         catch (createErr) {
             if (isUniqueViolation(createErr)) {
@@ -884,13 +936,15 @@ export class SurrealStore {
                 // where two callers wrote the same content string concurrently.
                 const existing = await this.queryFirst(`SELECT id FROM concept WHERE string::lowercase(content) = string::lowercase($content) AND superseded_at IS NONE LIMIT 1`, { content }).catch(e => { swallow.warn("upsertConcept:selectAfterRace", e); return []; });
                 if (existing[0]?.id)
-                    return String(existing[0].id);
+                    return { id: String(existing[0].id), existed: true };
                 // Stage B (R7 F1): when the race winner deduped via KNN cosine
                 // (>0.92 sim, different content text — synonym/paraphrase), the
                 // lowercase rematch above won't find it. Replay the same KNN
                 // similarity match the initial dedup pass would have done so the
                 // caller still receives the correct id instead of the empty string.
                 if (embedding?.length) {
+                    // COSINE_GUARD_OK: read-only race-fallback KNN rematch — resolves
+                    // the dedup-race winner's id; no destructive follow-on.
                     const knn = await this.queryFirst(`SELECT id, vector::similarity::cosine(embedding, $vec) AS score
              FROM concept
              WHERE embedding != NONE AND array::len(embedding) > 0
@@ -898,13 +952,18 @@ export class SurrealStore {
              ORDER BY score DESC
              LIMIT 1`, { vec: embedding }).catch(e => { swallow.warn("upsertConcept:knnAfterRace", e); return []; });
                     if (knn[0] && typeof knn[0].score === "number" && knn[0].score > 0.92 && knn[0].id) {
-                        return String(knn[0].id);
+                        return { id: String(knn[0].id), existed: true };
                     }
                 }
             }
             throw createErr;
         }
     }
+    /** W2-09 (2026-06-10): returns { id, existed } — `existed: true` when the
+     *  path-unique dedup resolved to a pre-existing artifact row. commitArtifact
+     *  uses the flag to skip re-running the artifact_mentions link scan on every
+     *  re-edit of the same file (~5 duplicate edges + one wasted embed per
+     *  Write/Edit before the fix). */
     async createArtifact(path, type, description, embedding, projectId) {
         // Dedup by `path`: PostToolUse re-fires (duplicate-row bug class)
         // would otherwise produce duplicate artifact rows for the same file.
@@ -925,14 +984,14 @@ export class SurrealStore {
             record.project_id = projectId;
         try {
             const rows = await this.queryFirst(`CREATE artifact CONTENT $record RETURN id`, { record });
-            return String(rows[0]?.id ?? "");
+            return { id: String(rows[0]?.id ?? ""), existed: false };
         }
         catch (createErr) {
             if (path && isUniqueViolation(createErr)) {
                 // Sibling already wrote the row — fetch its id and return.
                 const existing = await this.queryFirst(`SELECT id FROM artifact WHERE path = $path LIMIT 1`, { path }).catch(e => { swallow.warn("createArtifact:selectAfterUnique", e); return []; });
                 if (existing[0]?.id)
-                    return String(existing[0].id);
+                    return { id: String(existing[0].id), existed: true };
                 // TOCTOU close-out: the sibling row was deleted between our CREATE
                 // rejection and our SELECT, so the path is no longer occupied. Retry
                 // CREATE once — succeeds in the normal case, only re-fails if a third
@@ -940,13 +999,13 @@ export class SurrealStore {
                 // wrap it as a distinct error rather than infinite-looping.
                 try {
                     const retried = await this.queryFirst(`CREATE artifact CONTENT $record RETURN id`, { record });
-                    return String(retried[0]?.id ?? "");
+                    return { id: String(retried[0]?.id ?? ""), existed: false };
                 }
                 catch (retryErr) {
                     if (isUniqueViolation(retryErr)) {
                         const existingAgain = await this.queryFirst(`SELECT id FROM artifact WHERE path = $path LIMIT 1`, { path }).catch(() => []);
                         if (existingAgain[0]?.id)
-                            return String(existingAgain[0].id);
+                            return { id: String(existingAgain[0].id), existed: true };
                         // isUniqueViolation accepts non-Error inputs (plain-object errors
                         // from raw RPC layers), so retryErr may not be an Error instance.
                         // Cast unconditionally would produce `cause=undefined` and a
@@ -1350,13 +1409,18 @@ export class SurrealStore {
             // permanent; readers already filter `status = 'active' OR status IS NONE`
             // (surreal.ts:447, 2019), so archived rows naturally drop out of recall
             // while remaining recoverable for forensic inspection.
-            const pruned = await this.db.query(`LET $stale = (
+            // W2-20 (2026-06-10): raw db.query returns one result per statement —
+            // Number([three-element array]) was NaN, so the run count was never
+            // recorded and the weekly gate re-ran these jobs every boot. queryMulti
+            // takes the last statement's value (the RETURN array::len), exactly as
+            // purgeStalePendingWork does for the identical LET+FOR pattern.
+            const pruned = await this.queryMulti(`LET $stale = (
           SELECT id FROM memory
           WHERE created_at < time::now() - 14d
             AND importance <= 2.0
             AND (access_count = 0 OR access_count IS NONE)
             AND (status = 'active' OR status IS NONE)
-            AND string::concat("memory:", id) NOT IN (
+            AND <string>id NOT IN (
               SELECT VALUE memory_id FROM (
                 SELECT memory_id FROM retrieval_outcome
                 WHERE utilization > 0.2
@@ -1392,7 +1456,12 @@ export class SurrealStore {
             // superseded_at + archive_reason. Concept readers already filter
             // `superseded_at IS NONE` (surreal.ts:441 vectorSearch), so archived
             // concepts naturally drop out of recall while remaining auditable.
-            const pruned = await this.db.query(`LET $stale = (
+            // W2-20 (2026-06-10): raw db.query returns one result per statement —
+            // Number([three-element array]) was NaN, so the run count was never
+            // recorded and the weekly gate re-ran these jobs every boot. queryMulti
+            // takes the last statement's value (the RETURN array::len), exactly as
+            // purgeStalePendingWork does for the identical LET+FOR pattern.
+            const pruned = await this.queryMulti(`LET $stale = (
           SELECT id FROM concept
           WHERE created_at < time::now() - 1d
             AND string::len(content) <= 12
@@ -1466,7 +1535,7 @@ export class SurrealStore {
             // after week 1 regardless of volume.
             if (!(await this.shouldRunMaintenance("archiveOldTurns", 500, 7, count)))
                 return 0;
-            const staleRows = await this.queryFirst(`SELECT id FROM turn WHERE timestamp < time::now() - 7d AND pruned_at IS NONE AND id NOT IN (SELECT VALUE memory_id FROM retrieval_outcome WHERE memory_table = 'turn') LIMIT 500`);
+            const staleRows = await this.queryFirst(`SELECT id FROM turn WHERE timestamp < time::now() - 7d AND pruned_at IS NONE AND <string>id NOT IN (SELECT VALUE memory_id FROM retrieval_outcome WHERE memory_table = 'turn') LIMIT 500`);
             if (!staleRows.length)
                 return 0;
             for (const row of staleRows) {

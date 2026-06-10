@@ -228,8 +228,15 @@ async function evaluateRetrievalInner(sessionId, responseTurnId, responseText, s
             if (existing.length === 0) {
                 await store.queryExec(`CREATE retrieval_outcome CONTENT $data`, { data: record });
             }
-            store.updateUtilityCache(idStr, signals.utilization)
-                .catch(e => swallow.warn("retrieval-quality:utilityCache", e));
+            // W2-03 (2026-06-10): guaranteed-inclusion recent turns carry synthetic
+            // ids ("guaranteed:<timestamp>", graph-context.ts) with no utility row —
+            // updateUtilityCache's record-id assertion rejected them on every turn
+            // ("Invalid record ID format: guaranteed:…" daemon.log spam). Only
+            // record-shaped ids have a cache row to update.
+            if (/^[a-z_][a-z0-9_]*:[a-zA-Z0-9_]+$/i.test(idStr)) {
+                store.updateUtilityCache(idStr, signals.utilization)
+                    .catch(e => swallow.warn("retrieval-quality:utilityCache", e));
+            }
         }
         catch (e) {
             swallow.warn("retrieval-quality:outcome", e);
@@ -265,12 +272,19 @@ async function evaluateRetrievalInner(sessionId, responseTurnId, responseText, s
  *  turn. Used by cognitive-check to inject a Reflexion-style nudge. */
 export async function getLastTurnGroundingTrace(sessionId, store) {
     try {
+        // W2-19 (2026-06-10): rewritten as two queries. The old single query was
+        // triple-dead — the subquery lacked VALUE (object rows never match
+        // turn_id), MAX() is not a SurrealQL function, and patchOrderByFields
+        // corrupted the outer select — so this returned null on every call and
+        // the 0.7.27 Reflexion nudge never fired once.
+        const latest = await store.queryFirst(`SELECT turn_id FROM retrieval_outcome
+       WHERE session_id = $sid
+       ORDER BY created_at DESC LIMIT 1`, { sid: sessionId });
+        const lastTurnId = latest[0]?.turn_id;
+        if (!lastTurnId)
+            return null;
         const rows = await store.queryFirst(`SELECT memory_id, retrieval_score, cited FROM retrieval_outcome
-       WHERE session_id = $sid AND turn_id IN (
-         SELECT turn_id FROM retrieval_outcome
-         WHERE session_id = $sid
-         GROUP BY turn_id ORDER BY MAX(created_at) DESC LIMIT 1
-       )`, { sid: sessionId });
+       WHERE session_id = $sid AND turn_id = $tid`, { sid: sessionId, tid: lastTurnId });
         if (rows.length === 0)
             return null;
         const cited = rows.filter((r) => r.cited === true).length;

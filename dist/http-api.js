@@ -88,10 +88,12 @@ async function refreshHealthCache(state) {
         healthCache.refreshedAt = Date.now();
         return;
     }
-    // pending_work_count: count rows with status='pending'. Identical query to
-    // tools/memory-health.ts so the two surfaces report the same number.
+    // pending_work_count: claimable backlog — status='pending' AND active
+    // (W2-04). Identical query to tools/memory-health.ts so the two surfaces
+    // report the same number; both match fetch_pending_work's claim filter so
+    // soft-archived forensic rows never read as backlog.
     try {
-        const rows = await state.store.queryFirst("SELECT count() AS n FROM pending_work WHERE status = 'pending' GROUP ALL");
+        const rows = await state.store.queryFirst("SELECT count() AS n FROM pending_work WHERE status = 'pending' AND (active = true OR active IS NONE) GROUP ALL");
         healthCache.pendingWorkCount = rows?.[0]?.n ?? 0;
     }
     catch (e) {

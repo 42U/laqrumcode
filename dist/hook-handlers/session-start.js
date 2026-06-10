@@ -155,7 +155,11 @@ export async function handleSessionStart(state, payload) {
     let pendingNote = null;
     if (store.isAvailable()) {
         try {
-            const rows = await store.queryFirst(`SELECT count() AS count FROM pending_work WHERE status = "pending" GROUP ALL`);
+            const rows = await store.queryFirst(
+            // W2-04: active filter matches fetch_pending_work — without it this
+            // banner fired on soft-archived forensic rows and instructed the agent
+            // to spawn an extractor that fetches nothing (phantom-drain churn).
+            `SELECT count() AS count FROM pending_work WHERE status = "pending" AND (active = true OR active IS NONE) GROUP ALL`);
             const count = rows[0]?.count ?? 0;
             if (count >= 1) {
                 pendingNote = `[PENDING WORK — DRAIN NOW]\n${count} background item${count === 1 ? "" : "s"} waiting. Items older than 7 days are silently purged, so don't postpone. Spawn a kongcode:memory-extractor subagent (opus, run_in_background=true) and have it loop fetch_pending_work → commit_work_results until empty. Light types (reflection, handoff_note) can run inline.`;

@@ -209,7 +209,7 @@ describe("SurrealDB integration", () => {
   itDb("graphExpand traverses edges from seed nodes", async () => {
     // Create linked nodes
     const t1 = await store.upsertTurn({ session_id: "graph-test", role: "user", text: "Graph seed", embedding: new Array(1024).fill(0.01) });
-    const conceptId = await store.upsertConcept("graph-test-concept", new Array(1024).fill(0.02), "test");
+    const { id: conceptId } = await store.upsertConcept("graph-test-concept", new Array(1024).fill(0.02), "test");
 
     if (t1 && conceptId) {
       await store.relate(t1, "mentions", conceptId);

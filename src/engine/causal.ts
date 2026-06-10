@@ -69,6 +69,23 @@ export async function linkCausalEdges(
 
       if (!triggerId || !outcomeId) continue;
 
+      // W2-11 (2026-06-10): the chain-row existence check used to run AFTER
+      // the edges were written, so re-extracting the same transcript (daemon
+      // retries) duplicated caused_by/supports/contradicts/describes while
+      // the row write correctly no-op'd against its UNIQUE index. Check FIRST
+      // and skip the whole chain when it already exists. (trigger_memory/
+      // outcome_memory are TYPE string — schema.surql:399 — so these string
+      // bindings are correct, unlike the record-id traps.)
+      try {
+        const dup = await store.queryFirst<{ id: string }>(
+          `SELECT id FROM causal_chain
+             WHERE trigger_memory = $t AND outcome_memory = $o AND chain_type = $type
+             LIMIT 1`,
+          { t: triggerId, o: outcomeId, type: chain.chainType },
+        );
+        if (dup.length > 0) continue;
+      } catch (e) { swallow.warn("causal:dupCheck", e); }
+
       // Create causal edges
       await store.relate(outcomeId, "caused_by", triggerId).catch(e => swallow.warn("causal:relateCausedBy", e));
       if (chain.success) {
@@ -98,31 +115,24 @@ export async function linkCausalEdges(
         }
       }
 
-      // Store chain metadata. Pre-check for an existing row with the same
-      // (trigger, outcome, chain_type) tuple so we don't trip the UNIQUE
-      // index on retries / concurrent runs. The UNIQUE index is the hard
-      // backstop; this skip-on-exists avoids the surfaced error path entirely.
+      // Store chain metadata. The (trigger, outcome, chain_type) dedup
+      // pre-check now runs at the TOP of the loop (W2-11) — before the edges
+      // — so reaching here means the tuple was absent moments ago. CREATE
+      // directly; the UNIQUE index remains the hard backstop for the
+      // pre-check-to-CREATE race (violation lands in the catch below).
       try {
-        const existing = await store.queryFirst<{ id: string }>(
-          `SELECT id FROM causal_chain
-             WHERE trigger_memory = $t AND outcome_memory = $o AND chain_type = $type
-             LIMIT 1`,
-          { t: triggerId, o: outcomeId, type: chain.chainType },
-        );
-        if (existing.length === 0) {
-          await store.queryExec(`CREATE causal_chain CONTENT $data`, {
-            data: {
-              session_id: String(sessionId),
-              trigger_memory: triggerId,
-              outcome_memory: outcomeId,
-              description_memory: descriptionId,
-              chain_type: chain.chainType,
-              success: chain.success,
-              confidence: chain.confidence,
-              description: chain.description,
-            },
-          });
-        }
+        await store.queryExec(`CREATE causal_chain CONTENT $data`, {
+          data: {
+            session_id: String(sessionId),
+            trigger_memory: triggerId,
+            outcome_memory: outcomeId,
+            description_memory: descriptionId,
+            chain_type: chain.chainType,
+            success: chain.success,
+            confidence: chain.confidence,
+            description: chain.description,
+          },
+        });
       } catch (e) {
         swallow.warn("causal:storeChain", e);
       }
@@ -159,6 +169,8 @@ export async function queryCausalContext(
   const results: VectorSearchResult[] = [];
   const bindings = { vec: queryVec };
 
+  // COSINE_GUARD_OK: read-only causal-chain traversal scoring — no
+  // destructive follow-on.
   const scoreExpr = `, IF embedding != NONE AND array::len(embedding) > 0
          THEN vector::similarity::cosine(embedding, $vec)
          ELSE 0 END AS score`;

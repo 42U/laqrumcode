@@ -4,6 +4,42 @@ All notable changes to KongCode are documented here. The 0.7.x series introduced
 
 ## [Unreleased]
 
+## [0.7.116] — 2026-06-10
+
+Wave-2 remediation: ~20 confirmed bugs from the full-source QA waterfall (4-agent audit, findings inventory memory:65eoe78c151tot1eecdc). Four tranches; QA-reviewed with one CONCERN (coverage gap) closed pre-tag.
+
+### Fixed — live behavior (T1)
+- **Transport/transform deadline inversion** — hook-proxy abandoned at a flat 15 s while CPU-mode transforms legitimately run to 45 s, so every slow turn discarded its context, injected a **false "kongcode daemon is unreachable" warning, and forked a doomed daemon**. Now: per-event proxy budgets (55 s UPS/PreCompact, 25 s session-start/post-compact, 8 s short events; invariant `45 transform < 55 proxy < 60 hooks.json` — hooks.json UPS/PreCompact raised 15→60), and `postJson` distinguishes **timeout (slow ≠ down: fail-open `{}`, no respawn, no warning)** from connect-class failures (genuinely down → respawn + warning).
+- **hook-proxy NaN pid-guard** — `Number(JSON pid-marker)` = NaN made the don't-double-spawn guard dead for ~50 releases; every unreachable-socket hook event forked a doomed daemon. JSON-or-bare parse + a 30 s cross-process spawn-attempt cooldown file.
+- **`guaranteed:` synthetic-id leak** — guaranteed-inclusion recent turns crashed `updateUtilityCache` every turn ("Invalid record ID format" spam); record-shape gate added.
+- **Phantom pending counts ×6** — every counting surface (memory-health, introspect, auto-drain `getPendingCount`, session-start "DRAIN NOW" banner, user-prompt-submit, http-api health cache) now filters `active`, matching `fetch_pending_work` — soft-archived forensic rows no longer read as backlog (live: old predicate 5 → new 0), ending phantom-drain churn and false banners.
+
+### Fixed — edge integrity (T2; the 92%-duplicate-edges source)
+- **UNIQUE (in,out) edge indexes** — new `ensureEdgeIndexes()` arms `<table>_inout_unique` on the 10 duplicate-prone edge tables at daemon boot (fire-and-forget). Tables still holding duplicates are flagged in `cache/edge-indexes-pending.json` (one warn; no per-boot rebuild) until `scripts/dedup-edges.mjs` cleans them. Production damage being sealed: ~595,782 of 645,798 edge rows (92 %) were exact duplicates/self-loops (worst pair ×4,541).
+- **`store.relate()` is idempotent** — returns `true` written / `false` UNIQUE-rejected (no-op success); every duplicate write anywhere — hook re-fires, RPC-timeout retries, re-link scans — is now harmless.
+- **Per-turn re-link storm** — `upsertConcept`/`createArtifact` return `{ id, existed }`; commitConcept skips hierarchy/related_to scans and commitArtifact skips `artifact_mentions` re-linking for pre-existing rows (new relations still arrive symmetrically when the new neighbor is born; embedding backfill on existing rows is preserved).
+- **`supersedes` retry decay** — pre-check + relate-created backstop: a retried correction no longer re-applies stability decay multiplicatively (1.0→0.4→0.16).
+- **Causal edge duplication** — the chain dedup check now runs BEFORE the edges (re-extraction skips the whole chain); redundant inner pre-check removed (UNIQUE index is the backstop). `link_hierarchy`'s direct relates routed through the guarded helper.
+
+### Fixed — dead features (T3; each silently broken since introduction)
+- **`archiveOldTurns` retrieved-guard** (`<string>id` cast — record never equaled the stored string; every >7 d turn archived regardless of retrieval outcomes).
+- **Memory-GC utilization guard** (`string::concat("memory:", id)` double-prefixed → no-op; protected memories were archived).
+- **GC run accounting** — raw `db.query` returned per-statement arrays; `Number([...])` = NaN, so maintenance runs were never recorded and both GC jobs re-ran every boot (now `queryMulti<number>`, the proven pattern).
+- **Reflection project filter** — session subquery lacked `VALUE` (objects never matched); now `SELECT VALUE kc_session_id`.
+- **Recovery backfills ×3** — the record-ref match arm was dead (`<string>id` cast added); Thing-string session rows backfill again.
+- **Edit/bash gates over-blocking** — the DB fallback bound the session *Thing* id against `turn.session_id` (kc UUIDs) → matched zero rows always; now binds the kc UUID.
+- **Reflexion nudge** — `getLastTurnGroundingTrace` was triple-dead (missing `VALUE`, `MAX()` isn't SurrealQL, patcher corruption); rewritten as two queries — verified returning real grounding rows on the live graph for the first time.
+- **Orphan subagent stops** — CREATE omitted `run_id`, so SurrealDB's UNIQUE-on-NONE bucket dropped every orphan row after the first (mislabeled as a benign race); the documented `run_id: correlation_key` contract is honored.
+
+### Fixed — fresh-install killers (T4; null → option<T> coercion class)
+- **Seed skills: 0 → all** — every curated seed CREATE failed on `preconditions/postconditions: null`; **fresh installs seeded 0 of 15 skills**. Conditional CONTENT builds. Same fix class: workspace skill-file migration (`last_used: null` killed every migration CREATE), `createSession`'s kc-less fallback, and `createTask`/`createSession` NULL-poisoning of `project_id` (stored NULL ≠ NONE made rows permanently un-backfillable).
+
+### Tests
+- `test/wave2-fixes.test.ts` (7, live `kong_test`): index arming + dirty-table flagging, relate idempotency (2 calls → 1 edge), decay-once (0.4 stays 0.4), **seed skills count == curated set**, the archive guard query (referenced turn excluded), null-omission builders. Fixtures across 6 suites updated to the new signatures and *strengthened* (existed-flags pinned; Reflexion mocks mirror the real two-query sequence). Suite: **1140 passing**. QA-reviewed; the one CONCERN (three residual unfiltered counters) fixed before tagging.
+
+### Operational notes
+- `ensureEdgeIndexes` will flag the duplicated tables on existing installs — run `scripts/dedup-edges.mjs` (next release) to clean them; indexes arm on the following boot. hooks.json timeout changes activate on plugin reload.
+
 ## [0.7.115] — 2026-06-09
 
 Knowledge-write-tool fixes — the spec-gem linking incident (memory:ety7rj662y98liipw70c).

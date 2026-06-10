@@ -38,7 +38,9 @@ const COUNT_FILTERS = {
 // Now it reports only the truly-claimable backlog (status='pending').
 const TABLE_FILTER_OVERRIDES = {
     pending_work: {
-        unresolved: "WHERE status = 'pending'",
+        // W2-04: + active filter (matches fetch_pending_work) so soft-archived
+        // forensic rows don't read as claimable backlog.
+        unresolved: "WHERE status = 'pending' AND (active = true OR active IS NONE)",
     },
 };
 const QUERY_TEMPLATES = {
