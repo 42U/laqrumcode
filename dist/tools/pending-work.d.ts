@@ -23,6 +23,7 @@ export declare function handleCommitWorkResults(state: GlobalPluginState, _sessi
         text: string;
     }>;
 }>;
+export declare function isJunkExtractionText(s: unknown): boolean;
 export declare function handleCreateKnowledgeGems(state: GlobalPluginState, session: SessionState, args: Record<string, unknown>): Promise<{
     content: Array<{
         type: "text";

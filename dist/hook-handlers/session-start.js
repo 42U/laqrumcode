@@ -99,9 +99,11 @@ export async function handleSessionStart(state, payload) {
         catch (e) {
             swallow.warn("sessionStart:bootstrap", e);
         }
-        // Also fire bootstrap maintenance on session-start (belt-and-suspenders
-        // with the MCP-boot call in mcp-server.ts). Safe because each job is
-        // internally bounded and idempotent; ACAN retrain is lockfile-protected.
+        // Bootstrap-maintenance retry hook (0.7.118): the daemon boot is the
+        // canonical caller and a once-per-process guard makes this a no-op in
+        // the normal case. It still matters on a DEGRADED boot — when the store
+        // was down at daemon start the guard stays unlatched, and this call
+        // (plus the 5-min self-retry) runs maintenance once the store recovers.
         runBootstrapMaintenance(state);
         // Record maturity stage at every session-start. Previously this only
         // fired from midSessionCleanup (gated on 25K+ tokens in one session),

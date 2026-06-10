@@ -529,6 +529,40 @@ async function commitReflection(
   });
 }
 
+/** 0.7.118: drain agents given a degenerate work item (empty transcript,
+ *  turn_count 0) returned apology prose and/or echoed the bare session UUID —
+ *  which then got committed as "knowledge" (4 junk rows landed in production
+ *  on 2026-06-10, unembedded, failing the db-state invariants). Knowledge
+ *  content must never be a bare UUID or an extraction apology. */
+const BARE_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+/** Apology phrasings are free LLM text, not template-bound (QA 0.7.118 D1:
+ *  live corpus had "Empty transcript (turn_count=0)… Nothing to extract."
+ *  which the original anchored regex missed). Match variants in the HEAD of
+ *  the text only — legitimate gems can mention "empty transcript" mid-body
+ *  (e.g. knowledge about this very bug). */
+const JUNK_HEAD_RE = /empty transcript|nothing to extract|contain(s|ed) an empty/i;
+
+export function isJunkExtractionText(s: unknown): boolean {
+  if (typeof s !== "string") return false;
+  const t = s.trim();
+  if (t.length < 8) return true;
+  if (BARE_UUID_RE.test(t)) return true;
+  return JUNK_HEAD_RE.test(t.slice(0, 60));
+}
+
+/** Drop junk entries from an extraction array (returns filtered). Entries may
+ *  be bare strings or schema objects — probe content first (concepts commit
+ *  `content`; a junk body can hide behind a clean short name), then text,
+ *  then name (QA 0.7.118 D2). */
+function dropJunkEntries<T>(arr: T[] | undefined): T[] {
+  if (!Array.isArray(arr)) return [];
+  return arr.filter((e) => {
+    const o = e as Record<string, unknown>;
+    const probe = typeof e === "string" ? e : o?.content ?? o?.text ?? o?.name;
+    return !isJunkExtractionText(probe);
+  });
+}
+
 async function commitResults(
   item: PendingWorkItem,
   results: Record<string, unknown> | string | undefined,
@@ -550,6 +584,21 @@ async function commitResults(
         log.warn(`[pending_work] extraction schema violations (${schemaErrors.length}): ${schemaErrors.slice(0, 5).join("; ")}`);
       }
       const extractionData = schemaErrors.length === 0 ? validated : (results as Record<string, any>);
+      // 0.7.118 junk guard: scrub apology/UUID entries from the
+      // ExtractionResultSchema arrays the writer actually consumes
+      // (daemon-types.ts; QA D2 fixed the original guess-list).
+      {
+        const ed = extractionData as Record<string, any>;
+        for (const key of ["concepts", "skills", "corrections", "preferences", "decisions", "monologue", "artifacts"]) {
+          if (Array.isArray(ed[key])) {
+            const before = ed[key].length;
+            ed[key] = dropJunkEntries(ed[key]);
+            if (ed[key].length < before) {
+              log.warn(`[pending_work] dropped ${before - ed[key].length} junk ${key} entr(y/ies) (empty-transcript apology / bare UUID) for ${item.session_id}`);
+            }
+          }
+        }
+      }
       const prior: PriorExtractions = { conceptNames: [], artifactPaths: [], skillNames: [] };
       const counts = await writeExtractionResults(
         extractionData as Record<string, any>,
@@ -562,10 +611,10 @@ async function commitResults(
       );
       if (item.work_type === "coalesced_extraction") {
         const parsed = extractionData as Record<string, any>;
-        if (typeof parsed.handoff_note === "string" && parsed.handoff_note.length >= 20) {
+        if (typeof parsed.handoff_note === "string" && parsed.handoff_note.length >= 20 && !isJunkExtractionText(parsed.handoff_note)) {
           await commitHandoffNote(parsed.handoff_note, item, state);
         }
-        if (typeof parsed.reflection === "string" && parsed.reflection.length >= 20 && parsed.reflection.toLowerCase().trim() !== "skip") {
+        if (typeof parsed.reflection === "string" && parsed.reflection.length >= 20 && parsed.reflection.toLowerCase().trim() !== "skip" && !isJunkExtractionText(parsed.reflection)) {
           await commitReflection(parsed.reflection, item, state);
         }
 

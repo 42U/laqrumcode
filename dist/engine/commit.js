@@ -76,6 +76,11 @@ export async function linkConceptCrossLink(deps, fromId, toId, edge) {
         swallow.warn("commit:linkConceptCrossLink:invalid-edge", new Error(`unsupported edge "${edge}"`));
         return 0;
     }
+    // 0.7.118 (QA item 4): gem links can resolve both names to the same concept
+    // after >0.92 dedup folding; relate() refuses the self-loop, so counting it
+    // as a wired edge over-reported. Skip before the exists-query.
+    if (fromId === toId)
+        return 0;
     try {
         // Idempotency guard (2026-06-09, gems-retry double-write trap): RELATE
         // creates a NEW edge row every call, so a client retry of
@@ -131,7 +136,9 @@ async function commitConcept(deps, data) {
     const { id: conceptId, existed: conceptExisted } = await store.upsertConcept(data.name, embedding, data.source, data.provenance, data.projectId);
     let edges = 0;
     // 3. Link source → concept via the requested edge, if caller provided one.
-    if (data.sourceId && data.edgeName) {
+    // 0.7.118 (QA item 4): source can dedup-fold into the same concept id —
+    // relate() refuses self-loops, so don't count one as a wired edge.
+    if (data.sourceId && data.edgeName && data.sourceId !== conceptId) {
         try {
             await store.relate(data.sourceId, data.edgeName, conceptId);
             edges++;

@@ -27,6 +27,7 @@ import { join, dirname } from "node:path";
 import { homedir, platform } from "node:os";
 import { applyGpuPin } from "./gpu-pin.js";
 import { ensureEdgeIndexes } from "../engine/edge-indexes.js";
+import { runBootstrapMaintenance } from "../engine/maintenance.js";
 import { PROTOCOL_VERSION, DEFAULT_DAEMON_SOCKET_PATH, DEFAULT_DAEMON_TCP_PORT, DAEMON_PID_FILE, } from "../shared/ipc-types.js";
 import { DaemonServer } from "./server.js";
 import { log } from "../engine/log.js";
@@ -280,6 +281,15 @@ async function initializeStack() {
     catch (err) {
         log.error("[daemon] Embedding model failed — vector search disabled:", err);
     }
+    // 0.7.118: run bootstrap maintenance from the DAEMON. It was wired only
+    // into the legacy monolith (mcp-server.ts) and the session-start hook —
+    // so on the daemon-split architecture, whenever hooks were degraded, GC /
+    // turn archival / embedding backfills never executed at all (observed
+    // live 2026-06-10: unembedded rows stuck for hours across restarts).
+    // Called AFTER embeddings.initialize() so the deferred Group-3 sweep
+    // starts its 30s clock from a ready embedder; self-guarded once-per-
+    // process, so the session-start duplicate call no-ops.
+    runBootstrapMaintenance(globalState);
     // Cross-encoder reranker (bge-reranker-v2-m3). Optional — if the model file
     // doesn't exist OR KONGCODE_RERANKER_DISABLED=1, recall falls back to
     // WMR/ACAN scoring without reranking. The model file (~606MB) is
@@ -634,6 +644,21 @@ async function main() {
             return new Promise(() => { });
         shuttingDown = true;
         log.info(`[daemon] graceful exit: ${reason}`);
+        // 0.7.118 shutdown watchdog: a daemon holding a zombie DB connection
+        // ignored SIGTERM in production — graceful close awaited store.close()
+        // on a WS whose operations never settle, so the process never exited
+        // (operator had to SIGKILL). The watchdog hard-exits if the graceful
+        // path takes longer than 8s; unref() so it never artificially extends
+        // the process's life when shutdown completes normally.
+        const watchdog = setTimeout(() => {
+            log.error(`[daemon] graceful exit (${reason}) exceeded 8s — forcing exit`);
+            try {
+                removeOwnPidFile();
+            }
+            catch { /* best-effort */ }
+            process.exit(1);
+        }, 8_000);
+        watchdog.unref();
         stopDrainScheduler();
         try {
             await server.close();

@@ -124,7 +124,11 @@ export function extractConceptNames(text: string, max: number = DEFAULT_CONCEPT_
     }
   }
 
-  return [...concepts].slice(0, Math.max(0, max));
+  // 0.7.118 (QA D3): the kebab-case identifier pattern also matches bare
+  // UUIDs (session ids quoted in transcripts) — every bare-UUID concept in
+  // production traced back to this extractor. Reject them at the source.
+  const BARE_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  return [...concepts].filter((c) => !BARE_UUID.test(c)).slice(0, Math.max(0, max));
 }
 
 /**

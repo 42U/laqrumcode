@@ -4,6 +4,63 @@ All notable changes to KongCode are documented here. The 0.7.x series introduced
 
 ## [Unreleased]
 
+## [0.7.118] — 2026-06-10
+
+The hardening queue from the 2026-06-10 incident chain (zombie WS connection,
+SIGTERM hang, maintenance-never-ran, drain junk). QA-reviewed pre-tag; all
+review concerns (C1/D1/D2/D3/A1 + comment rot) fixed before tagging.
+
+### Added
+- **Per-query deadline + zombie recovery** (src/engine/surreal.ts): every SDK
+  round-trip (queryFirst/Multi/Exec/Batch + 3s ping) races a deadline
+  (`KONGCODE_DB_QUERY_TIMEOUT_MS`, default 60s). A blown deadline flags the
+  connection `zombieSuspect`; `ensureConnected` then rebuilds a fresh Surreal
+  instance even though the SDK still reports `isConnected` — the production
+  zombie (rpcsInFlight growing unboundedly while meta.health stayed green,
+  every DB-touching tool hung) now self-heals on next traffic. Retry
+  classification widened to the auth-drop class ("Anonymous access" after a
+  WS auto-reconnect without re-signin). Ping uses `flagZombie:false` so a
+  merely-busy CPU-tier server can't trigger spurious teardowns (QA A1).
+  `raceWithDeadline` + `isRetryableSurrealError` exported with a unit suite.
+- **Shutdown watchdog** (src/daemon/index.ts): 8s unref'd hard-exit in
+  gracefulCleanup — a daemon holding a dead connection ignored SIGTERM
+  because graceful close awaited store.close() forever.
+- **Maintenance wired into the daemon** — the deepest find of the release:
+  `runBootstrapMaintenance` was only invoked by the LEGACY monolith
+  (mcp-server.ts) and the session-start hook, so on the daemon-split
+  architecture with hooks degraded, GC / turn archival / embedding backfills
+  never executed at all. The daemon boot is now the canonical caller, with a
+  once-per-process guard (session-start's per-session call no-ops), an
+  unlatched-guard + deduped 5-min self-retry on degraded boots (QA C1), and
+  the 6h backfill interval armed first so no early-return can skip it.
+- **Turn + memory embedding backfills** (src/engine/maintenance.ts): the two
+  embedded tables that had NO backfill — rows written during an embedder
+  outage stayed unembedded forever (invisible to vector search; observed
+  live: 6 turns stuck for hours, healed to 0 within 55s of a boot on this
+  code). Backfills now run BEFORE consolidateMemories (an unbounded CPU pass
+  observed 9+ min) and re-run every 6h.
+- **Drain junk guard** (src/tools/pending-work.ts): empty-transcript apology
+  prose and bare session UUIDs are no longer committable as knowledge —
+  head-anchored phrase variants (QA D1), content-first field probing over the
+  real ExtractionResultSchema arrays (QA D2), plus the actual UUID source
+  fixed in extractConceptNames' kebab-case pattern (QA D3). Unit-tested.
+- patchOrderByFields is now **subquery-aware**: length-preserving paren
+  masking + `d`-flag match indices; an ORDER BY inside a parenthesized
+  subquery no longer leaks fields into the outer selection (differential
+  across 67 production queries: only the intended change). The 0.7.117
+  pinned blind-spot test was deleted-and-celebrated per its own comment.
+
+### Fixed
+- Self-loop relate() refusals no longer count as wired edges in
+  linkConceptCrossLink / commitConcept (QA-0.7.117 item 4).
+- db-state embedding-coverage invariants scoped to retrieval-ELIGIBLE rows
+  (archived/superseded/pruned rows are deliberately outside retrieval).
+
+### Operational notes
+- Knobs: `KONGCODE_DB_QUERY_TIMEOUT_MS` (per-query deadline, clamp 1s–10min).
+- Maintenance cadence change: once per daemon process (+ 6h embedding
+  re-sweeps) instead of per-session re-runs.
+
 ## [0.7.117] — 2026-06-10
 
 T5 hardening tranche of the 2026-06-10 QA waterfall (follows 0.7.116's T1–T4),

@@ -52,17 +52,24 @@ declare function assertRecordId(id: string): void;
 /** Whitelist of valid SurrealDB edge table names — prevents SQL injection via edge interpolation. */
 declare const VALID_EDGES: Set<string>;
 declare function assertValidEdge(edge: string): void;
-/** SurrealDB 3.x requires every ORDER BY field to appear in the selection.
- *  Auto-append missing ones rather than chasing each call site.
- *
- *  W2/T5 hardening (the original was alias-blind and paren-blind):
- *  - `SELECT count() AS c … ORDER BY c` previously appended a phantom raw `c`
- *    (it recorded the pre-AS *expression*, not the alias ORDER BY sees).
- *  - Naive split(",") sheared `math::max([a, b])`-style args into garbage
- *    fields. Both now handled; non-identifier ORDER terms (e.g. rand()) are
- *    left alone instead of being appended as fake columns.
- *
- *  Exported for unit tests (test/patch-order-by.test.ts). */
+/** 0.7.118: hard ceiling on any single SDK query round-trip. Generous by
+ *  default (60s — only genuine zombies blow it, not slow CPU-tier queries);
+ *  env-overridable for constrained machines. Clamped to [1s, 10min]. */
+export declare const QUERY_DEADLINE_MS: number;
+/** Race a promise against a deadline. The losing arm's rejection is consumed
+ *  by the race; the timer is cleared on every exit path. Exported for unit
+ *  tests (test/surreal-deadline.test.ts). */
+export declare function raceWithDeadline<T>(p: Promise<T>, ms: number, label: string): Promise<T>;
+/** Errors worth one reconnect+retry (0.7.118 widened from connection-drop
+ *  only). Three production-observed classes on 2026-06-10:
+ *  - connection drop: "must be connected" / "ConnectionUnavailable"
+ *  - blown deadline: zombie WS whose queries never settle (no error event)
+ *  - auth drop: the SDK auto-reconnects WITHOUT re-signin after a WS blip,
+ *    so the next statement runs anonymous ("Anonymous access not allowed" /
+ *    "Not enough permissions") — a fresh connect+signin fixes it; if creds
+ *    are genuinely wrong the retry fails identically and throws.
+ *  Exported for unit tests. */
+export declare function isRetryableSurrealError(e: unknown): boolean;
 export declare function patchOrderByFields(sql: string): string;
 /**
  * SurrealDB store — wraps all database operations for the KongCode plugin.
@@ -89,12 +96,28 @@ export declare class SurrealStore {
     };
     ping(): Promise<boolean>;
     close(): Promise<void>;
-    /** Returns true if an error is a connection-level failure worth retrying. */
-    private isConnectionError;
-    /** Run a query function with one retry on connection errors.
-     *  Reconnection is routed through ensureConnected() so concurrent
-     *  callers share a single reconnection attempt instead of racing. */
+    /** 0.7.118: a zombie WS (queries never settle, no error event, isConnected
+     *  still true) was observed in production — rpcsInFlight grew unboundedly
+     *  while meta.health stayed green and every DB-touching tool hung. Set by
+     *  deadlineQuery() on a blown deadline; ensureConnected() treats it as
+     *  disconnected even though the SDK disagrees. */
+    private zombieSuspect;
+    /** Run a query function with one retry on retryable failures (connection
+     *  drops, blown deadlines, auth-dropped reconnects). Reconnection is routed
+     *  through ensureConnected() so concurrent callers share a single
+     *  reconnection attempt instead of racing.
+     *
+     *  Retry-once safety note (0.7.118): a deadline'd write MAY have executed
+     *  server-side, so the retry can double-fire. Post-W2 this is acceptable —
+     *  edges carry UNIQUE (in,out) indexes, concepts/memories carry content
+     *  seals, subagents carry correlation keys — and the alternative (hanging
+     *  forever on a zombie connection) is strictly worse. */
     private withRetry;
+    /** All SDK query round-trips route through here. The Promise.race deadline
+     *  converts a never-settling zombie query into a typed, retryable error —
+     *  withRetry() then forces a reconnect (fresh Surreal instance) and the
+     *  daemon self-heals on the next traffic instead of wedging forever. */
+    private deadlineQuery;
     queryFirst<T>(sql: string, bindings?: Record<string, unknown>): Promise<T[]>;
     queryMulti<T = unknown>(sql: string, bindings?: Record<string, unknown>): Promise<T | undefined>;
     queryExec(sql: string, bindings?: Record<string, unknown>): Promise<void>;

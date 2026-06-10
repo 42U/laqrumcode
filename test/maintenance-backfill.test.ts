@@ -10,7 +10,8 @@ async function importMaintenance() {
 
 describe("backfillSessionTurnCounts (via runBootstrapMaintenance)", () => {
   it("issues UPDATE keyed by kc_session_id, not raw record id", async () => {
-    const { runBootstrapMaintenance } = await importMaintenance();
+    const { runBootstrapMaintenance, __resetBootstrapMaintenanceForTests } = await importMaintenance();
+    __resetBootstrapMaintenanceForTests(); // 0.7.118 once-guard
 
     const queryFirst = vi.fn().mockImplementation(async (sql: string) => {
       // Match the backfill SELECT
@@ -69,7 +70,8 @@ describe("backfillSessionTurnCounts (via runBootstrapMaintenance)", () => {
   });
 
   it("skips backfill entirely when store is unavailable", async () => {
-    const { runBootstrapMaintenance } = await importMaintenance();
+    const { runBootstrapMaintenance, __resetBootstrapMaintenanceForTests } = await importMaintenance();
+    __resetBootstrapMaintenanceForTests(); // 0.7.118 once-guard
 
     const queryFirst = vi.fn();
     const queryExec = vi.fn();
@@ -99,7 +101,8 @@ describe("backfillSessionTurnCounts (via runBootstrapMaintenance)", () => {
   });
 
   it("guards UPDATE against non-zero turn_count rows (idempotent)", async () => {
-    const { runBootstrapMaintenance } = await importMaintenance();
+    const { runBootstrapMaintenance, __resetBootstrapMaintenanceForTests } = await importMaintenance();
+    __resetBootstrapMaintenanceForTests(); // 0.7.118 once-guard
 
     const queryFirst = vi.fn().mockImplementation(async (sql: string) => {
       if (sql.includes("FROM turn")) {

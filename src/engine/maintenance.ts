@@ -1,15 +1,23 @@
 /**
- * Background maintenance — fired on MCP boot and on every SessionStart.
+ * Background maintenance — ONCE per process (0.7.118), canonical caller is
+ * the daemon boot (daemon/index.ts, post-embeddings-init); the legacy
+ * mcp-server.ts and session-start invocations no-op after the first run.
+ * On a degraded boot (store down) the guard is NOT latched: a deduped 5-min
+ * self-retry plus any later session-start re-attempts until the store is up.
  *
  * Restores the five jobs that used to live in KongBrain's
  * ContextEngine.bootstrap(), which the OpenClaw framework called on session
  * lifecycle. KongCode has no such framework call, so these had been silently
- * not running since the port. See GitHub issue history around 2026-04-21.
+ * not running since the port. See GitHub issue history around 2026-04-21 —
+ * and the 2026-06-10 recurrence: on the daemon-split architecture the only
+ * wired callers were the legacy monolith and the session-start hook, so with
+ * hooks degraded NOTHING ran maintenance at all.
  *
  * Each job is internally bounded (count<=200/2000/50 safety floors, LIMIT 50
- * on destructive operations) and idempotent, so it's safe to run on every
- * MCP boot AND on every SessionStart. The ACAN retrain carries its own
+ * on destructive operations) and idempotent. The ACAN retrain carries its own
  * lockfile from acan.ts preventing concurrent retrains across sibling MCPs.
+ * Recurring needs (embedding backfills) are covered by the 6h interval armed
+ * in Group 3.
  *
  * Fire-and-forget — the caller should not await this. Errors go to
  * swallow.warn so they're visible without blocking startup.
@@ -53,7 +61,41 @@ function migrateLegacyACANWeights(cacheDir: string): void {
   }
 }
 
+let bootstrapMaintenanceRan = false;
+let maintenanceRetryArmed = false;
+
+/** Test-only: clear the once-per-process guard so suites can invoke
+ *  runBootstrapMaintenance repeatedly with fresh fake states. */
+export function __resetBootstrapMaintenanceForTests(): void {
+  bootstrapMaintenanceRan = false;
+  maintenanceRetryArmed = false;
+}
+
 export function runBootstrapMaintenance(state: GlobalPluginState): void {
+  // 0.7.118 once-per-process guard. session-start invokes this on EVERY
+  // session start (no guard existed), which meant full Group 1–3 re-runs per
+  // session — and with the 6h backfill interval added this release it would
+  // have leaked an interval per session. The daemon boot is now the
+  // canonical caller (daemon/index.ts, post-embeddings-init); first
+  // invocation wins regardless of origin.
+  if (bootstrapMaintenanceRan) return;
+  // QA 0.7.118 C1: do NOT burn the single run on a degraded boot (store
+  // down). Leave the guard unlatched so a later session-start retries once
+  // the store recovers, and arm one deduped self-retry so a hook-less
+  // daemon also heals without a restart.
+  if (!state.store.isAvailable()) {
+    if (!maintenanceRetryArmed) {
+      maintenanceRetryArmed = true;
+      const retry = setTimeout(() => {
+        maintenanceRetryArmed = false;
+        runBootstrapMaintenance(state);
+      }, 5 * 60_000);
+      retry.unref?.();
+    }
+    return;
+  }
+  bootstrapMaintenanceRan = true;
+
   const { store, embeddings, config } = state;
   const deferMs = Number(process.env.KONGCODE_MAINTENANCE_DEFER_MS) || 30_000;
 
@@ -81,29 +123,117 @@ export function runBootstrapMaintenance(state: GlobalPluginState): void {
 
   // Group 3: CPU-heavy — deferred so first-turn context assembly is uncontested
   const heavyTimer = setTimeout(async () => {
+    // 0.7.118 (QA C1): arm the 6h re-sweep FIRST — before any early-return
+    // or throwing step can skip it. The sweep self-guards on store +
+    // embeddings availability, so arming unconditionally is safe even if
+    // the store dropped between boot and this timer.
+    const backfillInterval = setInterval(() => {
+      void runEmbeddingBackfills(state);
+    }, 6 * 3_600_000);
+    backfillInterval.unref?.();
+
     if (!store.isAvailable()) return;
+    // 0.7.118: backfills BEFORE consolidate. consolidateMemories is an
+    // unbounded CPU pass (observed 9+ min on the CPU tier) and the cheap
+    // backfill sweep used to sit behind it — unembedded rows stayed invisible
+    // to vector search for the whole window. The backfills self-guard with
+    // embeddings.isAvailable(), and the 6h interval retries if the embedder
+    // isn't up yet at boot+30s on slow machines.
+    await runEmbeddingBackfills(state);
     try {
       await store.consolidateMemories((text) => embeddings.embed(text));
     } catch (e) { swallow.warn("maintenance:consolidate", e); }
-    // Indexed-table backfill lives here in Group 3, not Group 2, because
-    // backfillSkillEmbeddings showed no log evidence of ever running across
-    // 217KB of daemon log — likely because Group 2 fires before
-    // embeddings.isAvailable() flips true and the function short-circuits.
-    // consolidateMemories at top of Group 3 proves embeddings are ready,
-    // so artifact + concept backfill here is guaranteed to find a live
-    // BGE-M3 context.
-    try {
-      await backfillArtifactEmbeddings(state);
-      await backfillConceptEmbeddings(state);
-      await backfillReflectionEmbeddings(state);
-      await backfillMonologueEmbeddings(state);
-      await backfillTurnArchiveEmbeddings(state);
-    } catch (e) { swallow.warn("maintenance:backfill-indexed", e); }
+    // (0.7.118: the backfill sweep moved ABOVE consolidateMemories — see the
+    // comment there. Historical note kept: Group 2 fires before
+    // embeddings.isAvailable() flips true on slow tiers, which is why none
+    // of the embed-dependent jobs live in Group 2.)
     try {
       await checkACANReadiness(store, config.thresholds.acanTrainingThreshold, cacheDir);
     } catch (e) { swallow.warn("maintenance:acan", e); }
   }, deferMs);
   heavyTimer.unref?.();
+}
+
+/** The full unembedded-row sweep, table by table. Boot Group 3 runs it once
+ *  (after consolidateMemories proves BGE-M3 is live) and a 6h interval keeps
+ *  it running thereafter. Exported for tests. */
+export async function runEmbeddingBackfills(state: GlobalPluginState): Promise<void> {
+  try {
+    await backfillArtifactEmbeddings(state);
+    await backfillConceptEmbeddings(state);
+    await backfillReflectionEmbeddings(state);
+    await backfillMonologueEmbeddings(state);
+    await backfillTurnArchiveEmbeddings(state);
+    await backfillTurnEmbeddings(state);
+    await backfillMemoryEmbeddings(state);
+  } catch (e) { swallow.warn("maintenance:backfill-indexed", e); }
+}
+
+/** 0.7.118: live `turn` rows were the one embedded table with NO backfill —
+ *  turns written while the embedder was down stayed unembedded forever
+ *  (invisible to vector search; only pruning would ever remove them).
+ *  Mirrors backfillConceptEmbeddings; target = text, active = not pruned. */
+async function backfillTurnEmbeddings(state: GlobalPluginState): Promise<void> {
+  if (!state.store.isAvailable()) return;
+  if (!state.embeddings.isAvailable()) return;
+  try {
+    const rows = await state.store.queryFirst<{ id: string; text: string }>(
+      `SELECT id, text FROM turn
+        WHERE (embedding IS NONE OR array::len(embedding) = 0)
+          AND pruned_at IS NONE
+          AND text IS NOT NONE
+          AND text != ""
+        LIMIT 50`,
+    );
+    if (!rows.length) return;
+    log.info(`[maintenance] backfilling turn embeddings: ${rows.length} row(s)`);
+    for (const row of rows) {
+      if (!row?.id || !row?.text) continue;
+      let target = row.text;
+      if (target.length > 6000) target = target.slice(0, 6000);
+      try {
+        const vec = await state.embeddings.embed(target);
+        if (!vec?.length) continue;
+        await state.store.queryExec(
+          `UPDATE ${String(row.id)} SET embedding = $vec WHERE embedding IS NONE OR array::len(embedding) = 0`,
+          { vec },
+        );
+      } catch (e) { swallow(`maintenance:backfillTurn:${String(row.id)}`, e); }
+    }
+  } catch (e) { swallow.warn("maintenance:backfillTurnEmbeddings", e); }
+}
+
+/** 0.7.118: plain unembedded `memory` rows had no backfill either —
+ *  consolidateMemories embeds only what it consolidates. Active = not
+ *  archived; target = text. */
+async function backfillMemoryEmbeddings(state: GlobalPluginState): Promise<void> {
+  if (!state.store.isAvailable()) return;
+  if (!state.embeddings.isAvailable()) return;
+  try {
+    const rows = await state.store.queryFirst<{ id: string; text: string }>(
+      `SELECT id, text FROM memory
+        WHERE (embedding IS NONE OR array::len(embedding) = 0)
+          AND (status IS NONE OR status != "archived")
+          AND text IS NOT NONE
+          AND text != ""
+        LIMIT 50`,
+    );
+    if (!rows.length) return;
+    log.info(`[maintenance] backfilling memory embeddings: ${rows.length} row(s)`);
+    for (const row of rows) {
+      if (!row?.id || !row?.text) continue;
+      let target = row.text;
+      if (target.length > 6000) target = target.slice(0, 6000);
+      try {
+        const vec = await state.embeddings.embed(target);
+        if (!vec?.length) continue;
+        await state.store.queryExec(
+          `UPDATE ${String(row.id)} SET embedding = $vec WHERE embedding IS NONE OR array::len(embedding) = 0`,
+          { vec },
+        );
+      } catch (e) { swallow(`maintenance:backfillMemory:${String(row.id)}`, e); }
+    }
+  } catch (e) { swallow.warn("maintenance:backfillMemoryEmbeddings", e); }
 }
 
 /** One-shot reconciliation: every session row pre-0.7.12 has turn_count=0

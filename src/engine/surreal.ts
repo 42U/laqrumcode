@@ -118,6 +118,46 @@ function assertValidEdge(edge: string): void {
   if (!VALID_EDGES.has(edge)) throw new Error(`Invalid edge name: ${edge}`);
 }
 
+/** 0.7.118: hard ceiling on any single SDK query round-trip. Generous by
+ *  default (60s — only genuine zombies blow it, not slow CPU-tier queries);
+ *  env-overridable for constrained machines. Clamped to [1s, 10min]. */
+export const QUERY_DEADLINE_MS = (() => {
+  const n = Number(process.env.KONGCODE_DB_QUERY_TIMEOUT_MS);
+  return Number.isFinite(n) && n > 0 ? Math.min(Math.max(Math.round(n), 1_000), 600_000) : 60_000;
+})();
+
+/** Race a promise against a deadline. The losing arm's rejection is consumed
+ *  by the race; the timer is cleared on every exit path. Exported for unit
+ *  tests (test/surreal-deadline.test.ts). */
+export function raceWithDeadline<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error(`${label} deadline exceeded after ${ms}ms`)), ms);
+    p.then(
+      (v) => { clearTimeout(t); resolve(v); },
+      (e) => { clearTimeout(t); reject(e); },
+    );
+  });
+}
+
+/** Errors worth one reconnect+retry (0.7.118 widened from connection-drop
+ *  only). Three production-observed classes on 2026-06-10:
+ *  - connection drop: "must be connected" / "ConnectionUnavailable"
+ *  - blown deadline: zombie WS whose queries never settle (no error event)
+ *  - auth drop: the SDK auto-reconnects WITHOUT re-signin after a WS blip,
+ *    so the next statement runs anonymous ("Anonymous access not allowed" /
+ *    "Not enough permissions") — a fresh connect+signin fixes it; if creds
+ *    are genuinely wrong the retry fails identically and throws.
+ *  Exported for unit tests. */
+export function isRetryableSurrealError(e: unknown): boolean {
+  const msg = String((e as { message?: string })?.message ?? e);
+  return (
+    msg.includes("must be connected") ||
+    msg.includes("ConnectionUnavailable") ||
+    msg.includes("deadline exceeded") ||
+    /anonymous access|not enough permissions/i.test(msg)
+  );
+}
+
 /** Split a SELECT/ORDER clause on top-level commas only — commas nested in
  *  (), [], {} (function args, array literals, subqueries) do not split.
  *  Quote-awareness is deliberately omitted: every caller is an internal query
@@ -151,21 +191,45 @@ function splitTopLevel(clause: string): string[] {
  *    left alone instead of being appended as fake columns.
  *
  *  Exported for unit tests (test/patch-order-by.test.ts). */
+/** Length-preserving paren mask: every character inside (), at any depth, is
+ *  replaced by a space (parens themselves kept). Structural keywords (FROM /
+ *  ORDER BY / LIMIT) are then located on the masked string so subquery
+ *  internals can't be mistaken for the outer query's — but clause TEXT is
+ *  sliced from the ORIGINAL by index, so expressions like `rand()` survive
+ *  intact (0.7.118; previously the patcher appended a subquery's inner ORDER
+ *  field to the outer selection). */
+function maskParens(s: string): string {
+  let depth = 0;
+  let out = "";
+  for (const ch of s) {
+    if (ch === "(") { depth++; out += "("; continue; }
+    if (ch === ")") { depth = Math.max(0, depth - 1); out += ")"; continue; }
+    out += depth > 0 ? " " : ch;
+  }
+  return out;
+}
+
 export function patchOrderByFields(sql: string): string {
   const s = sql.trim();
   if (!/^\s*SELECT\b/i.test(s) || !/\bORDER\s+BY\b/i.test(s)) return sql;
   if (/^\s*SELECT\s+\*/i.test(s)) return sql;
 
-  const selectMatch = s.match(/^\s*SELECT\s+([\s\S]+?)\s+FROM\b/i);
+  // Locate structure on the masked string; slice clause TEXT from the
+  // original via match indices (the mask is length-preserving, so indices
+  // line up exactly). The `d` flag exposes per-group [start, end].
+  const masked = maskParens(s);
+
+  const selectMatch = /^\s*SELECT\s+([\s\S]+?)\s+FROM\b/id.exec(masked);
   if (!selectMatch) return sql;
-  const selectClause = selectMatch[1];
+  const selIdx = (selectMatch as unknown as { indices: Array<[number, number]> }).indices[1];
+  const selectClause = s.slice(selIdx[0], selIdx[1]);
 
-  const orderMatch = s.match(
-    /\bORDER\s+BY\s+([\s\S]+?)(?=\s+LIMIT\b|\s+GROUP\b|\s+HAVING\b|$)/i,
-  );
-  if (!orderMatch) return sql;
+  const orderMatch = /\bORDER\s+BY\s+([\s\S]+?)(?=\s+LIMIT\b|\s+GROUP\b|\s+HAVING\b|$)/id.exec(masked);
+  if (!orderMatch) return sql; // the only ORDER BY lives inside a subquery — outer query needs nothing
+  const ordIdx = (orderMatch as unknown as { indices: Array<[number, number]> }).indices[1];
+  const orderClause = s.slice(ordIdx[0], ordIdx[1]);
 
-  const orderFields = splitTopLevel(orderMatch[1])
+  const orderFields = splitTopLevel(orderClause)
     .map((f) => f.replace(/\s+(?:COLLATE|NUMERIC|ASC|DESC)(?=\s|$)/gi, "").trim())
     .filter(Boolean);
 
@@ -195,10 +259,12 @@ export function patchOrderByFields(sql: string): string {
 
   if (missing.length === 0) return sql;
 
-  return sql.replace(
-    /(\bSELECT\s+)([\s\S]+?)(\s+FROM\b)/i,
-    (_, pre, fields, post) => `${pre}${fields}, ${missing.join(", ")}${post}`,
-  );
+  // Index-based rebuild: insert at the end of the OUTER select clause. A
+  // regex replace with non-greedy FROM would re-find an inner subquery's
+  // FROM for `SELECT (SELECT … FROM t) AS x, …` shapes.
+  const lead = sql.length - sql.trimStart().length; // s = sql.trim() offset
+  const insertAt = lead + selIdx[1];
+  return `${sql.slice(0, insertAt)}, ${missing.join(", ")}${sql.slice(insertAt)}`;
 }
 
 /**
@@ -240,7 +306,10 @@ export class SurrealStore {
 
   private async ensureConnected(): Promise<void> {
     if (this.shutdownFlag) return;
-    if (this.db.isConnected) return;
+    // zombieSuspect overrides isConnected: a wedged WS still REPORTS
+    // connected while its queries never settle (0.7.118 incident) — without
+    // the override this early-return made the zombie state permanent.
+    if (this.db.isConnected && !this.zombieSuspect) return;
     if (this.reconnecting) return this.reconnecting;
 
     this.reconnecting = (async () => {
@@ -276,6 +345,7 @@ export class SurrealStore {
             if (connectTimer !== undefined) clearTimeout(connectTimer);
           }
           log.warn("SurrealDB reconnected successfully.");
+          this.zombieSuspect = false;
           return;
         } catch (e) {
           if (attempt < MAX_ATTEMPTS) {
@@ -295,7 +365,11 @@ export class SurrealStore {
 
   private async runSchema(): Promise<void> {
     const schema = loadSchema();
-    await this.db.query(schema);
+    // Generous fixed deadline so schema DDL over a wedged server fails this
+    // step loudly (degraded mode) instead of hanging it. (initialize()'s
+    // first db.connect() is a separate, still-undeadlined step — the
+    // reconnect path has its own 5s connect timeout.)
+    await raceWithDeadline(this.db.query(schema), 60_000, "SurrealDB schema apply");
   }
 
   isConnected(): boolean {
@@ -314,7 +388,13 @@ export class SurrealStore {
   async ping(): Promise<boolean> {
     try {
       await this.ensureConnected();
-      await this.db.query("RETURN 'ok'");
+      // Tight 3s deadline so a zombie turns ping into a fast `false` instead
+      // of hanging the health probe. flagZombie=false (QA 0.7.118 A1): on the
+      // CPU tier a merely-busy server (consolidate, HNSW build) can blow 3s,
+      // and a spurious zombie flag would tear down a healthy connection and
+      // kill in-flight queries. The 60s default deadline on real queries is
+      // the authoritative zombie detector.
+      await this.deadlineQuery("RETURN 'ok'", undefined, 3_000, { flagZombie: false });
       return true;
     } catch {
       return false;
@@ -330,23 +410,56 @@ export class SurrealStore {
     }
   }
 
-  /** Returns true if an error is a connection-level failure worth retrying. */
-  private isConnectionError(e: unknown): boolean {
-    const msg = String((e as { message?: string })?.message ?? e);
-    return msg.includes("must be connected") || msg.includes("ConnectionUnavailable");
-  }
+  /** 0.7.118: a zombie WS (queries never settle, no error event, isConnected
+   *  still true) was observed in production — rpcsInFlight grew unboundedly
+   *  while meta.health stayed green and every DB-touching tool hung. Set by
+   *  deadlineQuery() on a blown deadline; ensureConnected() treats it as
+   *  disconnected even though the SDK disagrees. */
+  private zombieSuspect = false;
 
-  /** Run a query function with one retry on connection errors.
-   *  Reconnection is routed through ensureConnected() so concurrent
-   *  callers share a single reconnection attempt instead of racing. */
+  /** Run a query function with one retry on retryable failures (connection
+   *  drops, blown deadlines, auth-dropped reconnects). Reconnection is routed
+   *  through ensureConnected() so concurrent callers share a single
+   *  reconnection attempt instead of racing.
+   *
+   *  Retry-once safety note (0.7.118): a deadline'd write MAY have executed
+   *  server-side, so the retry can double-fire. Post-W2 this is acceptable —
+   *  edges carry UNIQUE (in,out) indexes, concepts/memories carry content
+   *  seals, subagents carry correlation keys — and the alternative (hanging
+   *  forever on a zombie connection) is strictly worse. */
   private async withRetry<T>(fn: () => Promise<T>): Promise<T> {
     try {
       return await fn();
     } catch (e) {
-      if (!this.isConnectionError(e)) throw e;
+      if (!isRetryableSurrealError(e)) throw e;
       this.initialized = false;
       await this.ensureConnected();
       return await fn();
+    }
+  }
+
+  /** All SDK query round-trips route through here. The Promise.race deadline
+   *  converts a never-settling zombie query into a typed, retryable error —
+   *  withRetry() then forces a reconnect (fresh Surreal instance) and the
+   *  daemon self-heals on the next traffic instead of wedging forever. */
+  private async deadlineQuery(
+    fullSql: string,
+    bindings?: Record<string, unknown>,
+    ms = QUERY_DEADLINE_MS,
+    opts: { flagZombie?: boolean } = {},
+  ): Promise<unknown> {
+    const { flagZombie = true } = opts;
+    try {
+      return await raceWithDeadline(this.db.query(fullSql, bindings), ms, "SurrealDB query");
+    } catch (e) {
+      if (flagZombie && e instanceof Error && e.message.includes("deadline exceeded")) {
+        this.zombieSuspect = true;
+        log.error(
+          `[surreal] query deadline exceeded after ${ms}ms — connection flagged zombie; ` +
+          `forcing reconnect on retry. SQL head: ${fullSql.slice(0, 90)}`,
+        );
+      }
+      throw e;
     }
   }
 
@@ -358,8 +471,8 @@ export class SurrealStore {
       const ns = this.config.ns;
       const dbName = this.config.db;
       const fullSql = `USE NS ${ns} DB ${dbName}; ${patchOrderByFields(sql)}`;
-      const result = await this.db.query<[T[]]>(fullSql, bindings);
-      const rows = Array.isArray(result) ? result[result.length - 1] : result;
+      const result = await this.deadlineQuery(fullSql, bindings);
+      const rows = Array.isArray(result) ? (result as T[][])[(result as T[][]).length - 1] : result;
       return (Array.isArray(rows) ? rows : []).filter(Boolean);
     });
   }
@@ -373,7 +486,7 @@ export class SurrealStore {
       const ns = this.config.ns;
       const dbName = this.config.db;
       const fullSql = `USE NS ${ns} DB ${dbName}; ${patchOrderByFields(sql)}`;
-      const raw = await this.db.query(fullSql, bindings);
+      const raw = await this.deadlineQuery(fullSql, bindings);
       const flat = (raw as unknown[]).flat();
       return flat[flat.length - 1] as T | undefined;
     });
@@ -385,7 +498,7 @@ export class SurrealStore {
       const ns = this.config.ns;
       const dbName = this.config.db;
       const fullSql = `USE NS ${ns} DB ${dbName}; ${patchOrderByFields(sql)}`;
-      await this.db.query(fullSql, bindings);
+      await this.deadlineQuery(fullSql, bindings);
     });
   }
 
@@ -401,7 +514,7 @@ export class SurrealStore {
       const dbName = this.config.db;
       const joined = statements.map(s => patchOrderByFields(s)).join(";\n");
       const fullSql = `USE NS ${ns} DB ${dbName};\n${joined}`;
-      const raw = await this.db.query(fullSql, bindings) as unknown[];
+      const raw = await this.deadlineQuery(fullSql, bindings) as unknown[];
       // First result is the USE statement (empty), skip it
       return raw.slice(1).map(r => (Array.isArray(r) ? r : []).filter(Boolean)) as T[][];
     });

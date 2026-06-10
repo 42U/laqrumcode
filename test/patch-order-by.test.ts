@@ -77,20 +77,33 @@ describe("patchOrderByFields", () => {
     ).toBe("SELECT id, count() AS c, created_at FROM t GROUP BY id ORDER BY created_at");
   });
 
-  it("PINNED BLIND SPOT: an ORDER BY inside a parenthesized subquery is treated as the outer query's", () => {
-    // Known limitation (QA 0.7.117 item 3): the patcher does not parse
-    // subquery boundaries, so the INNER ORDER BY field gets appended to the
-    // OUTER selection. Live-probed 2026-06-10: SurrealDB accepts the mangled
-    // form for the one production query of this shape
-    // (getRecentUtilizationAvg, post-GROUP ALL) and queryFirst ignores the
-    // extra column — harmless today, but if this test starts failing because
-    // someone made the patcher subquery-aware, delete it and celebrate.
+  // 0.7.118: the patcher became subquery-aware (paren masking) — the former
+  // "pinned blind spot" test is deleted-and-celebrated per its own comment.
+  it("leaves an ORDER BY inside a parenthesized subquery untouched", () => {
+    const sql =
+      "SELECT math::mean(utilization) AS avg FROM (SELECT utilization, created_at FROM retrieval_outcome WHERE session_id = $sid ORDER BY created_at DESC LIMIT $lim) GROUP ALL";
+    expect(patchOrderByFields(sql)).toBe(sql);
+  });
+
+  it("still patches an OUTER ORDER BY when a subquery has its own inner one", () => {
     expect(
       patchOrderByFields(
-        "SELECT math::mean(utilization) AS avg FROM (SELECT utilization, created_at FROM retrieval_outcome WHERE session_id = $sid ORDER BY created_at DESC LIMIT $lim) GROUP ALL",
+        "SELECT a FROM (SELECT a, b FROM t ORDER BY b DESC LIMIT 5) ORDER BY created_at",
       ),
     ).toBe(
-      "SELECT math::mean(utilization) AS avg, created_at FROM (SELECT utilization, created_at FROM retrieval_outcome WHERE session_id = $sid ORDER BY created_at DESC LIMIT $lim) GROUP ALL",
+      "SELECT a, created_at FROM (SELECT a, b FROM t ORDER BY b DESC LIMIT 5) ORDER BY created_at",
     );
+  });
+
+  it("does not stop the SELECT clause at a projection-subquery's FROM", () => {
+    const sql = "SELECT (SELECT VALUE x FROM other LIMIT 1) AS sub, c FROM t ORDER BY c";
+    expect(patchOrderByFields(sql)).toBe(sql);
+  });
+
+  it("inner LIMIT does not terminate the outer ORDER clause scan", () => {
+    // The lookahead used to stop at the first LIMIT even inside parens.
+    expect(
+      patchOrderByFields("SELECT a FROM (SELECT a FROM t LIMIT 3) ORDER BY b"),
+    ).toBe("SELECT a, b FROM (SELECT a FROM t LIMIT 3) ORDER BY b");
   });
 });

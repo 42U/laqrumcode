@@ -82,18 +82,31 @@ describe.skipIf(!RUN_LIVE)("kongcode DB state invariants (live, read-only)", () 
     return (Array.isArray(rows) ? rows : []).filter(Boolean) as T[];
   }
 
+  // 0.7.118: the invariant is "every RETRIEVAL-ELIGIBLE row is embedded".
+  // Archived/superseded/pruned rows are deliberately outside retrieval (e.g.
+  // the 2026-06-10 stub sweep archived 5.5k rows; junk drain output gets
+  // archived rather than embedded) — counting them made the invariant fail
+  // on healthy graphs.
+  const ACTIVE_FILTER: Partial<Record<(typeof CONTENT_TABLES)[number], string>> = {
+    concept: "superseded_at IS NONE",
+    memory: '(status IS NONE OR status != "archived")',
+    turn: "pruned_at IS NONE",
+    skill: "superseded_at IS NONE",
+  };
+
   describe("embedding coverage", () => {
     for (const table of CONTENT_TABLES) {
-      it(`${table} has zero unembedded rows`, async () => {
+      it(`${table} has zero unembedded active rows`, async () => {
+        const active = ACTIVE_FILTER[table];
         const rows = await q<{ c: number }>(
           `SELECT count() AS c FROM ${table}
-             WHERE embedding IS NONE OR array::len(embedding) = 0
+             WHERE (embedding IS NONE OR array::len(embedding) = 0)${active ? ` AND ${active}` : ""}
              GROUP ALL`,
         );
         const count = rows[0]?.c ?? 0;
         expect(
           count,
-          `${table} has ${count} unembedded rows; expected 0 (run the embedding backfill)`,
+          `${table} has ${count} unembedded active rows; expected 0 (run the embedding backfill)`,
         ).toBe(0);
       });
     }
