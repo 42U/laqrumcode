@@ -77,6 +77,16 @@ export async function linkConceptCrossLink(deps, fromId, toId, edge) {
         return 0;
     }
     try {
+        // Idempotency guard (2026-06-09, gems-retry double-write trap): RELATE
+        // creates a NEW edge row every call, so a client retry of
+        // create_knowledge_gems (e.g. after an RPC timeout whose server side
+        // actually succeeded) duplicated every cross-link. Endpoints MUST be
+        // wrapped with type::record() — string bindings never match record
+        // values (the linkToProject guard below had exactly that bug and never
+        // matched, which is why its "dedup pre-check" silently grew duplicates).
+        const existing = await store.queryFirst(`SELECT id FROM ${edge} WHERE in = type::record($f) AND out = type::record($t) LIMIT 1`, { f: fromId, t: toId });
+        if (existing[0]?.id)
+            return 1; // edge already present — idempotent success
         await store.relate(fromId, edge, toId);
         return 1;
     }
@@ -90,7 +100,10 @@ async function linkToProject(deps, sourceId, sourceKind, projectId) {
     const edgeTable = sourceKind === "concept" ? "relevant_to" : "used_in";
     const logTag = `commit:linkToProject:${sourceKind}`;
     try {
-        const existing = await store.queryFirst(`SELECT id FROM ${edgeTable} WHERE in = $sid AND out = $pid LIMIT 1`, { sid: sourceId, pid: projectId });
+        // 2026-06-09: type::record() wrap — the previous bare string bindings
+        // never matched record values, so this dedup pre-check was a silent no-op
+        // and every re-link grew a duplicate relevant_to/used_in edge.
+        const existing = await store.queryFirst(`SELECT id FROM ${edgeTable} WHERE in = type::record($sid) AND out = type::record($pid) LIMIT 1`, { sid: sourceId, pid: projectId });
         if (existing[0]?.id)
             return 0;
         await store.relate(sourceId, edgeTable, projectId);
@@ -629,6 +642,18 @@ async function commitSkill(deps, data) {
 // ── Supersede constants (mirror of src/engine/supersedes.ts) ─────────────
 /** Minimum cosine similarity to consider a candidate the target of a correction. */
 const COMMIT_SUPERSEDE_THRESHOLD = 0.70;
+/** Long-body collateral guard (2026-06-09 incident, memory:ety7rj662y98liipw70c):
+ *  a short oldText slug appearing VERBATIM inside a healthy long-form concept
+ *  inflates cosine past 0.70 (token overlap), so supersede decayed the real
+ *  spec gem alongside the stub it targeted. A candidate whose content is more
+ *  than LONG_BODY_RATIO× the oldText length is almost certainly a document
+ *  that MENTIONS the belief rather than the belief itself — require the
+ *  STRICT bar (the same 0.85 the skill-supersede path chose against
+ *  "long-body cosine inflation", see supersedeOldSkills) or skip it.
+ *  Skipped candidates are reported in CommitResult.skippedByGuard so callers
+ *  can verify nothing legitimate was excluded. */
+const COMMIT_SUPERSEDE_LONG_BODY_RATIO = 4;
+const COMMIT_SUPERSEDE_LONG_BODY_STRICT = 0.85;
 /** Multiplicative decay applied to a superseded concept's stability score. */
 const COMMIT_STABILITY_DECAY_FACTOR = 0.4;
 /** Floor: don't decay below this so the concept remains discoverable. */
@@ -666,8 +691,9 @@ async function commitCorrection(deps, data) {
     let edges = memResult.edges;
     const supersededIds = [];
     const decayApplied = [];
+    const skippedByGuard = [];
     if (data.linkSupersedes === false) {
-        return { id: memoryId, edges, supersededIds, decayApplied };
+        return { id: memoryId, edges, supersededIds, decayApplied, skippedByGuard };
     }
     const targets = [];
     if (data.oldId) {
@@ -681,7 +707,7 @@ async function commitCorrection(deps, data) {
                 const [conceptCandidates, memoryCandidates] = await Promise.all([
                     store.queryFirst(
                     // COSINE_GUARD_OK: read-only supersede-candidate search; the destructive supersede UPDATE is a separate guarded step downstream.
-                    `SELECT id, vector::similarity::cosine(embedding, $vec) AS score, stability
+                    `SELECT id, vector::similarity::cosine(embedding, $vec) AS score, stability, content
              FROM concept
              WHERE embedding != NONE AND array::len(embedding) > 0
                AND superseded_at IS NONE
@@ -689,22 +715,48 @@ async function commitCorrection(deps, data) {
              ORDER BY score DESC LIMIT 5`, { vec, floor: COMMIT_STABILITY_FLOOR }),
                     store.queryFirst(
                     // COSINE_GUARD_OK: read-only supersede-candidate search; the destructive supersede UPDATE is a separate guarded step downstream.
-                    `SELECT id, vector::similarity::cosine(embedding, $vec) AS score
+                    `SELECT id, vector::similarity::cosine(embedding, $vec) AS score, text AS content
              FROM memory
              WHERE embedding != NONE AND array::len(embedding) > 0
                AND (status = 'active' OR status IS NONE)
                AND id != type::record($correctionId)
              ORDER BY score DESC LIMIT 5`, { vec, correctionId: memoryId }),
                 ]);
-                for (const c of conceptCandidates) {
-                    if (c.score < COMMIT_SUPERSEDE_THRESHOLD)
-                        break;
-                    targets.push({ id: String(c.id), kind: "concept", stability: c.stability });
+                // 2026-06-09 collateral-decay guards (memory:ety7rj662y98liipw70c):
+                //  (1) exact-content short-circuit — when any candidate's content IS
+                //      the oldText (normalized), target only those: the belief itself
+                //      always outranks documents that merely reference it.
+                //  (2) long-body ratio guard — a candidate much longer than oldText
+                //      that only PARTIALLY matches is a doc mentioning the phrase,
+                //      not the stale belief; require the strict bar or skip+report.
+                const normalize = (s) => s.trim().toLowerCase();
+                const oldNorm = normalize(data.oldText);
+                const oldLen = Math.max(oldNorm.length, 1);
+                const all = [
+                    ...conceptCandidates.map((c) => ({ id: String(c.id), kind: "concept", score: c.score ?? 0, stability: c.stability, content: String(c.content ?? "") })),
+                    ...memoryCandidates.map((m) => ({ id: String(m.id), kind: "memory", score: m.score ?? 0, content: String(m.content ?? "") })),
+                ];
+                const exact = all.filter((c) => normalize(c.content) === oldNorm);
+                if (exact.length > 0) {
+                    for (const c of exact)
+                        targets.push({ id: c.id, kind: c.kind, stability: c.stability });
                 }
-                for (const m of memoryCandidates) {
-                    if (m.score < COMMIT_SUPERSEDE_THRESHOLD)
-                        break;
-                    targets.push({ id: String(m.id), kind: "memory" });
+                else {
+                    for (const c of all) {
+                        if (c.score < COMMIT_SUPERSEDE_THRESHOLD)
+                            continue;
+                        const longBody = c.content.trim().length > COMMIT_SUPERSEDE_LONG_BODY_RATIO * oldLen;
+                        if (longBody && c.score < COMMIT_SUPERSEDE_LONG_BODY_STRICT) {
+                            skippedByGuard.push({
+                                id: c.id,
+                                kind: c.kind,
+                                score: Number(c.score.toFixed(3)),
+                                reason: `long-body partial match (content ${c.content.trim().length} chars > ${COMMIT_SUPERSEDE_LONG_BODY_RATIO}x old_text ${oldLen}; score ${c.score.toFixed(3)} < strict ${COMMIT_SUPERSEDE_LONG_BODY_STRICT})`,
+                            });
+                            continue;
+                        }
+                        targets.push({ id: c.id, kind: c.kind, stability: c.stability });
+                    }
                 }
             }
         }
@@ -714,7 +766,7 @@ async function commitCorrection(deps, data) {
     }
     if (targets.length === 0) {
         swallow.warn(`${logTag}:no_target`, new Error(`oldText="${(data.oldText ?? "").slice(0, 80)}" did not resolve to any concept/memory above threshold ${COMMIT_SUPERSEDE_THRESHOLD}`));
-        return { id: memoryId, edges, supersededIds, decayApplied };
+        return { id: memoryId, edges, supersededIds, decayApplied, skippedByGuard };
     }
     // 3. For each target: relate supersedes, decay (if enabled), record.
     for (const target of targets) {
@@ -758,7 +810,7 @@ async function commitCorrection(deps, data) {
             }
         }
     }
-    return { id: memoryId, edges, supersededIds, decayApplied };
+    return { id: memoryId, edges, supersededIds, decayApplied, skippedByGuard };
 }
 // Inline assertion to avoid the cross-import; mirrors src/engine/surreal.ts's
 // assertRecordId but kept here so commit.ts doesn't acquire a new surreal

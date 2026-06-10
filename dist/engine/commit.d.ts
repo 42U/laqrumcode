@@ -309,6 +309,15 @@ export interface CommitResult {
         oldStability: number;
         newStability: number;
     }>;
+    /** v0.7.115: candidates that crossed the similarity threshold but were
+     *  excluded by the long-body collateral guard. Surfaced so callers can
+     *  verify the guard didn't skip a legitimate target (dry-run-lite). */
+    skippedByGuard?: Array<{
+        id: string;
+        kind: "concept" | "memory";
+        score: number;
+        reason: string;
+    }>;
 }
 export declare function commitKnowledge(deps: CommitDeps, data: CommitData): Promise<CommitResult>;
 /**

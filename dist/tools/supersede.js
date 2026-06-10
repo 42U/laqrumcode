@@ -41,6 +41,7 @@ export async function handleSupersede(state, session, args) {
         return { content: [{ type: "text", text: "Error: failed to write correction memory." }] };
     }
     const superseded = result.supersededIds?.length ?? 0;
+    const skipped = result.skippedByGuard ?? [];
     return {
         content: [{
                 type: "text",
@@ -48,8 +49,15 @@ export async function handleSupersede(state, session, args) {
                     ok: true,
                     correction_memory_id: correctionMemId,
                     superseded_concepts: superseded,
+                    superseded_ids: result.supersededIds ?? [],
+                    // 2026-06-09: candidates above threshold that the long-body collateral
+                    // guard excluded — verify nothing legitimate was skipped; if one IS the
+                    // intended target, re-run with old_text matching its content exactly.
+                    ...(skipped.length > 0 ? { skipped_by_guard: skipped } : {}),
                     message: superseded === 0
-                        ? "Correction stored but no concepts matched the old text above threshold — consider rephrasing the old_text to better match existing concept content."
+                        ? (skipped.length > 0
+                            ? "No target superseded: the only candidates above threshold were long-form items that merely reference the old_text (see skipped_by_guard). If one is the real target, re-run with old_text matching its content exactly."
+                            : "Correction stored but no concepts matched the old text above threshold — consider rephrasing the old_text to better match existing concept content.")
                         : `Marked ${superseded} concept${superseded === 1 ? "" : "s"} as superseded.`,
                 }, null, 2),
             }],

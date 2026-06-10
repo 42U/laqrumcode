@@ -84,9 +84,9 @@ const READ_ONLY_COSINE_SITES = new Set<string>([
   // for chain construction. Doesn't mutate the matched row.
   "src/engine/causal.ts:163",
 
-  // link-hierarchy MCP tool — user-invoked explicit hierarchy assertion,
-  // read-only candidate lookup before creating broader/narrower edges.
-  "src/tools/link-hierarchy.ts:52",
+  // (link-hierarchy's reuse lookup now carries an inline COSINE_GUARD_OK
+  // marker — line-shift-proof after the 2026-06-09 tiered-resolution rework —
+  // so its line-pinned entry was retired.)
 
   // what-is-missing diagnostic — read-only.
   "src/tools/what-is-missing.ts:63",

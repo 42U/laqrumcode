@@ -4,6 +4,24 @@ All notable changes to KongCode are documented here. The 0.7.x series introduced
 
 ## [Unreleased]
 
+## [0.7.115] — 2026-06-09
+
+Knowledge-write-tool fixes — the spec-gem linking incident (memory:ety7rj662y98liipw70c).
+
+### Fixed
+- **`link_hierarchy` never reused existing concepts** — the 0.7 reuse-similarity bar was unreachable in practice (legitimate short-anchor-vs-long-body BGE-M3 cosines land 0.55–0.68; live noise pairs top out ~0.37), so every call minted duplicate stubs. Resolution is now tiered: **exact content match** (case/trim-insensitive) → **similarity ≥ 0.60** → create — and creates now report a `parent_near_miss`/`child_near_miss` `{id, score}` so a non-reuse is never silent again. (A pure kebab-slug anchor vs prose content measures ~0.25–0.30 — unbridgeable by embeddings; persist-gem-names is the noted follow-up.)
+- **`supersede` collateral decay** — a short `old_text` appearing verbatim inside a healthy long-form concept inflates cosine past 0.70, so the resolver (top-5 concepts + top-5 memories, everything ≥ 0.70 decayed) destabilized real gems alongside the intended stub. Two guards: an **exact-content short-circuit** (candidates whose content *is* the `old_text` are targeted exclusively) and a **long-body ratio guard** (content > 4× `old_text` length requires ≥ **0.85** — the same anti-inflation bar the skill path uses). Excluded candidates are returned in **`skipped_by_guard`** `{id, kind, score, reason}` with an actionable message, and `superseded_ids` is now in the tool response. QA reproduced the incident shape with exact-cosine fake embeddings: the 0.75 long-doc survives at stability 1.0 where it previously decayed.
+- **`create_knowledge_gems` retry double-write** — an RPC timeout whose server side succeeded made client retries duplicate every cross-link edge (RELATE creates a new row per call). `linkConceptCrossLink` now has a `type::record()`-correct exists-guard (present-or-created ⇒ success), and `linkToProject`'s *pre-existing* dedup check — silently broken since introduction (string-bound endpoints never match records; same bug class as 0.7.114's `getPreviousSessionTurns`, swept repo-wide: 1 site) — actually works now. `createArtifact` was verified already path-unique + race-safe. Retries are now idempotent end-to-end.
+
+### Investigated (not changed)
+- **Same-session save-then-recall lag**: a new test pins that a just-created concept is *immediately* top-1 findable by vector search — and no code path queries the HNSW index at all (reads are brute-force cosine), so index-refresh lag is ruled out by construction. The reported lag is pipeline-side (scoring/caching) — documented follow-up.
+
+### Tests
+- `test/knowledge-write-guards.test.ts` (7, live `kong_test`, deterministic fake-embedder vectors with exact cosines). Discriminating: **5/7 fail against pre-fix source**. Suite: **1133 passing**. Independently QA-reviewed — CLEAN (boundary semantics, injection audit, empirical no-op proof for the old linkToProject guard, production untouched).
+
+### Known follow-ups
+- Report exact-short-circuit exclusions (≥0.70 non-exact candidates) in `skipped_by_guard` too; inverse ratio asymmetry (long `old_text` vs short concept) unguarded; UNIQUE index on edge `(in, out)` as the durable dedup; prune two stale D2 whitelist pins; correct stale "HNSW KNN" comments; pre-existing duplicate `relevant_to`/`used_in` edges in production await a separate migration.
+
 ## [0.7.114] — 2026-06-09
 
 Drain-storm post-mortem fixes (2 big + 2 smaller bugs) + the CPU-mode knob.
