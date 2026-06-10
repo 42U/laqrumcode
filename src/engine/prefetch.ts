@@ -160,7 +160,7 @@ export async function prefetchContext(
             const expanded = await store.graphExpand(topIds, queryVec);
             const existingIds = new Set(results.map((r) => r.id));
             neighbors = expanded.filter((n) => !existingIds.has(n.id));
-          } catch (e) { swallow("prefetch:graphExpand", e); }
+          } catch (e) { swallow.warn("prefetch:graphExpand", e); } // T5: surfaced — was hiding real DB errors
         }
 
         const [skills, reflections] = await Promise.all([
@@ -179,7 +179,7 @@ export async function prefetchContext(
           projectId: projectId ?? "",
         });
       } catch (e) {
-        swallow("prefetch:query", e);
+        swallow.warn("prefetch:query", e); // T5: surfaced — was hiding real DB errors
       }
     })().finally(() => {
       // Clear regardless of resolve/reject so the Map doesn't accumulate

@@ -38,14 +38,18 @@ async function probeEmbeddings(embeddings) {
         return { status: "ok" };
     return { status: probed.status, detail: probed.message };
 }
-async function countRow(state, sql, defaultVal = 0) {
+/** null = the count query FAILED (connection wobble, bad table, cast error) —
+ *  deliberately distinct from 0 = "ran fine, table is empty". An empty result
+ *  set from GROUP ALL (no rows at all) is a legitimate 0. */
+async function countRow(state, sql) {
     try {
         const rows = await state.store.queryFirst(sql);
-        return Number(rows[0]?.n ?? defaultVal);
+        const n = Number(rows[0]?.n ?? 0);
+        return Number.isFinite(n) ? n : null;
     }
     catch (e) {
         swallow("memoryHealth:count", e);
-        return defaultVal;
+        return null;
     }
 }
 export async function handleMemoryHealth(state, _session, _args) {
@@ -74,13 +78,14 @@ export async function handleMemoryHealth(state, _session, _args) {
             status: "red",
             connection,
             embedding_service: embProbe.status,
+            // Connection down ⇒ counts are UNKNOWN, not zero (T5 null-sentinel).
             metrics: {
-                concept_count: 0, concept_embedded: 0,
-                memory_count: 0, memory_embedded: 0,
-                turn_count: 0, turn_embedded: 0,
-                artifact_count: 0, artifact_embedded: 0,
-                retrieval_outcome_count: 0, pending_work_count: 0,
-                embedding_gap_pct: 0,
+                concept_count: null, concept_embedded: null,
+                memory_count: null, memory_embedded: null,
+                turn_count: null, turn_embedded: null,
+                artifact_count: null, artifact_embedded: null,
+                retrieval_outcome_count: null, pending_work_count: null,
+                embedding_gap_pct: null,
             },
             diagnostics: [
                 { severity: "error", area: "connection", message: "SurrealDB store is not available." },
@@ -103,10 +108,30 @@ export async function handleMemoryHealth(state, _session, _args) {
         // it, soft-archived forensic rows (active=false) count as phantom backlog.
         countRow(state, "SELECT count() AS n FROM pending_work WHERE status = 'pending' AND (active = true OR active IS NONE) GROUP ALL"),
     ]);
-    // Compute an aggregate embedding gap percentage across the main embedded tables.
-    const total = concept_count + memory_count + turn_count + artifact_count;
-    const totalEmbedded = concept_embedded + memory_embedded + turn_embedded + artifact_embedded;
-    const embedding_gap_pct = total > 0 ? Math.round(((total - totalEmbedded) / total) * 100) : 0;
+    // Surface failed counts loudly — a null is a broken probe, not an empty table.
+    const failedCounts = [
+        ["concept_count", concept_count], ["concept_embedded", concept_embedded],
+        ["memory_count", memory_count], ["memory_embedded", memory_embedded],
+        ["turn_count", turn_count], ["turn_embedded", turn_embedded],
+        ["artifact_count", artifact_count], ["artifact_embedded", artifact_embedded],
+        ["retrieval_outcome_count", retrieval_outcome_count], ["pending_work_count", pending_work_count],
+    ].filter(([, v]) => v === null).map(([k]) => k);
+    if (failedCounts.length > 0) {
+        diagnostics.push({
+            severity: "warn", area: "metrics",
+            message: `count queries failed for: ${failedCounts.join(", ")} — reported as null (NOT 0). The store answered the connection probe but not these counts; check daemon stderr.`,
+        });
+    }
+    // Compute an aggregate embedding gap percentage across the main embedded
+    // tables — only when every input count actually succeeded.
+    const gapInputs = [concept_count, memory_count, turn_count, artifact_count,
+        concept_embedded, memory_embedded, turn_embedded, artifact_embedded];
+    let embedding_gap_pct = null;
+    if (gapInputs.every((v) => v !== null)) {
+        const total = concept_count + memory_count + turn_count + artifact_count;
+        const totalEmbedded = concept_embedded + memory_embedded + turn_embedded + artifact_embedded;
+        embedding_gap_pct = total > 0 ? Math.round(((total - totalEmbedded) / total) * 100) : 0;
+    }
     const metrics = {
         concept_count, concept_embedded,
         memory_count, memory_embedded,
@@ -128,19 +153,22 @@ export async function handleMemoryHealth(state, _session, _args) {
             message: `BGE-M3 probe degraded (${embProbe.detail ?? "unknown"}) — embed flag is OK but a live embed call did not return a vector.`,
         });
     }
-    if (embedding_gap_pct > 15) {
+    if (embedding_gap_pct !== null && embedding_gap_pct > 15) {
         diagnostics.push({
             severity: "warn", area: "embedding",
             message: `embedding gap is ${embedding_gap_pct}% across concept/memory/turn/artifact — embedder may be lagging`,
         });
     }
-    if (pending_work_count > 50) {
+    if (pending_work_count !== null && pending_work_count > 50) {
         diagnostics.push({
             severity: "warn", area: "pending_work",
             message: `${pending_work_count} items in pending_work queue — subagent drainer may be slow`,
         });
     }
-    if (retrieval_outcome_count < 100 && turn_count > 200) {
+    // null < 100 would coerce to 0 < 100 = true and fire this spuriously on a
+    // failed count — require both probes to have actually succeeded.
+    if (retrieval_outcome_count !== null && turn_count !== null &&
+        retrieval_outcome_count < 100 && turn_count > 200) {
         diagnostics.push({
             severity: "warn", area: "acan",
             message: "retrieval_outcome count is low relative to turn count — ACAN may not have enough training data",

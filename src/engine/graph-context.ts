@@ -1345,6 +1345,27 @@ export function resolveTransformTimeoutMs(env: NodeJS.ProcessEnv = process.env):
  * Main entry point for graph-based context assembly. Retrieves, scores, deduplicates,
  * and budget-trims graph nodes, then splices them into the conversation message array.
  */
+/** B17 (T5, 2026-06-10): per-call stage trace. When the transform blows its
+ *  deadline the timeout error used to carry zero information about WHERE the
+ *  45s went (live incident: "fatal error after 45001ms" with nothing else).
+ *  Inner marks each stage START; the wrapper formats elapsed-per-stage into
+ *  the failure log, so the stage in progress at death is the one after the
+ *  last mark. */
+interface TransformStageTrace {
+  marks: Array<{ stage: string; at: number }>;
+}
+
+function formatStageTrace(trace: TransformStageTrace, startedAt: number, diedAt: number): string {
+  if (trace.marks.length === 0) return "no stages reached";
+  const parts: string[] = [];
+  for (let i = 0; i < trace.marks.length; i++) {
+    const m = trace.marks[i];
+    const end = i + 1 < trace.marks.length ? trace.marks[i + 1].at : diedAt;
+    parts.push(`${m.stage}@+${m.at - startedAt}ms(${end - m.at}ms)`);
+  }
+  return `${parts.join(" → ")} [died in: ${trace.marks[trace.marks.length - 1].stage}]`;
+}
+
 export async function graphTransformContext(
   params: GraphTransformParams,
 ): Promise<GraphTransformResult> {
@@ -1373,9 +1394,10 @@ export async function graphTransformContext(
   let transformTimer: ReturnType<typeof setTimeout> | undefined;
   const TRANSFORM_TIMEOUT_MS = resolveTransformTimeoutMs();
   const transformStartedAt = Date.now();
+  const stageTrace: TransformStageTrace = { marks: [] };
   try {
     const result = await Promise.race([
-      graphTransformInner(messages, session, store, embeddings, contextWindow, budgets, signal, tier0ForSys),
+      graphTransformInner(messages, session, store, embeddings, contextWindow, budgets, signal, tier0ForSys, stageTrace),
       new Promise<never>((_, reject) => {
         transformTimer = setTimeout(() => reject(new Error("graphTransformContext timed out")), TRANSFORM_TIMEOUT_MS);
       }),
@@ -1385,9 +1407,11 @@ export async function graphTransformContext(
     return result;
   } catch (err) {
     recordTransformOutcome(false);
+    const diedAt = Date.now();
     log.error(
-      `graphTransformContext fatal error after ${Date.now() - transformStartedAt}ms ` +
-      `(timeout=${TRANSFORM_TIMEOUT_MS}ms), returning raw messages:`,
+      `graphTransformContext fatal error after ${diedAt - transformStartedAt}ms ` +
+      `(timeout=${TRANSFORM_TIMEOUT_MS}ms), returning raw messages. ` +
+      `Stage timings: ${formatStageTrace(stageTrace, transformStartedAt, diedAt)}:`,
       err,
     );
     return {
@@ -1423,7 +1447,10 @@ async function graphTransformInner(
   _signal?: AbortSignal,
   /** Tier 0 entries already fetched by wrapper — avoids double DB fetch. */
   tier0FromWrapper: CoreMemoryEntry[] = [],
+  /** B17 stage trace owned by the wrapper — marks stage STARTS. */
+  stageTrace?: TransformStageTrace,
 ): Promise<GraphTransformResult> {
+  const mark = (stage: string): void => { stageTrace?.marks.push({ stage, at: Date.now() }); };
   function makeStats(
     sent: AgentMessage[], graphNodes: number, neighborNodes: number,
     recentTurnCount: number, mode: ContextStats["mode"], prefetchHit = false,
@@ -1444,6 +1471,7 @@ async function graphTransformInner(
 
   // Skip retrieval fast path — avoid DB queries entirely when model already has core memory
   // (claw-code pattern: simple_mode skips the load, not load-then-discard)
+  if (skipRetrieval) mark("skip-retrieval");
   if (skipRetrieval) {
     const recentTurns = getRecentTurns(messages, budgets.conversation, budgets.toolHistory, contextWindow, session);
     // If model already saw core memory, just return recent turns + compressed rules. Zero DB queries.
@@ -1472,6 +1500,7 @@ async function graphTransformInner(
   }
 
   // Load tiered core memory (full retrieval path)
+  mark("core-memory");
   let tier0: CoreMemoryEntry[] = [];
   let tier1: CoreMemoryEntry[] = [];
   try {
@@ -1520,6 +1549,7 @@ async function graphTransformInner(
   let tokenBudget = Math.min(config?.tokenBudget ?? 6000, budgets.retrieval);
 
   try {
+    mark("query-vec");
     const queryVec = await buildContextualQueryVec(queryText, messages, embeddings, session);
     session.lastQueryVec = queryVec; // Stash for redundant recall detection
 
@@ -1530,6 +1560,7 @@ async function graphTransformInner(
       recordPrefetchHit();
       const suppressed = getSuppressedNodeIds(session);
       const filteredCached = cached.results.filter(r => !suppressed.has(r.id));
+      mark("prefetch-rank");
       const ranked = await scoreResults(filteredCached, new Set(), queryVec, store, currentIntent);
       const deduped = deduplicateResults(ranked);
       const reranked = await rerankResults(deduped, queryText);
@@ -1567,6 +1598,7 @@ async function graphTransformInner(
 
     // Vector search + tag-boosted retrieval (cache miss path, run in parallel)
     recordPrefetchMiss();
+    mark("vector-search");
     let [vectorResultsRaw, tagResults] = await Promise.all([
       store.vectorSearch(queryVec, session.sessionId, vectorSearchLimits, isACANActive(), session.projectId || undefined),
       store.tagBoostedConcepts(queryText, queryVec, 10).catch(e => { swallow.warn("graph-context:tagBoost", e); return [] as VectorSearchResult[]; }),
@@ -1617,6 +1649,7 @@ async function graphTransformInner(
     // Fire graph expansion, causal traversal, skills, and reflections in parallel.
     // Skills + reflections only need queryVec — no dependency on graph results.
     const SKILL_INTENTS = new Set(["code-write", "code-debug", "multi-step", "code-read"]);
+    mark("graph-expand");
     const [expandResult, causalResult, skillsFound, reflectionsFound] = await Promise.all([
       topIds.length > 0
         ? store.graphExpand(topIds, queryVec, graphHops).catch(e => { swallow.error("graph-context:graphExpand", e); return [] as VectorSearchResult[]; })
@@ -1654,11 +1687,13 @@ async function graphTransformInner(
         ? true
         : (r.score ?? 0) >= MIN_COSINE);
 
+    mark("score-rerank");
     const ranked = await scoreResults(allResults, neighborIds, queryVec, store, currentIntent);
     const deduped = deduplicateResults(ranked);
     const reranked = await rerankResults(deduped, queryText);
     applyDistributionBands(reranked);
     let contextNodes = takeWithConstraints(reranked, tokenBudget, budgets.maxContextItems);
+    mark("recent-turns");
     contextNodes = await ensureRecentTurns(contextNodes, session, store);
 
     if (contextNodes.length === 0) {
@@ -1697,6 +1732,7 @@ async function graphTransformInner(
     // Write full pipeline results back to prefetch cache for subsequent similar queries
     setCachedContext(queryVec, contextNodes, skillsFound, reflectionsFound, session.sessionId, session.projectId || undefined);
 
+    mark("format-context");
     const injectedContext = await formatContextMessage(contextNodes, store, session, skillContext + reflectionContext, tier0, tier1);
     const recentTurns = getRecentTurns(messages, budgets.conversation, budgets.toolHistory, contextWindow, session);
     const result = [injectedContext, ...recentTurns];

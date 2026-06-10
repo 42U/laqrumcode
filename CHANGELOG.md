@@ -4,6 +4,81 @@ All notable changes to KongCode are documented here. The 0.7.x series introduced
 
 ## [Unreleased]
 
+## [0.7.117] — 2026-06-10
+
+T5 hardening tranche of the 2026-06-10 QA waterfall (follows 0.7.116's T1–T4),
+plus the edge-dedup migration that 0.7.116 staged. QA-reviewed pre-tag
+(adversarial agent review: no correctness blockers; both in-diff observability
+defects fixed before tagging).
+
+### Added
+- `scripts/dedup-edges.mjs` — one-time edge-table cleanup enabling the W2-05
+  UNIQUE (in,out) indexes on existing installs: backup-refuses-commit (JSONL
+  per table + manifest), dry-run default, keep-earliest per (in,out), self-loop
+  removal, converge-loop vs concurrent writers, arms each index immediately
+  after its table is clean, and auth-drop retry (`q()` reconnect+re-signin —
+  the surrealdb.js SDK does not re-authenticate after a WS auto-reconnect).
+  Production run: 693,081 → 83,289 edge rows (88% duplicates/self-loops
+  removed), all 10 guarded tables UNIQUE-armed, zero data loss.
+- `patchOrderByFields` rewrite (src/engine/surreal.ts): alias-aware (no more
+  phantom columns for `AS x … ORDER BY x`), top-level-comma splitting (function
+  args no longer sheared), non-identifier ORDER terms (e.g. `rand()`) left
+  alone; exported with a 13-case unit suite (test/patch-order-by.test.ts)
+  including a pinned subquery-ORDER-BY blind-spot test.
+- B17 embed pipeline (src/engine/embeddings.ts): explicit serial FIFO; timeout
+  clock starts at DEQUEUE (measures compute, not queue depth — concurrent
+  embedBatch no longer ratchets the circuit breaker spuriously); breaker
+  checked at dequeue with fail-fast while open; a single half-open probe after
+  the 60s cooldown (success closes, failure re-opens — no more full-backlog
+  burn-through); cache hits bypass the breaker; dispose() rejects queued items;
+  `embedQueueDepth`/`embedQueueDepthMax` in diagnostics.
+- B17 transform stage trace (src/engine/graph-context.ts): per-call stage marks
+  (core-memory → query-vec → vector-search → graph-expand → score-rerank →
+  recent-turns → format-context, plus skip-retrieval); timeout failures now log
+  per-stage elapsed and the stage that died, instead of a bare "45001ms".
+- `KONGCODE_IPC_TIMEOUT_MS` env override for the 30s per-request IPC timeout
+  (clamped 1s–10min; explicit per-call/per-client opts win) — operator knob for
+  CPU-only machines where long gem batches legitimately exceed 30s.
+- ensureEdgeIndexes hardening (src/engine/edge-indexes.ts): per-op 15s timeout
+  (a hung DEFINE can no longer stall the pass invisibly), INFO-FOR-INDEX
+  fallback (an existing index counts as armed instead of being flagged dirty),
+  entry log line, per-table failure CAUSE recorded in the flag file (timeout
+  vs duplicates need different operator responses), and a warn-level
+  flagged→armed recovery receipt (dedup-edges now resets the flag to `{}`
+  instead of deleting it so the receipt can actually fire).
+
+### Fixed
+- `relate()` self-loop guard: `in == out` edges refused at the choke point —
+  a live writer was re-creating them (7 fresh within an hour of the migration
+  deleting 97,082).
+- `getRecentUtilizationAvg` (src/engine/retrieval-quality.ts): missing
+  `GROUP ALL` made SurrealDB 3.x throw whenever rows existed; the bare catch
+  returned null, so the adaptive utilization signal had been dead since
+  introduction. Live-probed both ways (QA review item 3).
+- memory_health null-sentinel: failed count queries now report `null` (plus a
+  warn diagnostic naming the fields) instead of masquerading as 0/empty;
+  `embedding_gap_pct` only computed when all inputs succeeded; fixed a null
+  coercion that could fire the ACAN diagnostic spuriously; connection-down
+  reports null metrics, not zeros.
+- Silent-failure promotions (swallow → swallow.warn): concept-links relate /
+  search / hierarchy, session-start pillar links + seeds + deferred cleanup,
+  user-prompt-submit ensureSessionRow, prefetch query/expand. Failures that
+  silently lose graph wiring are now visible at the default log level.
+- Comment rot: three false "HNSW KNN index" claims now state the linear-scan
+  truth (bare similarity calls never use `concept_vec_idx`; SurrealDB only
+  consults HNSW via the `<|n|>` operator) + a stale schema line pin.
+
+### Operational notes
+- KONGCODE_LOG_LEVEL defaults to `warn`: `log.info` lines never reach
+  daemon.log. Diagnosing by log-absence is a trap; verify daemon behavior by
+  direct DB probes.
+- :8000 SurrealDB wedged under the day's load (migration + suites + a daemon
+  holding a hung WS); `docker restart` recovered it with zero data loss.
+  0.7.118 queue: store-level per-query deadline (a zombie WS leaves
+  `rpcsInFlight` growing while meta.health stays green), SIGTERM shutdown
+  timeout (graceful close hangs on a dead connection), QA review items 4–5
+  (self-loop edge-count cosmetics, patcher subquery awareness).
+
 ## [0.7.116] — 2026-06-10
 
 Wave-2 remediation: ~20 confirmed bugs from the full-source QA waterfall (4-agent audit, findings inventory memory:65eoe78c151tot1eecdc). Four tranches; QA-reviewed with one CONCERN (coverage gap) closed pre-tag.

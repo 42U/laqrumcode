@@ -44,6 +44,27 @@ export const GUARDED_EDGE_TABLES = [
 export function pendingFlagPath(cacheDir) {
     return join(cacheDir, "edge-indexes-pending.json");
 }
+/** Per-DEFINE/INFO budget. T5 (2026-06-10): the first two post-migration boots
+ *  never logged ANY edge-indexes outcome — a DEFINE round-trip on the
+ *  busy just-booted connection stalled indefinitely while the same statement
+ *  on an idle connection no-ops in milliseconds. A hung await inside this
+ *  fire-and-forget function is invisible; the timeout converts it into a
+ *  visible, verifiable failure. */
+const EDGE_INDEX_OP_TIMEOUT_MS = 15_000;
+function withTimeout(p, ms, label) {
+    return new Promise((resolve, reject) => {
+        const t = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+        p.then((v) => { clearTimeout(t); resolve(v); }, (e) => { clearTimeout(t); reject(e); });
+    });
+}
+/** True when `${table}_inout_unique` exists on the server — used as a
+ *  fallback verification when DEFINE errors or times out. INFO FOR INDEX
+ *  returns a `{ building: {...} }` object for an existing index and throws
+ *  for an unknown one. */
+async function indexExists(store, table) {
+    const info = await withTimeout(store.queryMulti(`INFO FOR INDEX ${table}_inout_unique ON ${table}`), EDGE_INDEX_OP_TIMEOUT_MS, `INFO FOR INDEX ${table}`);
+    return info != null && typeof info === "object";
+}
 export async function ensureEdgeIndexes(store, cacheDir) {
     const flagPath = pendingFlagPath(cacheDir);
     let pending = {};
@@ -54,6 +75,12 @@ export async function ensureEdgeIndexes(store, cacheDir) {
     catch {
         pending = {};
     }
+    // Entry marker — without it, a stall between here and the outcome log is
+    // indistinguishable from "never ran" (exactly the 2026-06-10 silent-boot
+    // diagnosis trap).
+    const preSkipped = GUARDED_EDGE_TABLES.filter((t) => pending[t]);
+    log.info(`[edge-indexes] verifying UNIQUE (in,out) on ${GUARDED_EDGE_TABLES.length} edge table(s)` +
+        (preSkipped.length > 0 ? ` (${preSkipped.length} flagged-pending, skipped)` : ""));
     const defined = [];
     const skipped = [];
     for (const table of GUARDED_EDGE_TABLES) {
@@ -62,14 +89,32 @@ export async function ensureEdgeIndexes(store, cacheDir) {
             continue;
         }
         try {
-            await store.queryExec(`DEFINE INDEX IF NOT EXISTS ${table}_inout_unique ON ${table} FIELDS in, out UNIQUE`);
+            await withTimeout(store.queryExec(`DEFINE INDEX IF NOT EXISTS ${table}_inout_unique ON ${table} FIELDS in, out UNIQUE`), EDGE_INDEX_OP_TIMEOUT_MS, `DEFINE INDEX ${table}`);
             defined.push(table);
         }
         catch (e) {
-            // Existing duplicate (in,out) rows block the UNIQUE build. Flag the
-            // table so subsequent boots skip the (potentially seconds-long) failed
-            // attempt; the dedup migration deletes the flag file to re-arm.
-            pending[table] = new Date().toISOString();
+            // A failed/hung DEFINE does NOT necessarily mean the table is dirty —
+            // post-migration the index already exists and enforces, and the DEFINE
+            // can still error or stall. Verify existence before flagging: an
+            // existing index IS the goal state, so count it as armed.
+            let exists = false;
+            try {
+                exists = await indexExists(store, table);
+            }
+            catch {
+                exists = false;
+            }
+            if (exists) {
+                defined.push(table);
+                continue;
+            }
+            // Flag the table so subsequent boots skip the (potentially seconds-long)
+            // failed attempt; the dedup migration resets the flag file to re-arm.
+            // QA 0.7.117 item 2: record the CAUSE in the flag value — a timeout-
+            // flagged clean table and a duplicate-blocked dirty one need different
+            // operator responses, and asserting "duplicates" for both sent people
+            // chasing dedup-edges on tables with zero duplicates.
+            pending[table] = `${new Date().toISOString()} | ${e instanceof Error ? e.message.slice(0, 140) : String(e).slice(0, 140)}`;
             skipped.push(table);
             swallow.warn(`edgeIndexes:${table}`, e);
         }
@@ -79,16 +124,28 @@ export async function ensureEdgeIndexes(store, cacheDir) {
             writeFileSync(flagPath, JSON.stringify(pending, null, 2));
         }
         catch { /* best-effort */ }
-        log.warn(`[edge-indexes] ${skipped.length} edge table(s) blocked from UNIQUE (in,out) by existing duplicates: ` +
-            `${skipped.join(", ")} — run scripts/dedup-edges.mjs (it clears ${flagPath}; the next daemon boot arms them).`);
+        log.warn(`[edge-indexes] ${skipped.length} edge table(s) blocked from UNIQUE (in,out): ` +
+            `${skipped.join(", ")} — per-table cause recorded in ${flagPath}. ` +
+            `Duplicate-blocked tables need scripts/dedup-edges.mjs (it resets the flag; the next boot arms them); ` +
+            `timeout-flagged tables re-arm after deleting their flag entry.`);
     }
     else if (defined.length > 0) {
-        try {
-            if (existsSync(flagPath))
+        // NOTE (T5): the default KONGCODE_LOG_LEVEL is "warn", so log.info lines
+        // never reach daemon.log — exactly why post-migration boots looked
+        // "silent" (2026-06-10 diagnosis). The flagged→armed RECOVERY transition
+        // is the receipt the dedup-edges runbook points operators at, so it must
+        // be visible at the default level; steady-state re-verification stays info.
+        if (existsSync(flagPath)) {
+            try {
                 unlinkSync(flagPath);
+            }
+            catch { /* best-effort */ }
+            log.warn(`[edge-indexes] recovered: all ${defined.length} edge table(s) now UNIQUE-armed; ` +
+                `pending flag cleared (${flagPath})`);
         }
-        catch { /* best-effort */ }
-        log.info(`[edge-indexes] UNIQUE (in,out) armed on ${defined.length} edge table(s)`);
+        else {
+            log.info(`[edge-indexes] UNIQUE (in,out) armed on ${defined.length} edge table(s)`);
+        }
     }
     return { defined, skipped };
 }

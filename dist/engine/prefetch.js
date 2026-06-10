@@ -118,8 +118,8 @@ export async function prefetchContext(queries, sessionId, embeddings, store, pro
                         neighbors = expanded.filter((n) => !existingIds.has(n.id));
                     }
                     catch (e) {
-                        swallow("prefetch:graphExpand", e);
-                    }
+                        swallow.warn("prefetch:graphExpand", e);
+                    } // T5: surfaced — was hiding real DB errors
                 }
                 const [skills, reflections] = await Promise.all([
                     findRelevantSkills(queryVec, 2, store).catch(() => []),
@@ -137,7 +137,7 @@ export async function prefetchContext(queries, sessionId, embeddings, store, pro
                 });
             }
             catch (e) {
-                swallow("prefetch:query", e);
+                swallow.warn("prefetch:query", e); // T5: surfaced — was hiding real DB errors
             }
         })().finally(() => {
             // Clear regardless of resolve/reject so the Map doesn't accumulate

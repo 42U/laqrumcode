@@ -17,6 +17,10 @@ export interface EmbeddingDiagnostics {
     l2CacheEnabled: boolean;
     l2Hits: number;
     l2Misses: number;
+    /** B17: live FIFO depth + high-water mark — a large value with timeouts
+     *  means the embedder is underwater (queue wait), not slow per-item. */
+    embedQueueDepth: number;
+    embedQueueDepthMax: number;
 }
 export declare class EmbeddingService {
     private readonly config;
@@ -44,7 +48,20 @@ export declare class EmbeddingService {
     private textHash;
     private l2Get;
     private l2Put;
+    /** B17 (T5, 2026-06-10): llama serializes embedding computation internally,
+     *  so N concurrent embed() calls (embedBatch, parallel hook traffic) used to
+     *  start N timeout clocks at SUBMIT time while computing one at a time —
+     *  item k "timed out" after waiting k×(compute time) in line, on CPU tiers
+     *  ratcheting consecutiveTimeouts to the breaker threshold without a single
+     *  slow computation. The explicit FIFO below makes the serialization visible
+     *  and starts each item's clock at DEQUEUE, so the timeout measures compute,
+     *  not queue depth. */
+    private embedQueue;
+    private queueDraining;
+    private queueDepthMax;
     embed(text: string): Promise<number[]>;
+    private drainEmbedQueue;
+    private computeAndSettle;
     embedBatch(texts: string[]): Promise<number[][]>;
     isAvailable(): boolean;
     dispose(): Promise<void>;

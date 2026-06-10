@@ -472,7 +472,11 @@ export async function getRecentUtilizationAvg(sessionId, windowSize = 10, store)
     if (!store)
         return null;
     try {
-        const rows = await store.queryFirst(`SELECT math::mean(utilization) AS avg FROM (SELECT utilization, created_at FROM retrieval_outcome WHERE session_id = $sid ORDER BY created_at DESC LIMIT $lim)`, { sid: sessionId, lim: windowSize });
+        // T5 (2026-06-10, QA item 3): without GROUP ALL, SurrealDB 3.x throws
+        // "Expected `array<number>` but found `0f`" whenever rows exist — the
+        // aggregate ran per-row, so this signal had been permanently null behind
+        // the bare catch since introduction. Probed live both ways.
+        const rows = await store.queryFirst(`SELECT math::mean(utilization) AS avg FROM (SELECT utilization, created_at FROM retrieval_outcome WHERE session_id = $sid ORDER BY created_at DESC LIMIT $lim) GROUP ALL`, { sid: sessionId, lim: windowSize });
         // Guard against NaN: math::mean over an empty window returns NaN in
         // SurrealDB, which would propagate through orchestrator.ts:266
         // (`orch.cachedUtilAvg !== null` accepts NaN, then poisons tokenBudget

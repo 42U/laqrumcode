@@ -52,6 +52,18 @@ declare function assertRecordId(id: string): void;
 /** Whitelist of valid SurrealDB edge table names — prevents SQL injection via edge interpolation. */
 declare const VALID_EDGES: Set<string>;
 declare function assertValidEdge(edge: string): void;
+/** SurrealDB 3.x requires every ORDER BY field to appear in the selection.
+ *  Auto-append missing ones rather than chasing each call site.
+ *
+ *  W2/T5 hardening (the original was alias-blind and paren-blind):
+ *  - `SELECT count() AS c … ORDER BY c` previously appended a phantom raw `c`
+ *    (it recorded the pre-AS *expression*, not the alias ORDER BY sees).
+ *  - Naive split(",") sheared `math::max([a, b])`-style args into garbage
+ *    fields. Both now handled; non-identifier ORDER terms (e.g. rand()) are
+ *    left alone instead of being appended as fake columns.
+ *
+ *  Exported for unit tests (test/patch-order-by.test.ts). */
+export declare function patchOrderByFields(sql: string): string;
 /**
  * SurrealDB store — wraps all database operations for the KongCode plugin.
  * Replaces the module-level singleton pattern from standalone KongCode.

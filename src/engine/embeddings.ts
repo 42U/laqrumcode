@@ -22,6 +22,10 @@ export interface EmbeddingDiagnostics {
   l2CacheEnabled: boolean;
   l2Hits: number;
   l2Misses: number;
+  /** B17: live FIFO depth + high-water mark — a large value with timeouts
+   *  means the embedder is underwater (queue wait), not slow per-item. */
+  embedQueueDepth: number;
+  embedQueueDepthMax: number;
 }
 
 export class EmbeddingService {
@@ -97,6 +101,8 @@ export class EmbeddingService {
       l2CacheEnabled: this.store !== null,
       l2Hits: this.l2Hits,
       l2Misses: this.l2Misses,
+      embedQueueDepth: this.embedQueue.length,
+      embedQueueDepthMax: this.queueDepthMax,
     };
   }
 
@@ -133,16 +139,29 @@ export class EmbeddingService {
     ).catch(e => swallow("embeddings:l2Put", e));
   }
 
+  /** B17 (T5, 2026-06-10): llama serializes embedding computation internally,
+   *  so N concurrent embed() calls (embedBatch, parallel hook traffic) used to
+   *  start N timeout clocks at SUBMIT time while computing one at a time —
+   *  item k "timed out" after waiting k×(compute time) in line, on CPU tiers
+   *  ratcheting consecutiveTimeouts to the breaker threshold without a single
+   *  slow computation. The explicit FIFO below makes the serialization visible
+   *  and starts each item's clock at DEQUEUE, so the timeout measures compute,
+   *  not queue depth. */
+  private embedQueue: Array<{
+    text: string;
+    hash: string;
+    enqueuedAt: number;
+    resolve: (v: number[]) => void;
+    reject: (e: Error) => void;
+  }> = [];
+  private queueDraining = false;
+  private queueDepthMax = 0;
+
   async embed(text: string): Promise<number[]> {
     if (!this.ready || !this.ctx) throw new Error("Embeddings not initialized");
-    if (this.consecutiveTimeouts >= this.maxConsecutiveTimeouts) {
-      if (!this.breakerOpenedAt) this.breakerOpenedAt = Date.now();
-      if (Date.now() - this.breakerOpenedAt < 60_000) {
-        throw new Error(`Embedding circuit breaker open: ${this.consecutiveTimeouts} consecutive timeouts`);
-      }
-      this.consecutiveTimeouts = 0;
-      this.breakerOpenedAt = null;
-    }
+    // Cache hits bypass the breaker — the breaker protects the COMPUTE path;
+    // refusing to serve a warm cache during an open window (the old behavior)
+    // only amplified outages.
     const cached = this.cache.get(text);
     if (cached) {
       this.cache.delete(text);
@@ -160,36 +179,97 @@ export class EmbeddingService {
       return l2;
     }
 
+    return new Promise<number[]>((resolve, reject) => {
+      this.embedQueue.push({ text, hash, enqueuedAt: Date.now(), resolve, reject });
+      if (this.embedQueue.length > this.queueDepthMax) this.queueDepthMax = this.embedQueue.length;
+      void this.drainEmbedQueue();
+    });
+  }
+
+  private async drainEmbedQueue(): Promise<void> {
+    if (this.queueDraining) return;
+    this.queueDraining = true;
+    try {
+      while (this.embedQueue.length > 0) {
+        const item = this.embedQueue.shift()!;
+        if (this.consecutiveTimeouts >= this.maxConsecutiveTimeouts) {
+          if (!this.breakerOpenedAt) this.breakerOpenedAt = Date.now();
+          if (Date.now() - this.breakerOpenedAt < 60_000) {
+            // Open: fail fast — no compute, no embedTimeoutMs burned per item.
+            item.reject(
+              new Error(`Embedding circuit breaker open: ${this.consecutiveTimeouts} consecutive timeouts`),
+            );
+            continue;
+          }
+          // Cooldown elapsed → HALF-OPEN: this item is the single probe. The
+          // old code reset the counter here and let the whole backlog through;
+          // a still-wedged embedder then burned a full timeout per item before
+          // re-opening. Serial dequeue means everything behind the probe waits,
+          // and a failed probe re-opens the breaker for them to fail fast.
+        }
+        await this.computeAndSettle(item);
+      }
+    } finally {
+      this.queueDraining = false;
+    }
+  }
+
+  private async computeAndSettle(item: {
+    text: string;
+    hash: string;
+    enqueuedAt: number;
+    resolve: (v: number[]) => void;
+    reject: (e: Error) => void;
+  }): Promise<void> {
     let timer: ReturnType<typeof setTimeout> | undefined;
+    const startedAt = Date.now();
+    const probing = this.consecutiveTimeouts >= this.maxConsecutiveTimeouts;
     try {
       const result = await Promise.race([
-        this.ctx.getEmbeddingFor(text),
+        this.ctx!.getEmbeddingFor(item.text),
         new Promise<never>((_, reject) => {
-          timer = setTimeout(() => reject(new Error(`embed() timed out after ${this.embedTimeoutMs}ms`)), this.embedTimeoutMs);
+          timer = setTimeout(
+            () =>
+              reject(
+                new Error(
+                  `embed() timed out after ${this.embedTimeoutMs}ms` +
+                  ` (compute clock; spent ${startedAt - item.enqueuedAt}ms queued first)`,
+                ),
+              ),
+            this.embedTimeoutMs,
+          );
         }),
       ]);
       this.consecutiveTimeouts = 0;
+      this.breakerOpenedAt = null;
+      if (probing) log.warn("[embeddings] half-open probe succeeded — circuit breaker closed");
       const vec = Array.from(result.vector);
       if (this.cache.size >= this.maxCacheSize) {
         this.cache.delete(this.cache.keys().next().value!);
       }
-      this.cache.set(text, vec);
-      this.l2Put(hash, vec);
-      return vec;
+      this.cache.set(item.text, vec);
+      this.l2Put(item.hash, vec);
+      item.resolve(vec);
     } catch (err) {
       if (err instanceof Error && err.message.includes("timed out")) {
         this.consecutiveTimeouts++;
+        if (this.consecutiveTimeouts >= this.maxConsecutiveTimeouts) {
+          // Crossing the threshold (or a failed half-open probe) opens the
+          // breaker from NOW — a fresh full cooldown, not the stale window.
+          this.breakerOpenedAt = Date.now();
+        }
         // Preserve the stack trace so post-mortem grep against the daemon
         // log shows which call path tripped the breaker — the prior
         // single-line message discarded `err.stack` entirely and made
         // "circuit breaker open" reports impossible to root-cause.
         log.error(
           `[embeddings] timeout #${this.consecutiveTimeouts}/${this.maxConsecutiveTimeouts}` +
-          (this.consecutiveTimeouts >= this.maxConsecutiveTimeouts ? " — CIRCUIT BREAKER OPEN" : "") +
+          (probing ? " — HALF-OPEN PROBE FAILED, breaker re-opened" :
+            this.consecutiveTimeouts >= this.maxConsecutiveTimeouts ? " — CIRCUIT BREAKER OPEN" : "") +
           ` err=${err.stack ?? err.message}`,
         );
       }
-      throw err;
+      item.reject(err instanceof Error ? err : new Error(String(err)));
     } finally {
       // Clear the timer on every exit path (success, embedder error, or
       // timeout itself). The prior code only cleared on success — a fast
@@ -201,6 +281,8 @@ export class EmbeddingService {
 
   async embedBatch(texts: string[]): Promise<number[][]> {
     if (texts.length === 0) return [];
+    // Safe to fan out: embed() enqueues into the serial FIFO above, so each
+    // item's timeout clock starts when ITS computation starts.
     return Promise.all(texts.map(text => this.embed(text)));
   }
 
@@ -210,6 +292,11 @@ export class EmbeddingService {
 
   async dispose(): Promise<void> {
     try {
+      // Reject anything still waiting in the FIFO — a disposed context can
+      // never serve them, and silent forever-pending promises leak callers.
+      for (const item of this.embedQueue.splice(0)) {
+        item.reject(new Error("Embeddings disposed"));
+      }
       await this.ctx?.dispose();
       await this.model?.dispose();
       this.ready = false;

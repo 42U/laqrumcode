@@ -61,7 +61,41 @@ function assertValidEdge(edge) {
     if (!VALID_EDGES.has(edge))
         throw new Error(`Invalid edge name: ${edge}`);
 }
-function patchOrderByFields(sql) {
+/** Split a SELECT/ORDER clause on top-level commas only — commas nested in
+ *  (), [], {} (function args, array literals, subqueries) do not split.
+ *  Quote-awareness is deliberately omitted: every caller is an internal query
+ *  and none put string literals with unbalanced brackets in these clauses. */
+function splitTopLevel(clause) {
+    const parts = [];
+    let depth = 0;
+    let cur = "";
+    for (const ch of clause) {
+        if (ch === "(" || ch === "[" || ch === "{")
+            depth++;
+        else if (ch === ")" || ch === "]" || ch === "}")
+            depth = Math.max(0, depth - 1);
+        if (ch === "," && depth === 0) {
+            parts.push(cur);
+            cur = "";
+            continue;
+        }
+        cur += ch;
+    }
+    parts.push(cur);
+    return parts.map((p) => p.trim()).filter(Boolean);
+}
+/** SurrealDB 3.x requires every ORDER BY field to appear in the selection.
+ *  Auto-append missing ones rather than chasing each call site.
+ *
+ *  W2/T5 hardening (the original was alias-blind and paren-blind):
+ *  - `SELECT count() AS c … ORDER BY c` previously appended a phantom raw `c`
+ *    (it recorded the pre-AS *expression*, not the alias ORDER BY sees).
+ *  - Naive split(",") sheared `math::max([a, b])`-style args into garbage
+ *    fields. Both now handled; non-identifier ORDER terms (e.g. rand()) are
+ *    left alone instead of being appended as fake columns.
+ *
+ *  Exported for unit tests (test/patch-order-by.test.ts). */
+export function patchOrderByFields(sql) {
     const s = sql.trim();
     if (!/^\s*SELECT\b/i.test(s) || !/\bORDER\s+BY\b/i.test(s))
         return sql;
@@ -74,17 +108,29 @@ function patchOrderByFields(sql) {
     const orderMatch = s.match(/\bORDER\s+BY\s+([\s\S]+?)(?=\s+LIMIT\b|\s+GROUP\b|\s+HAVING\b|$)/i);
     if (!orderMatch)
         return sql;
-    const orderFields = orderMatch[1]
-        .split(",")
-        .map((f) => f.trim().replace(/\s+(ASC|DESC)\s*$/i, "").trim())
+    const orderFields = splitTopLevel(orderMatch[1])
+        .map((f) => f.replace(/\s+(?:COLLATE|NUMERIC|ASC|DESC)(?=\s|$)/gi, "").trim())
         .filter(Boolean);
-    const selectedFields = selectClause
-        .split(",")
-        .map((f) => f.trim().split(/\s+AS\s+/i)[0].trim())
-        .map((f) => f.split(".").pop())
-        .filter(Boolean)
-        .map((f) => f.toLowerCase());
-    const missing = orderFields.filter((f) => !selectedFields.includes(f.split(".").pop().toLowerCase()));
+    // What ORDER BY can legally reference: output aliases first, then plain
+    // selected field names (last dotted segment, matching prior behavior).
+    const selectedFields = new Set();
+    for (const part of splitTopLevel(selectClause)) {
+        const aliasMatch = part.match(/\s+AS\s+([a-z_][a-z0-9_]*)\s*$/i);
+        if (aliasMatch)
+            selectedFields.add(aliasMatch[1].toLowerCase());
+        const expr = (aliasMatch ? part.slice(0, aliasMatch.index) : part).trim();
+        const last = expr.split(".").pop().trim().toLowerCase();
+        if (/^[a-z_][a-z0-9_]*$/i.test(last))
+            selectedFields.add(last);
+    }
+    const missing = [
+        ...new Set(orderFields.filter((f) => 
+        // Only plain field paths can be appended to the selection; function
+        // calls / expressions in ORDER BY are valid as-is and must not become
+        // fake columns.
+        /^[a-z_][a-z0-9_.]*$/i.test(f) &&
+            !selectedFields.has(f.split(".").pop().toLowerCase()))),
+    ];
     if (missing.length === 0)
         return sql;
     return sql.replace(/(\bSELECT\s+)([\s\S]+?)(\s+FROM\b)/i, (_, pre, fields, post) => `${pre}${fields}, ${missing.join(", ")}${post}`);
@@ -461,6 +507,14 @@ export class SurrealStore {
     async relate(fromId, edge, toId) {
         assertRecordId(fromId);
         assertRecordId(toId);
+        // Self-loop guard (T5, 2026-06-10): writers do occasionally resolve both
+        // endpoints to the same record (observed live — 7 fresh related_to
+        // self-loops within an hour of the dedup migration deleting 97k of them).
+        // A self-pair is still UNIQUE-(in,out)-legal, so the W2-05 indexes don't
+        // block it; refuse at the choke point instead. No edge type in this graph
+        // has self-loop semantics.
+        if (fromId === toId)
+            return false;
         const safeName = edge.replace(/[^a-zA-Z0-9_]/g, "");
         assertValidEdge(safeName);
         try {
@@ -846,10 +900,15 @@ export class SurrealStore {
         if (!content?.trim())
             return { id: "", existed: false };
         content = content.trim();
-        // Two-stage dedup. Stage 1 (fast, sub-linear): KNN pre-filter on the
-        // `concept_vec_idx` HNSW index (schema.surql:62) — top-10 nearest
-        // candidates by embedding cosine, plus exact-similarity match for
-        // ">0.92 means same concept, even if labels differ slightly".
+        // Two-stage dedup. Stage 1: top-10 candidates by embedding cosine.
+        // T5 comment-rot fix (2026-06-10): this is a LINEAR scan — a bare
+        // similarity-function call + ORDER BY never touches the
+        // `concept_vec_idx` HNSW index (schema.surql:78); SurrealDB only uses
+        // HNSW via the KNN operator (`embedding <|10|> $vec`). Kept linear
+        // deliberately: dedup is a correctness path and approximate-KNN misses
+        // would mint duplicate concepts; ~8k rows × cosine is a few ms.
+        // Plus exact-similarity match for ">0.92 means same concept, even if
+        // labels differ slightly".
         // Stage 2 (precise, in-process): scan those 10 candidates for an exact
         // lowercase-equal content match. This replaces the prior
         // `WHERE string::lowercase(content) = string::lowercase($content)`

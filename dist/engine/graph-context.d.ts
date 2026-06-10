@@ -90,8 +90,4 @@ export declare function getTransformErrorRate(): {
  *  when CPU mode is configured, so the default self-adjusts. Exported for
  *  tests. Resolved per call (not at import) so it sees the post-pin env. */
 export declare function resolveTransformTimeoutMs(env?: NodeJS.ProcessEnv): number;
-/**
- * Main entry point for graph-based context assembly. Retrieves, scores, deduplicates,
- * and budget-trims graph nodes, then splices them into the conversation message array.
- */
 export declare function graphTransformContext(params: GraphTransformParams): Promise<GraphTransformResult>;

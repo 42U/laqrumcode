@@ -41,7 +41,7 @@ export async function linkToRelevantConcepts(sourceId, edgeName, text, store, em
             // a grep for these names against the source tree finds no literal hits
             // here — the contract is via the caller's edgeName value.
             await store.relate(sourceId, edgeName, String(m.id))
-                .catch(e => swallow(`${logTag}:relate`, e));
+                .catch(e => swallow.warn(`${logTag}:relate`, e)); // T5: a failed relate = silently lost edge
         }
     }
     catch (e) {
@@ -54,8 +54,11 @@ export async function linkToRelevantConcepts(sourceId, edgeName, text, store, em
  * parent-child hierarchy, e.g. "React" → "React hooks"), plus related_to
  * edges for peer-level semantic associations.
  *
- * Concept selection is KNN-based on the new concept's embedding (top-50 by
- * cosine similarity against the `concept_vec_idx` HNSW index in schema.surql).
+ * Concept selection is nearest-neighbour on the new concept's embedding
+ * (top-50 by cosine similarity — a LINEAR scan; a bare similarity-function
+ * call + ORDER BY never uses the `concept_vec_idx` HNSW index, which
+ * SurrealDB only consults via the `<|n|>` KNN operator. T5 comment-rot fix
+ * 2026-06-10; acceptable at ~8k concepts).
  * Pre-0.7.x this used `LIMIT 50` with no ORDER BY, which returned the first
  * 50 concepts in insertion order — so as the graph grew, hierarchy auto-seal
  * only ever saw the oldest 50 nodes and never wired edges into recent topical
@@ -80,11 +83,13 @@ export async function linkConceptHierarchy(conceptId, conceptName, store, embedd
                 swallow(`${logTag}:embed`, e);
             }
         }
-        // KNN-based candidate fetch: top-50 nearest concepts by cosine similarity
-        // to the new concept's embedding. Backed by `concept_vec_idx` HNSW index
-        // (schema.surql:62, DIMENSION 1024 DIST COSINE). When embeddings are
-        // unavailable, fall back to a raw LIMIT scan so the substring-hierarchy
-        // path still runs on rows that happen to share lexical structure.
+        // Candidate fetch: top-50 nearest concepts by cosine similarity to the
+        // new concept's embedding (linear scan — see the function doc above; the
+        // HNSW index is NOT involved). When embeddings are unavailable, fall back
+        // to a raw LIMIT scan so the substring-hierarchy path still runs on rows
+        // that happen to share lexical structure.
+        // COSINE_GUARD_OK: read-only candidate ranking for hierarchy edge
+        // creation — no destructive op on matched rows.
         const existing = conceptEmb?.length
             ? await store.queryFirst(`SELECT id, content,
                   vector::similarity::cosine(embedding, $vec) AS score
@@ -124,6 +129,8 @@ export async function linkConceptHierarchy(conceptId, conceptName, store, embedd
         // Reuses the embedding fetched above so we don't pay for it twice.
         if (embeddings.isAvailable() && conceptEmb?.length) {
             try {
+                // COSINE_GUARD_OK: read-only peer ranking for related_to edge
+                // creation — no destructive op on matched rows.
                 const similar = await store.queryFirst(`SELECT id, vector::similarity::cosine(embedding, $vec) AS score
            FROM concept
            WHERE id != type::record($cid)
@@ -142,11 +149,11 @@ export async function linkConceptHierarchy(conceptId, conceptName, store, embedd
                 }
             }
             catch (e) {
-                swallow(`${logTag}:related_to_search`, e);
+                swallow.warn(`${logTag}:related_to_search`, e); // T5: failed search = no peer links this pass
             }
         }
     }
     catch (e) {
-        swallow(`${logTag}:hierarchy`, e);
+        swallow.warn(`${logTag}:hierarchy`, e); // T5: whole hierarchy pass failed — DB error, not degradation
     }
 }

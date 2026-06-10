@@ -43,14 +43,16 @@ export async function handleSessionStart(
       const projectName = cwd.split("/").pop() ?? "unknown";
       session.projectId = await store.ensureProject(projectName);
 
+      // T5: pillar wiring failures were silent for their entire life (the
+      // linkToProject no-op shipped invisibly for months) — warn from now on.
       await store.linkAgentToProject(session.agentId, session.projectId)
-        .catch(e => swallow("sessionStart:linkAgentToProject", e));
+        .catch(e => swallow.warn("sessionStart:linkAgentToProject", e));
 
       session.taskId = await store.createTask(`Session in ${projectName}`, session.projectId);
       await store.linkAgentToTask(session.agentId, session.taskId)
-        .catch(e => swallow("sessionStart:linkAgentToTask", e));
+        .catch(e => swallow.warn("sessionStart:linkAgentToTask", e));
       await store.linkTaskToProject(session.taskId, session.projectId)
-        .catch(e => swallow("sessionStart:linkTaskToProject", e));
+        .catch(e => swallow.warn("sessionStart:linkTaskToProject", e));
 
       session.surrealSessionId = await store.createSession(session.agentId, session.sessionId, session.projectId);
       // Loud-fail if createSession resolved to an empty string. SurrealDB
@@ -65,17 +67,19 @@ export async function handleSessionStart(
         log.error(`[session-start] store.createSession returned empty surrealSessionId for session=${sessionId}; downstream commits will fail`);
       }
       await store.markSessionActive(session.surrealSessionId)
-        .catch(e => swallow("sessionStart:markActive", e));
+        .catch(e => swallow.warn("sessionStart:markActive", e));
       await store.linkSessionToTask(session.surrealSessionId, session.taskId)
-        .catch(e => swallow("sessionStart:linkSessionToTask", e));
+        .catch(e => swallow.warn("sessionStart:linkSessionToTask", e));
 
-      // Seed identity and cognitive bootstrap (idempotent)
-      await seedIdentity(store, embeddings).catch(e => swallow("sessionStart:identity", e));
-      await seedCognitiveBootstrap(store, embeddings).catch(e => swallow("sessionStart:cognitive", e));
-      await seedHookProfileDirective(store, listGates()).catch(e => swallow("sessionStart:hookProfile", e));
+      // Seed identity and cognitive bootstrap (idempotent). T5: failed
+      // seeding was the 0/15 fresh-install bug class — warn, never silent.
+      await seedIdentity(store, embeddings).catch(e => swallow.warn("sessionStart:identity", e));
+      await seedCognitiveBootstrap(store, embeddings).catch(e => swallow.warn("sessionStart:cognitive", e));
+      await seedHookProfileDirective(store, listGates()).catch(e => swallow.warn("sessionStart:hookProfile", e));
 
-      // Run deferred cleanup for orphaned sessions
-      await runDeferredCleanup(store).catch(e => swallow("sessionStart:deferredCleanup", e));
+      // Run deferred cleanup for orphaned sessions (warn per the severity
+      // contract: cleanup failure is "unexpected but recoverable")
+      await runDeferredCleanup(store).catch(e => swallow.warn("sessionStart:deferredCleanup", e));
 
       // Check for unacknowledged graduation events from previous sessions
       try {

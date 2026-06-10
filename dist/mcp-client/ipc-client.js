@@ -16,6 +16,22 @@
  */
 import { createConnection } from "node:net";
 import { PROTOCOL_VERSION, } from "../shared/ipc-types.js";
+/** T5 (2026-06-10): operator knob for the per-request IPC timeout.
+ *  On CPU-only / heavily-loaded machines, long embed batches (e.g.
+ *  create_knowledge_gems with many gems) can legitimately exceed the 30s
+ *  default; the client-side timeout then fires while the daemon write is
+ *  still in flight, and the retry double-writes (the 0.7.115 gems
+ *  double-write incident). Clamped to [1s, 10min]; invalid values are
+ *  ignored. Explicit per-call / per-client timeouts always win. */
+function envIpcTimeoutMs() {
+    const raw = process.env.KONGCODE_IPC_TIMEOUT_MS;
+    if (!raw)
+        return undefined;
+    const n = Number(raw);
+    if (!Number.isFinite(n) || n <= 0)
+        return undefined;
+    return Math.min(Math.max(Math.round(n), 1_000), 600_000);
+}
 /** Enriched Error subclass — carries the JSON-RPC error code so callers can
  *  branch on DAEMON_BOOTSTRAPPING vs DAEMON_RESTARTING vs HANDLER_ERROR. */
 export class IpcError extends Error {
@@ -40,7 +56,7 @@ export class IpcClient {
     log;
     constructor(opts) {
         this.opts = opts;
-        this.defaultTimeoutMs = opts.defaultTimeoutMs ?? 30_000;
+        this.defaultTimeoutMs = opts.defaultTimeoutMs ?? envIpcTimeoutMs() ?? 30_000;
         this.log = opts.log ?? {
             info: () => { }, warn: () => { }, error: () => { },
         };

@@ -78,7 +78,9 @@ export async function handleUserPromptSubmit(state, payload) {
             log.info(`[user-prompt-submit] backfilled session row for ${sessionId} → ${session.surrealSessionId}`);
         }
         catch (e) {
-            swallow("userPromptSubmit:ensureSessionRow", e);
+            // T5: a failed session row orphans every turn written under this
+            // session (the W2 dead-feature class) — warn, never silent.
+            swallow.warn("userPromptSubmit:ensureSessionRow", e);
         }
     }
     // Increment session turn_count at turn START (0.7.12+). Previously this
