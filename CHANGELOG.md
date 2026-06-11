@@ -4,6 +4,37 @@ All notable changes to KongCode are documented here. The 0.7.x series introduced
 
 ## [Unreleased]
 
+## [0.7.119] — 2026-06-11
+
+Drain ergonomics + session-end exit polish. QA-reviewed pre-tag (verdict
+CLEAN; the one coverage flag answered with 5 new tests).
+
+### Fixed
+- **fetch_pending_work skip-ahead** (src/tools/pending-work.ts): payload
+  builders that SELF-COMPLETE their item (causal_graduate with no
+  ungraduated chains, soul_evolve with no new experience, soul_generate not
+  ready) used to hand the drain agent an `{empty:true}` payload — one full
+  agent round-trip per empty item, with the agent narrating "the work was
+  empty" each time (read like a pipeline failure; it never was). The fetch
+  loop now consumes self-completed items daemon-side (bounded at 10/call)
+  and only surfaces REAL work or the final done-message.
+- **Blank-transcript guard at fetch time**: coalesced_extraction items whose
+  turns are gone/empty by fetch time (archival races, legacy rows) now
+  self-complete instead of asking an LLM to extract from nothing — the
+  enqueue-side `userTurnCount >= 2` gates remain, this closes the bypasses
+  that produced the 2026-06-10 apology-junk class.
+- **session-end proxy budget 8s → 3s** (hooks/scripts/hook-proxy.cjs): the
+  hook is a fire-and-forget enqueue racing app exit; the long wait only
+  widened Claude Code's "Hook cancelled" window. A missed enqueue is
+  re-queued identically by deferred cleanup at the next session-start
+  (verified: the daemon-side handler is not cancelled by the client-side
+  timeout, and all recent sessions show cleanup_completed=true).
+
+### Notes
+- "SessionEnd hook … failed: Hook cancelled" is a harness-side cancellation
+  message (typically at app exit), not a kongcode error; with the 3s budget
+  it should become rare, and it was always self-healing.
+
 ## [0.7.118] — 2026-06-10
 
 The hardening queue from the 2026-06-10 incident chain (zombie WS connection,

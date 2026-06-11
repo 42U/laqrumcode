@@ -49,6 +49,11 @@ const EVENT_TIMEOUTS_MS = {
   "pre-compact": 55_000,
   "session-start": 25_000,
   "post-compact": 25_000,
+  // 0.7.119: session-end is a fire-and-forget enqueue racing app exit — a
+  // long wait there just widens the harness's "Hook cancelled" window. If
+  // the daemon can't take the enqueue in 3s, deferred cleanup queues the
+  // identical work at the next session-start.
+  "session-end": 3_000,
 };
 const TIMEOUT_MS = EVENT_TIMEOUTS_MS[HOOK_EVENT] ?? 8_000;
 const CACHE_DIR = path.join(HOME, ".kongcode", "cache");

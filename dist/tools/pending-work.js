@@ -164,34 +164,51 @@ export async function handleFetchPendingWork(state, _session, _args) {
         catch (e) {
             swallow.warn("pending-work:stale-recovery", e);
         }
-        // Claim the highest-priority pending item. SELECT-then-conditional-UPDATE:
-        // the WHERE status="pending" on the UPDATE acts as an optimistic lock so
-        // concurrent claimers don't double-process the same item.
-        const candidates = await store.queryFirst(`SELECT id FROM pending_work
-         WHERE status = "pending"
-           AND (active = true OR active IS NONE)
-         ORDER BY priority ASC, created_at ASC LIMIT 3`);
-        if (candidates.length === 0) {
-            return text(JSON.stringify({ empty: true, message: "No pending work items. You are done." }));
-        }
-        let item = null;
-        for (const candidate of candidates) {
-            const claimedId = String(candidate.id);
-            assertRecordId(claimedId);
-            // Direct interpolation safe: assertRecordId validates format above.
-            // WHERE status="pending" ensures only the first claimer wins the race.
-            const items = await store.queryFirst(`UPDATE ${claimedId} SET status = "processing" WHERE status = "pending" RETURN AFTER`);
-            if (items.length > 0) {
-                item = items[0];
-                break;
+        // 0.7.119 skip-ahead loop: several payload builders SELF-COMPLETE their
+        // item when nothing is eligible (causal_graduate with no ungraduated
+        // chains, soul_evolve with no new experience, blank-transcript
+        // extraction) and return `empty:true`. Handing that to the drain agent
+        // burned a full agent round-trip per empty item, and the agent narrating
+        // "the work was empty" per item read like a pipeline failure (founder
+        // report 2026-06-11). Loop past self-completed items daemon-side; only a
+        // REAL payload or the final done-message reaches the agent. Bounded so a
+        // pathological queue of empties can't spin forever.
+        const MAX_SELF_COMPLETED_SKIPS = 10;
+        for (let pass = 0;; pass++) {
+            // Claim the highest-priority pending item. SELECT-then-conditional-
+            // UPDATE: the WHERE status="pending" on the UPDATE acts as an
+            // optimistic lock so concurrent claimers don't double-process.
+            const candidates = await store.queryFirst(`SELECT id FROM pending_work
+           WHERE status = "pending"
+             AND (active = true OR active IS NONE)
+           ORDER BY priority ASC, created_at ASC LIMIT 3`);
+            if (candidates.length === 0) {
+                return text(JSON.stringify({ empty: true, message: "No pending work items. You are done." }));
             }
+            let item = null;
+            for (const candidate of candidates) {
+                const claimedId = String(candidate.id);
+                assertRecordId(claimedId);
+                // Direct interpolation safe: assertRecordId validates format above.
+                // WHERE status="pending" ensures only the first claimer wins the race.
+                const items = await store.queryFirst(`UPDATE ${claimedId} SET status = "processing" WHERE status = "pending" RETURN AFTER`);
+                if (items.length > 0) {
+                    item = items[0];
+                    break;
+                }
+            }
+            if (!item) {
+                return text(JSON.stringify({ empty: true, message: "No pending work items. You are done." }));
+            }
+            log.info(`[pending_work] Claimed ${item.work_type} (${item.id})`);
+            const result = await buildWorkPayload(item, state);
+            if (result.empty === true && pass < MAX_SELF_COMPLETED_SKIPS) {
+                // Builder already marked the item terminal — move on to real work.
+                log.info(`[pending_work] ${item.work_type} (${item.id}) self-completed empty — skipping ahead`);
+                continue;
+            }
+            return text(JSON.stringify(result));
         }
-        if (!item) {
-            return text(JSON.stringify({ empty: true, message: "No pending work items. You are done." }));
-        }
-        log.info(`[pending_work] Claimed ${item.work_type} (${item.id})`);
-        const result = await buildWorkPayload(item, state);
-        return text(JSON.stringify(result));
     }
     catch (e) {
         log.error("[pending_work] fetch error:", e);
@@ -244,6 +261,20 @@ async function buildWorkPayload(item, state) {
             const payload = (item.payload ?? {});
             const turns = await store.getSessionTurnsRich(item.session_id, 50);
             const transcript = buildTranscript(turns);
+            // 0.7.119: blank-transcript guard at FETCH time. Enqueue-side gates
+            // (userTurnCount >= 2) cover the normal path, but archival races,
+            // pruned turns, and legacy items can still yield nothing here — and
+            // asking an LLM to extract from a blank transcript is how the
+            // 2026-06-10 apology-junk rows were born. Self-complete instead.
+            if (turns.length === 0 || transcript.trim().length < 40) {
+                await markTerminal(state, item.id, item.session_id, item.work_type, "completed");
+                return {
+                    work_id: item.id,
+                    work_type: "coalesced_extraction",
+                    empty: true,
+                    message: "Transcript empty or too thin to extract. Already marked complete.",
+                };
+            }
             const prior = { conceptNames: [], artifactPaths: [], skillNames: [] };
             const instructions = buildCoalescedPrompt(false, false, prior, payload.include_handoff ?? true, payload.include_reflection ?? false);
             // Include Tier 0 directives so the LLM can judge rules compliance
