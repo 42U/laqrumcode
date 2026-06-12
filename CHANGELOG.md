@@ -4,6 +4,50 @@ All notable changes to KongCode are documented here. The 0.7.x series introduced
 
 ## [Unreleased]
 
+## [0.7.121] — 2026-06-12
+
+The write-amplification fix. Production forensics (2026-06-12) found the
+surrealkv store at 65.7GB — 63.8GB of it the append-only value log — wrapping
+~0.3GB of live data (~200×): every per-retrieval counter bump rewrote the
+full embedded row (4–12KB) into the vlog. QA-reviewed pre-tag; the review's
+confirmed bug (cached-row delta double-fold) and all recommendations fixed
+before tagging.
+
+### Added
+- **`access_stats` counter side-table**: retrieval bumps now write ~100-byte
+  rows (deterministic id per target) instead of rewriting embedded rows —
+  ~100× less vlog growth per bump. Rows get an amortized weekly sync
+  (WHERE-gated: a no-op sync writes NO row version; negative folds clamped)
+  so maintenance/GC predicates stay within a week of truth, and scoring sees
+  exact counts via `fetchAccessDeltas` merged before WMR ranking. Engine
+  quirk documented: `hits += 1` works inside UPSERT; `(hits ?? 0) + 1`
+  silently never increments on 3.0.1.
+- **Converted amplifier paths**: `bumpAccessCounts`, the `upsertConcept`
+  dedup-hit bump (every re-encountered concept), and the memory exact-dedup
+  bump (QA C1) — embedding/project/importance backfills are now WHERE-gated
+  separate statements that emit no row version unless something actually
+  changes.
+- **Store-amplification watch** in memory_health: set `KONGCODE_STORE_PATH`
+  to the surrealkv data dir and a >10× physical-vs-logical ratio raises a
+  warning naming the compaction runbook.
+- **`scripts/compact-store.mjs`**: size-receipts-first LOGICAL export (~the
+  0.3GB live data, never a physical copy) → fresh scratch SurrealDB v3.1.4 →
+  import → per-table count verification + ASC-index-sanity differential →
+  manual cutover runbook. Never touches the production container; reclaims
+  the existing ~65GB on cutover and rebuilds all indexes from clean state.
+
+### Fixed
+- **Prefetch cache returned live references** (QA E1): cache hits handed out
+  the cached row objects; in-place score-time mutations compounded
+  accessCount quadratically across hits within the TTL. Cache reads now
+  clone rows (regression test added).
+
+### Operational notes
+- Historical `access_count` values on rows stay as the frozen base; the side
+  table accumulates deltas on top — no data migration needed.
+- The existing 65GB of vlog ghosts can only be reclaimed by the
+  export→fresh-import cutover (engine vlog GC is unreachable from SQL).
+
 ## [0.7.120] — 2026-06-11
 
 Emergency fix for a silent SurrealDB 3.x engine bug that starved every

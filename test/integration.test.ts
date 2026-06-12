@@ -224,22 +224,27 @@ describe("SurrealDB integration", () => {
 
   // ── bumpAccessCounts ──
 
-  itDb("bumpAccessCounts increments access_count", async () => {
+  itDb("bumpAccessCounts increments via the access_stats side table (0.7.121)", async () => {
+    // The pre-0.7.121 contract (row counter increments on every bump) was the
+    // vlog write-amplifier: each bump rewrote the full embedded row. New
+    // contract: hits land in access_stats; the row syncs at most weekly;
+    // fetchAccessDeltas exposes the exact merged count for scoring.
     const id = await store.upsertTurn({
       session_id: "bump-test", role: "user", text: "Bump me", embedding: null,
     });
     if (!id) return;
 
-    // Initialize access_count (schema may not default it)
-    await store.queryExec(`UPDATE ${id} SET access_count = 0`);
+    await store.queryExec(`UPDATE ${id} SET access_count = 0, last_accessed = time::now()`);
 
     await store.bumpAccessCounts([id]);
-    const rows1 = await store.queryFirst<{ access_count: number }>(`SELECT access_count FROM ${id}`);
-    expect(rows1[0]?.access_count).toBe(1);
-
     await store.bumpAccessCounts([id]);
-    const rows2 = await store.queryFirst<{ access_count: number }>(`SELECT access_count FROM ${id}`);
-    expect(rows2[0]?.access_count).toBe(2);
+
+    // Row untouched (fresh last_accessed → weekly sync gate closed)…
+    const rows = await store.queryFirst<{ access_count: number }>(`SELECT access_count FROM ${id}`);
+    expect(rows[0]?.access_count).toBe(0);
+    // …side table carries the hits, and the scoring merge sees them exactly.
+    const deltas = await store.fetchAccessDeltas([id]);
+    expect(deltas.get(id)).toBe(2);
   });
 
   itDb("bumpAccessCounts handles empty array", async () => {

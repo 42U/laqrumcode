@@ -151,6 +151,40 @@ export async function handleMemoryHealth(
     countRow(state, "SELECT count() AS n FROM pending_work WHERE status = 'pending' AND (active = true OR active IS NONE) GROUP ALL"),
   ]);
 
+  // 0.7.121 store-amplification metric: physical store size vs a logical
+  // estimate (embedded vectors x 4KB x 1.3 overhead). The 2026-06-12
+  // forensics found a 65.7GB store wrapping ~0.3GB of live data (~200x) —
+  // invisible from SQL, so it must be watched from the filesystem. Only runs
+  // when KONGCODE_STORE_PATH points at the surrealkv data dir (external
+  // containers must opt in; the path isn't discoverable from a WS client).
+  try {
+    const storePath = process.env.KONGCODE_STORE_PATH;
+    if (storePath) {
+      const { statSync, readdirSync } = await import("node:fs");
+      const { join: joinPath } = await import("node:path");
+      const dirSize = (p: string): number => {
+        let total = 0;
+        for (const e of readdirSync(p, { withFileTypes: true })) {
+          const full = joinPath(p, e.name);
+          if (e.isDirectory()) total += dirSize(full);
+          else if (e.isFile()) total += statSync(full).size;
+        }
+        return total;
+      };
+      const physical = dirSize(storePath);
+      const embedded = [concept_embedded, memory_embedded, turn_embedded, artifact_embedded]
+        .reduce((a: number, v) => a + (v ?? 0), 0);
+      const logical = Math.max(embedded * 4096 * 1.3, 50_000_000); // floor 50MB
+      const amplification = physical / logical;
+      if (amplification > 10) {
+        diagnostics.push({
+          severity: "warn", area: "store_amplification",
+          message: `store at ${storePath} is ${(physical / 1e9).toFixed(1)}GB vs ~${(logical / 1e9).toFixed(1)}GB logical (${amplification.toFixed(0)}x) — the value log is mostly dead row versions. Run scripts/compact-store.mjs (export → fresh import) to reclaim.`,
+        });
+      }
+    }
+  } catch (e) { swallow("memoryHealth:storeAmplification", e); }
+
   // 0.7.120 index-sanity differential: SurrealDB 3.x's ASC scan over
   // turn_timestamp_idx silently returned ZERO rows DB-wide while NOINDEX
   // returned data (2026-06-11 incident — starved every transcript read).

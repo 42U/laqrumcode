@@ -505,6 +505,12 @@ export class SurrealStore {
   /**
    * Execute N SQL statements in a single SurrealDB round-trip.
    * Returns one result array per statement; bindings are shared across all statements.
+   *
+   * CONTRACT (QA-0.7.121 A2): result-index alignment assumes ONE statement
+   * per array element. An element containing embedded ';' statements (e.g.
+   * bumpAccessCounts' LET+UPDATE pairs) makes the server return MORE results
+   * than elements — fine only when the caller discards the return value.
+   * Do not read positional results after passing multi-statement elements.
    */
   async queryBatch<T = any>(statements: string[], bindings?: Record<string, unknown>): Promise<T[][]> {
     if (statements.length === 0) return [];
@@ -1207,6 +1213,22 @@ export class SurrealStore {
     return allNeighbors;
   }
 
+  /** 0.7.121 — counter side-table. The old per-retrieval
+   *  `UPDATE <row> SET access_count += 1` rewrote the ENTIRE row (embedding
+   *  included, 4–12KB) into surrealkv's append-only value log on every bump:
+   *  measured production damage was a 63.8GB vlog wrapping ~0.3GB of live
+   *  data (~200× write amplification; 2026-06-12 forensics). Bumps now land
+   *  in tiny `access_stats` rows (deterministic id = target id with ':'→'_';
+   *  ~100B/version). Two safety valves keep legacy readers correct:
+   *  - AMORTIZED ROW SYNC: at most once per 7 days per row, the real row's
+   *    access_count/last_accessed are refreshed from the side table — the
+   *    WHERE gate means a no-op sync writes NO row version. Keeps
+   *    maintenance/GC predicates that read row.last_accessed within a week
+   *    of truth instead of frozen forever.
+   *  - SCORING MERGE: fetchAccessDeltas() lets the hot path see exact
+   *    counts (graph-context merges before WMR scoring).
+   *  Field is named `hits` (not `count`) — `count` collides with the
+   *  SurrealQL function in SET expressions. */
   async bumpAccessCounts(ids: string[]): Promise<void> {
     const validated = ids.filter(id => { try { assertRecordId(id); return true; } catch { return false; } });
     if (validated.length === 0) return;
@@ -1214,13 +1236,56 @@ export class SurrealStore {
       // Direct interpolation (safe: assertRecordId validates format above).
       // Cannot use `UPDATE $ids` binding — SurrealDB treats string arrays as
       // literal strings, not record references, causing silent no-ops.
-      const stmts = validated.map(id =>
-        `UPDATE ${id} SET access_count += 1, last_accessed = time::now()`,
-      );
+      const stmts = validated.flatMap(id => {
+        const key = id.replace(":", "_");
+        return [
+          // `hits += 1`, NOT `hits = (hits ?? 0) + 1`: inside UPSERT's SET the
+          // ??-form evaluates against a blank doc on THIS engine (3.0.1) and
+          // the counter never increments (live-probed 2026-06-12); += works.
+          `UPSERT access_stats:⟨${key}⟩ SET hits += 1, last_accessed = time::now(), target = ${id}`,
+          // Amortized sync — fires at most weekly per row (the WHERE gate on a
+          // non-matching row writes NOTHING to the vlog). `synced_hits` on the
+          // row is the watermark of side-table hits already folded into
+          // access_count, so the fold never double-counts.
+          `LET $h = (SELECT VALUE hits FROM ONLY access_stats:⟨${key}⟩) ?? 0;
+           UPDATE ${id} SET access_count = (access_count ?? 0) + math::max([$h - (synced_hits ?? 0), 0]), synced_hits = $h, last_accessed = time::now() WHERE last_accessed IS NONE OR last_accessed < time::now() - 7d`,
+        ];
+      });
       await this.queryBatch(stmts);
     } catch (e) {
       swallow.warn("surreal:bumpAccessCounts", e);
     }
+  }
+
+  /** 0.7.121 — exact access counts for scoring: row's (possibly week-stale)
+   *  access_count + un-synced side-table delta. Direct record fetches, O(1)
+   *  per id. Returns Map<targetId, {hits, syncedHits}> for ids that have any
+   *  side-table row. */
+  async fetchAccessDeltas(ids: string[]): Promise<Map<string, number>> {
+    const out = new Map<string, number>();
+    const validated = ids.filter(id => { try { assertRecordId(id); return true; } catch { return false; } });
+    if (validated.length === 0) return out;
+    try {
+      // Two direct-record point fetches (no table scans, no embedding bytes):
+      // side-table totals, then the rows' synced watermarks.
+      const statTargets = validated.map(id => `access_stats:⟨${id.replace(":", "_")}⟩`).join(", ");
+      const stats = await this.queryFirst<{ target: string; hits: number }>(
+        `SELECT <string>target AS target, hits FROM ${statTargets}`,
+      );
+      if (stats.length === 0) return out;
+      const hitIds = stats.map(s => String(s.target));
+      const watermarks = await this.queryFirst<{ id: string; synced_hits?: number }>(
+        `SELECT <string>id AS id, synced_hits FROM ${hitIds.join(", ")}`,
+      );
+      const synced = new Map(watermarks.map(w => [String(w.id), w.synced_hits ?? 0]));
+      for (const s of stats) {
+        const delta = (s.hits ?? 0) - (synced.get(String(s.target)) ?? 0);
+        if (delta > 0) out.set(String(s.target), delta);
+      }
+    } catch (e) {
+      swallow("surreal:fetchAccessDeltas", e);
+    }
+    return out;
   }
 
   // ── Concept / Memory / Artifact CRUD ───────────────────────────────────
@@ -1299,19 +1364,24 @@ export class SurrealStore {
     if (existingId) {
       const id = existingId;
       assertRecordId(id);
+      // 0.7.121: counter goes to the access_stats side table (see
+      // bumpAccessCounts) — the old unconditional UPDATE here rewrote the
+      // full embedded row on EVERY dedup-hit, i.e. every time turn ingestion
+      // re-encountered a known concept: a top write-amplifier behind the
+      // 63.8GB vlog. Backfills below are WHERE-gated: a non-matching WHERE
+      // writes NO row version, so the fat rewrite only happens when
+      // something is genuinely missing (rare).
+      await this.bumpAccessCounts([id]);
       if (embedding?.length) {
         await this.queryExec(
-          `UPDATE ${id} SET access_count += 1, last_accessed = time::now(), embedding = IF embedding IS NONE OR array::len(embedding) = 0 THEN $emb ELSE embedding END${projectId ? ", project_id = IF project_id IS NONE THEN $pid ELSE project_id END" : ""}`,
-          projectId ? { emb: embedding, pid: projectId } : { emb: embedding },
+          `UPDATE ${id} SET embedding = $emb WHERE embedding IS NONE OR array::len(embedding) = 0`,
+          { emb: embedding },
         );
-      } else if (projectId) {
+      }
+      if (projectId) {
         await this.queryExec(
-          `UPDATE ${id} SET access_count += 1, last_accessed = time::now(), project_id = IF project_id IS NONE THEN $pid ELSE project_id END`,
+          `UPDATE ${id} SET project_id = $pid WHERE project_id IS NONE`,
           { pid: projectId },
-        );
-      } else {
-        await this.queryExec(
-          `UPDATE ${id} SET access_count += 1, last_accessed = time::now()`,
         );
       }
       return { id, existed: true };
@@ -1483,10 +1553,13 @@ export class SurrealStore {
       if (exact.length > 0) {
         const existingId = String(exact[0]!.id);
         assertRecordId(existingId);
-        const newImp = Math.max(exact[0]!.importance ?? 0, importance);
+        // 0.7.121 (QA C1): same amplifier class as the concept dedup-hit —
+        // counter to the side table; importance write WHERE-gated so a
+        // no-raise rewrite emits no row version.
+        await this.bumpAccessCounts([existingId]);
         await this.queryExec(
-          `UPDATE ${existingId} SET access_count += 1, importance = $imp, last_accessed = time::now()`,
-          { imp: newImp },
+          `UPDATE ${existingId} SET importance = $imp WHERE importance IS NONE OR importance < $imp`,
+          { imp: importance },
         );
         return existingId;
       }

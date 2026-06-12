@@ -3,6 +3,14 @@
 -- Aligned with 5-pillar model: Agent, Project, Task, Artifact, Concept
 
 -- ============================================================
+-- Access counters (0.7.121) — tiny side-table rows so retrieval
+-- bumps stop rewriting full embedded rows into the append-only
+-- value log (~200x write amplification, 2026-06-12 forensics).
+-- id = target id with ':' -> '_' (access_stats:concept_abc).
+-- ============================================================
+DEFINE TABLE IF NOT EXISTS access_stats SCHEMALESS;
+
+-- ============================================================
 -- PILLAR 1: Agent
 -- ============================================================
 DEFINE TABLE IF NOT EXISTS agent SCHEMALESS;

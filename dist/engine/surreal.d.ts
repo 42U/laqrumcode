@@ -124,6 +124,12 @@ export declare class SurrealStore {
     /**
      * Execute N SQL statements in a single SurrealDB round-trip.
      * Returns one result array per statement; bindings are shared across all statements.
+     *
+     * CONTRACT (QA-0.7.121 A2): result-index alignment assumes ONE statement
+     * per array element. An element containing embedded ';' statements (e.g.
+     * bumpAccessCounts' LET+UPDATE pairs) makes the server return MORE results
+     * than elements — fine only when the caller discards the return value.
+     * Do not read positional results after passing multi-statement elements.
      */
     queryBatch<T = any>(statements: string[], bindings?: Record<string, unknown>): Promise<T[][]>;
     private safeQuery;
@@ -250,7 +256,28 @@ export declare class SurrealStore {
      */
     tagBoostedConcepts(queryText: string, queryVec: number[], limit?: number): Promise<VectorSearchResult[]>;
     graphExpand(nodeIds: string[], queryVec: number[], hops?: number): Promise<VectorSearchResult[]>;
+    /** 0.7.121 — counter side-table. The old per-retrieval
+     *  `UPDATE <row> SET access_count += 1` rewrote the ENTIRE row (embedding
+     *  included, 4–12KB) into surrealkv's append-only value log on every bump:
+     *  measured production damage was a 63.8GB vlog wrapping ~0.3GB of live
+     *  data (~200× write amplification; 2026-06-12 forensics). Bumps now land
+     *  in tiny `access_stats` rows (deterministic id = target id with ':'→'_';
+     *  ~100B/version). Two safety valves keep legacy readers correct:
+     *  - AMORTIZED ROW SYNC: at most once per 7 days per row, the real row's
+     *    access_count/last_accessed are refreshed from the side table — the
+     *    WHERE gate means a no-op sync writes NO row version. Keeps
+     *    maintenance/GC predicates that read row.last_accessed within a week
+     *    of truth instead of frozen forever.
+     *  - SCORING MERGE: fetchAccessDeltas() lets the hot path see exact
+     *    counts (graph-context merges before WMR scoring).
+     *  Field is named `hits` (not `count`) — `count` collides with the
+     *  SurrealQL function in SET expressions. */
     bumpAccessCounts(ids: string[]): Promise<void>;
+    /** 0.7.121 — exact access counts for scoring: row's (possibly week-stale)
+     *  access_count + un-synced side-table delta. Direct record fetches, O(1)
+     *  per id. Returns Map<targetId, {hits, syncedHits}> for ids that have any
+     *  side-table row. */
+    fetchAccessDeltas(ids: string[]): Promise<Map<string, number>>;
     /** W2-07 (2026-06-10): returns { id, existed } — `existed: true` when the
      *  content resolved to a pre-existing concept (exact or >0.92-cosine dedup,
      *  including race-recovery paths). commitConcept uses the flag to skip

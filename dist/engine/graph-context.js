@@ -406,6 +406,27 @@ export function formatRelativeTime(ts) {
 function accessBoost(accessCount) {
     return Math.log1p(accessCount ?? 0);
 }
+/** 0.7.121: fold un-synced access_stats deltas into candidates' accessCount
+ *  before WMR scoring. Rows carry week-stale counts since bumps moved to the
+ *  side table (SurrealStore.bumpAccessCounts — the vlog write-amplification
+ *  fix); this point-read merge restores exact freshness for scoring. */
+async function mergeAccessDeltas(store, rows) {
+    try {
+        if (rows.length === 0)
+            return;
+        const deltas = await store.fetchAccessDeltas(rows.map(r => String(r.id)));
+        if (deltas.size === 0)
+            return;
+        for (const r of rows) {
+            const d = deltas.get(String(r.id));
+            if (d)
+                r.accessCount = (r.accessCount ?? 0) + d;
+        }
+    }
+    catch (e) {
+        swallow("graph-context:accessDeltas", e);
+    }
+}
 /** Dot-product cosine similarity between two equal-length vectors. Returns 0 if either has zero magnitude. */
 export function cosineSimilarity(a, b) {
     let dot = 0, magA = 0, magB = 0;
@@ -1388,6 +1409,7 @@ stageTrace) {
             const suppressed = getSuppressedNodeIds(session);
             const filteredCached = cached.results.filter(r => !suppressed.has(r.id));
             mark("prefetch-rank");
+            await mergeAccessDeltas(store, filteredCached);
             const ranked = await scoreResults(filteredCached, new Set(), queryVec, store, currentIntent);
             const deduped = deduplicateResults(ranked);
             const reranked = await rerankResults(deduped, queryText);
@@ -1504,6 +1526,7 @@ stageTrace) {
             ? true
             : (r.score ?? 0) >= MIN_COSINE);
         mark("score-rerank");
+        await mergeAccessDeltas(store, allResults);
         const ranked = await scoreResults(allResults, neighborIds, queryVec, store, currentIntent);
         const deduped = deduplicateResults(ranked);
         const reranked = await rerankResults(deduped, queryText);

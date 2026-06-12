@@ -234,7 +234,16 @@ export function getCachedContext(
     // Re-insert to refresh LRU position (Map iterates in insertion order)
     warmCache.delete(bestKey);
     warmCache.set(bestKey, bestMatch);
-    return { results: bestMatch.results, skills: bestMatch.skills, reflections: bestMatch.reflections };
+    // 0.7.121 (QA E1): return CLONES, not the cached row objects. Downstream
+    // mutates rows in place (mergeAccessDeltas folds access deltas before
+    // scoring) — handing out references let every cache hit re-fold a growing
+    // delta into the SAME objects, compounding accessCount quadratically
+    // within the TTL and skewing WMR + ACAN features.
+    return {
+      results: bestMatch.results.map(r => ({ ...r })),
+      skills: bestMatch.skills,
+      reflections: bestMatch.reflections,
+    };
   }
   return null;
 }
