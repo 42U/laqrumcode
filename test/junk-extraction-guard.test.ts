@@ -17,6 +17,15 @@ describe("isJunkExtractionText", () => {
     expect(isJunkExtractionText("short")).toBe(true); // <8 chars
   });
 
+  it("rejects the index-bug junk phrasing families (0.7.120, live corpus: 48 rows)", () => {
+    expect(isJunkExtractionText("No transcript data available to reflect on for this work item.")).toBe(true);
+    expect(isJunkExtractionText("No transcript provided; nothing to reflect on.")).toBe(true);
+    expect(isJunkExtractionText("No session content was available to reflect on for this item.")).toBe(true);
+    expect(isJunkExtractionText("No session data available to reflect on for this stuck record.")).toBe(true);
+    expect(isJunkExtractionText("No data available to reflect on; item was stuck in processing state.")).toBe(true);
+    expect(isJunkExtractionText("No session transcript was attached to this deferred-cleanup work item.")).toBe(true);
+  });
+
   it("accepts legitimate knowledge — including gems ABOUT this bug", () => {
     expect(isJunkExtractionText("SurrealDB DEFINE INDEX IF NOT EXISTS no-ops on existing ready indexes")).toBe(false);
     // The junk phrases only count in the HEAD of the text; a real gem can

@@ -100,6 +100,18 @@ describe("patchOrderByFields", () => {
     expect(patchOrderByFields(sql)).toBe(sql);
   });
 
+  it("WITH NOINDEX queries pass through untouched (0.7.120 transcript-read fix)", () => {
+    const sql =
+      "SELECT id, role, text, timestamp FROM turn WITH NOINDEX WHERE session_id = $sid AND pruned_at IS NONE ORDER BY timestamp ASC LIMIT $lim";
+    expect(patchOrderByFields(sql)).toBe(sql);
+  });
+
+  it("appending a missing field does not disturb a WITH NOINDEX clause", () => {
+    expect(
+      patchOrderByFields("SELECT id FROM turn WITH NOINDEX WHERE pruned_at IS NONE ORDER BY timestamp ASC"),
+    ).toBe("SELECT id, timestamp FROM turn WITH NOINDEX WHERE pruned_at IS NONE ORDER BY timestamp ASC");
+  });
+
   it("inner LIMIT does not terminate the outer ORDER clause scan", () => {
     // The lookahead used to stop at the first LIMIT even inside parens.
     expect(

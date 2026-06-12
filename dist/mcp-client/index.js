@@ -29,7 +29,7 @@ import { IpcClient } from "./ipc-client.js";
 import { ensureDaemon } from "./daemon-spawn.js";
 import { MCP_TOOLS, MCP_TO_IPC_METHOD } from "../shared/tool-defs.js";
 import { log } from "../engine/log.js";
-const CLIENT_VERSION = "0.7.119";
+const CLIENT_VERSION = "0.7.120";
 let ipc = null;
 /** In-flight connect promise — concurrent callers share it so we never
  *  fire two daemon-spawn attempts in parallel (the lock-contention bug
@@ -211,6 +211,18 @@ async function getOrConnectIpc() {
     })().finally(() => { ipcInFlight = null; });
     return ipcInFlight;
 }
+/** 0.7.120: per-tool IPC timeouts for legitimately-long batch tools. They
+ *  embed N items SERIALLY through the daemon's embed FIFO — on the CPU tier
+ *  a large gem batch takes minutes, and the 30s default timed the CLIENT out
+ *  while the daemon kept writing (founder report: "big gem batches fail";
+ *  the writes are idempotency-sealed so retries don't duplicate, but the
+ *  call still failed user-visibly). Explicit KONGCODE_IPC_TIMEOUT_MS still
+ *  governs everything not listed here. */
+const TOOL_TIMEOUT_MS = {
+    create_knowledge_gems: 300_000,
+    commit_work_results: 300_000,
+    supersede: 120_000,
+};
 async function handleToolCall(toolName, args) {
     const ipcMethod = MCP_TO_IPC_METHOD[toolName];
     if (!ipcMethod) {
@@ -218,7 +230,7 @@ async function handleToolCall(toolName, args) {
     }
     try {
         const client = await getOrConnectIpc();
-        const result = await client.call(ipcMethod, { sessionId: SESSION_ID, args });
+        const result = await client.call(ipcMethod, { sessionId: SESSION_ID, args }, TOOL_TIMEOUT_MS[toolName]);
         return result;
     }
     catch (e) {
@@ -231,7 +243,7 @@ async function handleToolCall(toolName, args) {
             ipc = null;
             try {
                 const client = await getOrConnectIpc();
-                const result = await client.call(ipcMethod, { sessionId: SESSION_ID, args });
+                const result = await client.call(ipcMethod, { sessionId: SESSION_ID, args }, TOOL_TIMEOUT_MS[toolName]);
                 return result;
             }
             catch (retryErr) {

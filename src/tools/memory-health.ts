@@ -151,6 +151,27 @@ export async function handleMemoryHealth(
     countRow(state, "SELECT count() AS n FROM pending_work WHERE status = 'pending' AND (active = true OR active IS NONE) GROUP ALL"),
   ]);
 
+  // 0.7.120 index-sanity differential: SurrealDB 3.x's ASC scan over
+  // turn_timestamp_idx silently returned ZERO rows DB-wide while NOINDEX
+  // returned data (2026-06-11 incident — starved every transcript read).
+  // Compare one indexed-path read against its NOINDEX twin; a mismatch means
+  // an index is LYING, which no count-based check can see.
+  try {
+    const probe = async (withNoIndex: boolean) => {
+      const rows = await state.store.queryFirst<{ id: string }>(
+        `SELECT id, timestamp FROM turn ${withNoIndex ? "WITH NOINDEX " : ""}WHERE pruned_at IS NONE ORDER BY timestamp ASC LIMIT 1`,
+      );
+      return rows.length;
+    };
+    const [viaIndex, viaScan] = await Promise.all([probe(false), probe(true)]);
+    if (viaIndex !== viaScan) {
+      diagnostics.push({
+        severity: "error", area: "index_sanity",
+        message: `turn ORDER BY timestamp ASC returns ${viaIndex} row(s) via index but ${viaScan} via NOINDEX — an index is returning wrong results. Transcript reads use WITH NOINDEX as of 0.7.120, but other indexed queries may be affected; consider REBUILD INDEX / a SurrealDB upgrade.`,
+      });
+    }
+  } catch (e) { swallow.warn("memoryHealth:indexSanity", e); }
+
   // Surface failed counts loudly — a null is a broken probe, not an empty table.
   const failedCounts = (
     [

@@ -571,7 +571,8 @@ const BARE_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{
  *  which the original anchored regex missed). Match variants in the HEAD of
  *  the text only — legitimate gems can mention "empty transcript" mid-body
  *  (e.g. knowledge about this very bug). */
-const JUNK_HEAD_RE = /empty transcript|nothing to extract|contain(s|ed) an empty/i;
+const JUNK_HEAD_RE =
+  /empty transcript|nothing to extract|contain(s|ed) an empty|no transcript (data|provided|was)|no session (data|content|transcript)|no data available|nothing to reflect/i;
 
 export function isJunkExtractionText(s: unknown): boolean {
   if (typeof s !== "string") return false;

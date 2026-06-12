@@ -684,7 +684,15 @@ export class SurrealStore {
     limit = 50,
   ): Promise<{ role: string; text: string }[]> {
     return this.queryFirst<{ role: string; text: string }>(
-      `SELECT role, text, timestamp FROM turn WHERE session_id = $sid AND pruned_at IS NONE ORDER BY timestamp ASC LIMIT $lim`,
+      // WITH NOINDEX (0.7.120): SurrealDB 3.x's ASC scan over turn_timestamp_idx
+      // silently returns ZERO rows for `WHERE session_id = $x ... ORDER BY
+      // timestamp ASC` (DESC works, NOINDEX works, REBUILD INDEX does not fix
+      // it — engine query-path bug, observed 2026-06-11 across every session).
+      // This starved ALL transcript reads → "empty extraction" junk. NOINDEX
+      // means a full table scan (~300ms at 6.9k turns; the filter bounds the
+      // RESULT, not the scan) — cold-path callers only; revisit if the turn
+      // table grows past ~50k rows or the engine bug gets fixed upstream.
+      `SELECT role, text, timestamp FROM turn WITH NOINDEX WHERE session_id = $sid AND pruned_at IS NONE ORDER BY timestamp ASC LIMIT $lim`,
       { sid: sessionId, lim: limit },
     );
   }
@@ -703,7 +711,8 @@ export class SurrealStore {
     // tool_name/tool_result/file_paths columns to this SELECT but dropped
     // `id` from the projection silently.
     const rows = await this.queryFirst<{ id: string; role: string; text: string; tool_name?: string; tool_result?: string; file_paths?: string[] }>(
-      `SELECT id, role, text, tool_name, tool_result, file_paths, timestamp FROM turn WHERE session_id = $sid AND pruned_at IS NONE ORDER BY timestamp ASC LIMIT $lim`,
+      // WITH NOINDEX: see getSessionTurns above — the ASC-via-index path lies.
+      `SELECT id, role, text, tool_name, tool_result, file_paths, timestamp FROM turn WITH NOINDEX WHERE session_id = $sid AND pruned_at IS NONE ORDER BY timestamp ASC LIMIT $lim`,
       { sid: sessionId, lim: limit },
     );
     // safeId + post-filter: SurrealDB occasionally returns rows where `id`

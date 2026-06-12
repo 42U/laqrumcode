@@ -4,6 +4,45 @@ All notable changes to KongCode are documented here. The 0.7.x series introduced
 
 ## [Unreleased]
 
+## [0.7.120] — 2026-06-11
+
+Emergency fix for a silent SurrealDB 3.x engine bug that starved every
+transcript read, plus the gems-batch IPC timeout. QA-reviewed pre-tag
+(verdict CLEAN; fix live-verified — patched query's row sequence hash-equal
+to the trusted NOINDEX/DESC reference).
+
+### Fixed
+- **CRITICAL: transcript reads returned empty DB-wide.** SurrealDB 3.0.1's
+  ASC scan over `turn_timestamp_idx` silently returns ZERO rows for
+  `WHERE session_id = $sid … ORDER BY timestamp ASC` with bound params —
+  for every session — while NOINDEX/DESC return correct data and
+  `REBUILD INDEX` completes without fixing it (plan-shape-dependent engine
+  bug). Every extraction transcript read came back blank → the "memory
+  daemon extraction says it was empty" reports, 17 junk "No transcript
+  data" reflections, and one wrongly-self-completed 19-turn extraction.
+  Both transcript readers (`getSessionTurns`/`getSessionTurnsRich`) now use
+  `WITH NOINDEX` (~300ms full scan at 6.9k turns; cold paths only). The
+  affected extractions were re-queued; 62 junk rows (17 reflections, 10
+  concepts, 35 memories) archived under
+  `forget:index-bug-junk-2026-06-11`.
+- **Index-sanity probe in memory_health**: indexed vs NOINDEX LIMIT-1
+  differential on the turn ASC path — a lying index now raises an
+  error-severity diagnostic instead of masquerading as "no data".
+- **Big gem batches no longer time out**: per-tool IPC timeouts in the MCP
+  client (`create_knowledge_gems`/`commit_work_results` 300s, `supersede`
+  120s) — batch tools embed serially through the CPU-tier FIFO and
+  legitimately exceed the 30s default; the client gave up while the daemon
+  kept writing (writes were idempotency-sealed, but the call failed
+  user-visibly).
+- Junk-guard phrasing families widened with the live corpus ("No transcript
+  data/provided", "No session data/content/transcript", "No data
+  available", "nothing to reflect").
+
+### Operational notes
+- If memory_health ever reports `index_sanity`, the engine is lying about
+  an index again: REBUILD won't fix it; route the affected query through
+  WITH NOINDEX and consider a SurrealDB upgrade.
+
 ## [0.7.119] — 2026-06-11
 
 Drain ergonomics + session-end exit polish. QA-reviewed pre-tag (verdict
