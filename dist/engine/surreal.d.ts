@@ -272,12 +272,12 @@ export declare class SurrealStore {
      *    counts (graph-context merges before WMR scoring).
      *  Field is named `hits` (not `count`) — `count` collides with the
      *  SurrealQL function in SET expressions. */
-    bumpAccessCounts(ids: string[]): Promise<void>;
+    bumpAccessCounts(ids: Array<string | unknown>): Promise<void>;
     /** 0.7.121 — exact access counts for scoring: row's (possibly week-stale)
      *  access_count + un-synced side-table delta. Direct record fetches, O(1)
      *  per id. Returns Map<targetId, {hits, syncedHits}> for ids that have any
      *  side-table row. */
-    fetchAccessDeltas(ids: string[]): Promise<Map<string, number>>;
+    fetchAccessDeltas(ids: Array<string | unknown>): Promise<Map<string, number>>;
     /** W2-07 (2026-06-10): returns { id, existed } — `existed: true` when the
      *  content resolved to a pre-existing concept (exact or >0.92-cosine dedup,
      *  including race-recovery paths). commitConcept uses the flag to skip

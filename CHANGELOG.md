@@ -4,6 +4,33 @@ All notable changes to KongCode are documented here. The 0.7.x series introduced
 
 ## [Unreleased]
 
+## [0.7.122] — 2026-06-12
+
+Post-cutover hardening: two live bugs caught by the queued v3.1.4 re-checks,
+plus the full migration audit baked into compact-store. QA verdict CLEAN.
+
+### Fixed
+- **Bump batches silently failing on object ids**: callers hand raw result
+  rows whose id is a RecordId OBJECT; `.replace` threw and killed entire
+  access-counter batches (16 in the post-cutover log). `bumpAccessCounts` /
+  `fetchAccessDeltas` now coerce via `String()` at entry (+ regression test).
+- **v3.1.4 SCHEMAFULL strictness**: undeclared fields now HARD-ERROR where
+  3.0.1 silently persisted them — the counter sync against monologue threw
+  "no such field". The three counter fields are declared on monologue
+  (schema + applied live).
+
+### Added — compact-store v2 (the 2026-06-12 audit, automated)
+- **Dynamic all-table verification** via INFO FOR DB — the fixed 15-table
+  list missed a 620-row import loss; never again.
+- **Post-import id-diff repair**: SurrealDB /import drops the remainder of an
+  insert chunk after a UNIQUE violation; the repair pass diffs ids per table
+  and copies missing rows over the WS SDK with bindings (JSON-literal /sql
+  copies mangle record links/datetimes — live-hit, 11/12 failures, rewritten).
+  Validation run: 484 live-drift rows repaired, 0 failures, 106/106 tables.
+- **Namespace sweep**: every non-empty (ns,db) beyond the migrated one is
+  found and auto-exported (the old server silently hosted 58 namespaces,
+  including the kongclaw-era graph).
+
 ## [0.7.121] — 2026-06-12
 
 The write-amplification fix. Production forensics (2026-06-12) found the

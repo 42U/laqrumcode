@@ -1229,8 +1229,11 @@ export class SurrealStore {
    *    counts (graph-context merges before WMR scoring).
    *  Field is named `hits` (not `count`) — `count` collides with the
    *  SurrealQL function in SET expressions. */
-  async bumpAccessCounts(ids: string[]): Promise<void> {
-    const validated = ids.filter(id => { try { assertRecordId(id); return true; } catch { return false; } });
+  async bumpAccessCounts(ids: Array<string | unknown>): Promise<void> {
+    // 0.7.122: coerce FIRST — callers hand over raw result rows whose id can
+    // be a RecordId OBJECT, and `.replace` on it threw, failing the entire
+    // bump batch (16 silent batch failures post-cutover, daemon.log).
+    const validated = ids.map(id => String(id)).filter(id => { try { assertRecordId(id); return true; } catch { return false; } });
     if (validated.length === 0) return;
     try {
       // Direct interpolation (safe: assertRecordId validates format above).
@@ -1261,9 +1264,9 @@ export class SurrealStore {
    *  access_count + un-synced side-table delta. Direct record fetches, O(1)
    *  per id. Returns Map<targetId, {hits, syncedHits}> for ids that have any
    *  side-table row. */
-  async fetchAccessDeltas(ids: string[]): Promise<Map<string, number>> {
+  async fetchAccessDeltas(ids: Array<string | unknown>): Promise<Map<string, number>> {
     const out = new Map<string, number>();
-    const validated = ids.filter(id => { try { assertRecordId(id); return true; } catch { return false; } });
+    const validated = ids.map(id => String(id)).filter(id => { try { assertRecordId(id); return true; } catch { return false; } });
     if (validated.length === 0) return out;
     try {
       // Two direct-record point fetches (no table scans, no embedding bytes):

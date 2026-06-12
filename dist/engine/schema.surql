@@ -574,6 +574,14 @@ DEFINE FIELD IF NOT EXISTS content ON monologue TYPE string;
 DEFINE FIELD IF NOT EXISTS embedding ON monologue TYPE option<array<float>>;
 DEFINE FIELD IF NOT EXISTS timestamp ON monologue TYPE datetime DEFAULT time::now();
 DEFINE FIELD IF NOT EXISTS embedding_target_truncated ON monologue TYPE option<bool>;
+-- 0.7.122: SurrealDB 3.1.4 enforces SCHEMAFULL strictly — an access-counter
+-- sync UPDATE against monologue threw "no such field" in production (3.0.1
+-- silently persisted undeclared fields). Current-src bump callers filter to
+-- concept/memory, but monologue rows are retrievable and historical paths
+-- reached them; declare the counter fields so no writer can ever throw here.
+DEFINE FIELD IF NOT EXISTS access_count ON monologue TYPE option<int>;
+DEFINE FIELD IF NOT EXISTS synced_hits ON monologue TYPE option<int>;
+DEFINE FIELD IF NOT EXISTS last_accessed ON monologue TYPE option<datetime>;
 DEFINE INDEX IF NOT EXISTS monologue_session ON monologue FIELDS session_id;
 DEFINE INDEX IF NOT EXISTS monologue_category ON monologue FIELDS category;
 DEFINE INDEX IF NOT EXISTS monologue_vec_idx ON monologue FIELDS embedding HNSW DIMENSION 1024 DIST COSINE;

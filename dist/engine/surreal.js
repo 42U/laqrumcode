@@ -1012,7 +1012,10 @@ export class SurrealStore {
      *  Field is named `hits` (not `count`) — `count` collides with the
      *  SurrealQL function in SET expressions. */
     async bumpAccessCounts(ids) {
-        const validated = ids.filter(id => { try {
+        // 0.7.122: coerce FIRST — callers hand over raw result rows whose id can
+        // be a RecordId OBJECT, and `.replace` on it threw, failing the entire
+        // bump batch (16 silent batch failures post-cutover, daemon.log).
+        const validated = ids.map(id => String(id)).filter(id => { try {
             assertRecordId(id);
             return true;
         }
@@ -1052,7 +1055,7 @@ export class SurrealStore {
      *  side-table row. */
     async fetchAccessDeltas(ids) {
         const out = new Map();
-        const validated = ids.filter(id => { try {
+        const validated = ids.map(id => String(id)).filter(id => { try {
             assertRecordId(id);
             return true;
         }

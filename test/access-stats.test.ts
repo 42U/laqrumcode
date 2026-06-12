@@ -93,6 +93,15 @@ describe("access_stats side-table counters", () => {
     expect(deltas.has("concept:never_bumped")).toBe(false);
   });
 
+  itDb("accepts RecordId-like OBJECT ids (0.7.122 — callers pass raw row ids)", async () => {
+    await store!.queryExec(`CREATE concept:objid SET content = "obj id target", last_accessed = time::now()`);
+    // Simulate a RecordId object: String(obj) must yield "table:id".
+    const rid = { toString: () => "concept:objid" };
+    await store!.bumpAccessCounts([rid]);
+    const deltas = await store!.fetchAccessDeltas([rid]);
+    expect(deltas.get("concept:objid")).toBe(1);
+  });
+
   itDb("multi-id bump batch (the joined LET+UPDATE shape) counts each id once", async () => {
     await store!.queryExec(`CREATE concept:multi1 SET content = "m1", last_accessed = time::now()`);
     await store!.queryExec(`CREATE concept:multi2 SET content = "m2", last_accessed = time::now()`);
