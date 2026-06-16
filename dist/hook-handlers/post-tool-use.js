@@ -6,6 +6,7 @@
 import { swallow } from "../engine/errors.js";
 import { commitKnowledge } from "../engine/commit.js";
 import { recordToolOutcome } from "../engine/retrieval-quality.js";
+import { loadPrivacyConfig, isIgnoredPath } from "../engine/redact.js";
 /** Tools whose result text is worth scanning for file paths. recall surfaces
  *  paths from prior turns; Grep/Glob return path lists by definition.
  *  Each match feeds session._observedFilePaths so a follow-up Edit on a
@@ -81,7 +82,8 @@ export async function handlePostToolUse(state, payload) {
             ? session.pendingToolArgs.get(toolUseId)
             : undefined;
         const filePath = toolInput?.file_path;
-        if (filePath) {
+        // GH #16 privacy: don't even record that an ignore_paths file was touched.
+        if (filePath && !isIgnoredPath(filePath, loadPrivacyConfig())) {
             try {
                 // Route through commitKnowledge so the file artifact auto-seals
                 // artifact_mentions edges to concepts. Previously this write was

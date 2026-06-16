@@ -4,6 +4,40 @@ All notable changes to KongCode are documented here. The 0.7.x series introduced
 
 ## [Unreleased]
 
+## [0.7.124] — 2026-06-16
+
+Ingestion-time secret redaction (GH #16 — privacy / data ownership). Shipped through
+the full QA waterfall: auditor CLEAN, validator VERIFIED_FIXED (end-to-end
+redact-before-store proven live on a throwaway 3.1.4 instance), verifier release-clean.
+
+### Added — privacy redaction (GH #16)
+- **Secrets are stripped from turn text BEFORE it is embedded or stored**, so the
+  graph never persists them — and because daemon extraction derives from the
+  already-redacted `turn.text` column, concepts/memories inherit the redaction
+  without re-running. Hooked at the single `ingestTurn` chokepoint
+  (`src/context-assembler.ts`); built-in provider patterns (Anthropic, AWS, GitHub,
+  OpenAI, Stripe, Slack, Google, GitLab, npm, Hugging Face, JWT, PEM private-key
+  blocks) fire with no configuration required.
+- **Optional `~/.kongcode/privacy.json`** (sibling of `surreal-cred.json`):
+  `redact_patterns` (extra regexes; a leading `(?i)` compiles case-insensitive),
+  `ignore_projects` (those projects' turns are never stored), `ignore_paths`
+  (matching files are not recorded as artifacts — wired into the PostToolUse path).
+- `SECRET_PATTERNS` consolidated into `src/engine/redact.ts` as the single source of
+  truth, shared with the display-time redaction in `introspect.ts` (was duplicated).
+- `test/redact.test.ts` (26): pure unit coverage of every provider pattern (mask +
+  no-leak), benign lookalikes, `(?i)`, invalid-pattern skip, ignore matchers — runs
+  in CI without a DB.
+
+### Known limitations
+- Patterns are provider-prefix-anchored (to avoid false positives), so prefixless
+  secrets — a raw AWS secret-access-key, generic high-entropy tokens — are NOT caught
+  by the built-ins; add a `redact_patterns` entry for those.
+- `ignore_projects` matches by substring; a very short entry can over-suppress (errs
+  toward privacy — it skips storage, never leaks). Be specific.
+- `privacy.json` is read once and cached; edits take effect on the next daemon respawn.
+- Retroactive scrub of already-stored data is intentionally out of scope (it would
+  collide with the append-only rule); this increment is redact-before-store only.
+
 ## [0.7.123] — 2026-06-16
 
 Fresh-install provisioning fix for the SurrealDB 3.1.x engine, plus the read-only

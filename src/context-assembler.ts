@@ -13,6 +13,7 @@ import { preflight } from "./engine/orchestrator.js";
 import { upsertAndLinkConcepts } from "./engine/concept-extract.js";
 import { swallow } from "./engine/errors.js";
 import { log } from "./engine/log.js";
+import { loadPrivacyConfig, redactSecrets, isIgnoredProject } from "./engine/redact.js";
 
 /**
  * Run the full context retrieval pipeline and return a formatted string
@@ -234,6 +235,18 @@ export async function ingestTurn(
 ): Promise<void> {
   const { store, embeddings } = state;
   if (!store.isAvailable() || !text) return;
+
+  // GH #16 privacy: never persist content from an ignored project, and strip
+  // secrets BEFORE the text is embedded or stored — so the graph never holds
+  // them, and downstream extractions inherit the redaction (concept/memory
+  // extraction derives from this stored turn text).
+  const privacy = loadPrivacyConfig();
+  if (isIgnoredProject(session.projectId, privacy)) return;
+  const redacted = redactSecrets(text, privacy.redactPatterns);
+  if (redacted !== text) {
+    log.warn(`[privacy] redacted secret(s) from a ${role} turn before storage`);
+    text = redacted;
+  }
 
   // Skip filler messages
   const trimmed = text.trim().toLowerCase();

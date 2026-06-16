@@ -12,6 +12,7 @@ import { migrateWorkspace } from "../workspace-migrate.js";
 import { checkGraduation, formatGraduationReport, hasSoul } from "../soul.js";
 import { computeTrends } from "../observability.js";
 import { recoverProjectIdRows, recoverDaemonOrphans } from "../recovery.js";
+import { SECRET_PATTERNS } from "../redact.js";
 import { probeEmbeddingService as probeEmbeddingsRaw } from "../embeddings.js";
 import { pickPort, LEGACY_MANAGED_SURREAL_PORT } from "../bootstrap.js";
 
@@ -327,37 +328,8 @@ const USER_CONTENT_FIELDS = new Set<string>([
 
 const USER_CONTENT_TRUNCATE_LEN = 80;
 
-// Anthropic, AWS, GitHub PAT/server-to-server, OpenAI, Slack, Stripe live/test,
-// Google API keys, GitLab PATs, npm tokens, Hugging Face, JWTs. Each is anchored
-// to its provider's documented prefix. OpenAI `sk-` requires a word boundary +
-// at least 40 trailing alphanumerics (no internal hyphens) so benign content
-// like `sk-learn-documentation-page` does not match.
-const SECRET_PATTERNS: RegExp[] = [
-  /sk-ant-[A-Za-z0-9_-]+/g,
-  /AKIA[0-9A-Z]{16,}/g,
-  /ghp_[A-Za-z0-9]{20,}/g,
-  /gho_[A-Za-z0-9]{20,}/g,
-  /ghs_[A-Za-z0-9]{20,}/g,
-  /github_pat_[A-Za-z0-9_]{20,}/g,
-  /sk_live_[A-Za-z0-9]{20,}/g,
-  /sk_test_[A-Za-z0-9]{20,}/g,
-  // OpenAI project / service-account scoped keys (newer prefixed format).
-  // Must come BEFORE the plain `\bsk-…` rule so the longer prefix matches
-  // first; the plain rule still catches legacy `sk-<40+>` strings.
-  /\bsk-(proj|svcacct)-[A-Za-z0-9_-]{20,}\b/g,
-  /\bsk-[A-Za-z0-9]{40,}\b/g,
-  /xox[baprs]-[A-Za-z0-9-]{10,}/g,
-  /AIza[0-9A-Za-z_-]{20,}/g,
-  // GitLab PATs are exactly 20 chars after the `glpat-` prefix. The old
-  // `{20,}` open-ended length plus `_` and `-` in the charset matched benign
-  // strings like `glpat-some-feature-branch-name`. Lock to exactly 20 and
-  // require a word boundary at the tail so longer hyphenated identifiers
-  // don't trip it.
-  /glpat-[A-Za-z0-9_-]{20}\b/g,
-  /npm_[A-Za-z0-9]{36}/g,
-  /hf_[A-Za-z0-9]{30,}/g,
-  /\beyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g,
-];
+// SECRET_PATTERNS is the single source of truth in src/engine/redact.ts
+// (shared with ingestion-time redaction, GH #16). Imported above.
 
 /** Mask secret-looking substrings and truncate to USER_CONTENT_TRUNCATE_LEN.
  *  Applied to memory.text, monologue.content, concept.content, reflection.text
