@@ -231,9 +231,99 @@ async function nodeDetail(state: GlobalPluginState, table: string, id: string): 
   return row ? lite(row) : null;
 }
 
+// ── v2 read-only views (GH #15): directives, soul, sessions, retrieval, query ─
+// All use explicit column projection (never SELECT *) so embedding / query_embedding
+// vectors and any future sensitive columns are never shipped to the browser.
+
+/** Tier 0/1 core directives, active only. Small set — no pagination. */
+async function listDirectives(state: GlobalPluginState): Promise<unknown> {
+  const res = await state.store.queryBatch<Record<string, unknown>>([
+    `SELECT meta::id(id) AS id, tier, category, priority, text, (active ?? true) AS active, created_at, updated_at
+       FROM core_memory WHERE (active ?? true) = true
+       ORDER BY tier ASC, priority DESC, created_at ASC`,
+  ]);
+  return { rows: res[0] ?? [] };
+}
+
+/** Self-authored identity: active identity_chunk rows + the distinct version
+ *  history (soul evolution). Embedding is projected out. */
+async function soulView(state: GlobalPluginState): Promise<unknown> {
+  const [chunkRes, verRes] = await state.store.queryBatch<Record<string, unknown>>([
+    `SELECT meta::id(id) AS id, source, chunk_index, text, importance, identity_version, (active ?? true) AS active
+       FROM identity_chunk WHERE (active ?? true) = true
+       ORDER BY source ASC, chunk_index ASC`,
+    `SELECT identity_version, count() AS chunks FROM identity_chunk
+       WHERE (active ?? true) = true AND identity_version != NONE
+       GROUP BY identity_version`,
+  ]);
+  return { chunks: chunkRes ?? [], versions: verRes ?? [] };
+}
+
+async function listSessions(state: GlobalPluginState, limit: number, offset: number): Promise<unknown> {
+  const [countRes, rowRes] = await state.store.queryBatch<unknown>([
+    `SELECT count() AS c FROM session GROUP ALL`,
+    `SELECT meta::id(id) AS id, kc_session_id, agent_id, started_at, ended_at, last_active,
+            turn_count, total_input_tokens, total_output_tokens
+       FROM session ORDER BY started_at DESC LIMIT $limit START $offset`,
+  ], { limit, offset });
+  const total = Array.isArray(countRes) && countRes[0] ? Number((countRes[0] as { c: number }).c) : 0;
+  return { total, limit, offset, rows: Array.isArray(rowRes) ? rowRes : [] };
+}
+
+/** retrieval_outcome rows (ACAN training feed). query_embedding is deliberately
+ *  NOT selected — it is a per-row vector the browser must never receive. */
+async function listRetrievalOutcomes(state: GlobalPluginState, limit: number, offset: number): Promise<unknown> {
+  const [countRes, rowRes] = await state.store.queryBatch<unknown>([
+    `SELECT count() AS c FROM retrieval_outcome GROUP ALL`,
+    `SELECT meta::id(id) AS id, memory_table, memory_id, retrieval_score, utilization, recency,
+            importance, access_count, was_neighbor, context_tokens, session_id, turn_id, created_at
+       FROM retrieval_outcome ORDER BY created_at DESC LIMIT $limit START $offset`,
+  ], { limit, offset });
+  const total = Array.isArray(countRes) && countRes[0] ? Number((countRes[0] as { c: number }).c) : 0;
+  return { total, limit, offset, rows: Array.isArray(rowRes) ? rowRes : [] };
+}
+
+/** Read-only retrieval sandbox: mirrors the recall tool's pipeline
+ *  (embed → vectorSearch → graphExpand) WITHOUT its consumers' side effects —
+ *  no access-count bump, no ACAN staging (those live in graph-context.ts, not
+ *  here). Returns scored primary hits + graph neighbors, embeddings stripped,
+ *  text truncated. */
+async function querySandbox(state: GlobalPluginState, query: string, limit: number): Promise<unknown> {
+  const { store, embeddings } = state;
+  if (!query.trim()) return { query, available: true, primary: [], neighbors: [] };
+  if (!embeddings.isAvailable() || !store.isAvailable()) {
+    return { query, available: false, primary: [], neighbors: [] };
+  }
+  const max = Math.min(Math.max(limit, 1), 15);
+  const queryVec = await embeddings.embed(query);
+  const limits = { turn: max, identity: 0, concept: max, memory: max, artifact: max };
+  const results = await store.vectorSearch(queryVec, "ui-query-sandbox", limits);
+  const sorted = [...results].sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
+  const primary = sorted.slice(0, max);
+  const topIds = primary.slice(0, 8).map((r) => r.id);
+  let neighbors: typeof results = [];
+  if (topIds.length > 0) {
+    try {
+      const expanded = await store.graphExpand(topIds, queryVec);
+      const seen = new Set(results.map((r) => r.id));
+      neighbors = expanded.filter((n) => !seen.has(n.id)).slice(0, 8);
+    } catch { /* graph expansion is best-effort */ }
+  }
+  const shape = (r: { id: string; table?: string; role?: string; score?: number; timestamp?: string | number; text?: string }) => ({
+    id: r.id, table: r.table ?? "?", role: r.role,
+    score: typeof r.score === "number" ? r.score : null,
+    timestamp: r.timestamp ?? null,
+    text: (r.text ?? "").slice(0, 320),
+  });
+  return { query, available: true, primary: primary.map(shape), neighbors: neighbors.map(shape) };
+}
+
 // Exported for tests — test/ui-server.test.ts exercises the SQL against a live
 // kong_test DB (the layer where the type::record + queryBatch bugs lived).
-export { dashboard, listMemories, listConcepts, graphNeighborhood, nodeDetail };
+export {
+  dashboard, listMemories, listConcepts, graphNeighborhood, nodeDetail,
+  listDirectives, soulView, listSessions, listRetrievalOutcomes, querySandbox,
+};
 
 async function handleApi(state: GlobalPluginState, url: URL, res: ServerResponse): Promise<void> {
   const p = url.pathname;
@@ -254,6 +344,17 @@ async function handleApi(state: GlobalPluginState, url: URL, res: ServerResponse
       if (!id) return sendJson(res, 400, { error: "id required" });
       return sendJson(res, 200, await graphNeighborhood(state, id));
     }
+    if (p === "/api/ui/directives") return sendJson(res, 200, await listDirectives(state));
+    if (p === "/api/ui/soul") return sendJson(res, 200, await soulView(state));
+    if (p === "/api/ui/sessions") {
+      return sendJson(res, 200, await listSessions(state, int("limit", 50, 200), int("offset", 0, 1e7)));
+    }
+    if (p === "/api/ui/retrieval-outcomes") {
+      return sendJson(res, 200, await listRetrievalOutcomes(state, int("limit", 50, 200), int("offset", 0, 1e7)));
+    }
+    if (p === "/api/ui/query") {
+      return sendJson(res, 200, await querySandbox(state, url.searchParams.get("q") ?? "", int("limit", 8, 15)));
+    }
     const m = /^\/api\/ui\/node\/([a-z_]+)\/(.+)$/.exec(p);
     if (m) {
       const detail = await nodeDetail(state, m[1], decodeURIComponent(m[2]));
@@ -269,19 +370,14 @@ async function handleApi(state: GlobalPluginState, url: URL, res: ServerResponse
 // ── lifecycle ────────────────────────────────────────────────────────────────
 
 /**
- * Start the loopback UI server. No-ops (logs once) when the frontend bundle is
- * absent, when KONGCODE_UI=0, or when the port is already bound by a sibling.
+ * The request listener — exported so the HTTP security envelope (auth gate,
+ * GET-only read-only enforcement, path-traversal rejection, /api routing) is
+ * directly testable without binding the real UID-offset port. The URL base is
+ * arbitrary: only pathname + search params are read.
  */
-export async function startUiServer(state: GlobalPluginState, authToken: string): Promise<void> {
-  if (process.env.KONGCODE_UI === "0") return;
-  if (uiServer) return;
-  if (!existsSync(join(UI_ASSET_DIR, "index.html"))) {
-    log.info("[ui-server] no built UI assets (dist/ui/index.html) — UI disabled; run `npm run build` to enable");
-    return;
-  }
-  const port = uiPort();
-  const srv = createServer((req, res) => {
-    const url = new URL(req.url || "/", `http://127.0.0.1:${port}`);
+export function uiRequestHandler(state: GlobalPluginState, authToken: string): (req: IncomingMessage, res: ServerResponse) => void {
+  return (req, res) => {
+    const url = new URL(req.url || "/", "http://127.0.0.1");
     // Public: the one-time cookie-mint endpoint.
     if (url.pathname === "/ui/auth") {
       const token = url.searchParams.get("token") || "";
@@ -305,7 +401,22 @@ export async function startUiServer(state: GlobalPluginState, authToken: string)
     if (url.pathname === "/ui" || url.pathname.startsWith("/ui/")) { void serveStatic(res, url.pathname); return; }
     if (url.pathname === "/") { res.writeHead(302, { location: "/ui/" }); res.end(); return; }
     res.writeHead(404); res.end("Not found");
-  });
+  };
+}
+
+/**
+ * Start the loopback UI server. No-ops (logs once) when the frontend bundle is
+ * absent, when KONGCODE_UI=0, or when the port is already bound by a sibling.
+ */
+export async function startUiServer(state: GlobalPluginState, authToken: string): Promise<void> {
+  if (process.env.KONGCODE_UI === "0") return;
+  if (uiServer) return;
+  if (!existsSync(join(UI_ASSET_DIR, "index.html"))) {
+    log.info("[ui-server] no built UI assets (dist/ui/index.html) — UI disabled; run `npm run build` to enable");
+    return;
+  }
+  const port = uiPort();
+  const srv = createServer(uiRequestHandler(state, authToken));
   await new Promise<void>((resolve) => {
     srv.once("error", (err: NodeJS.ErrnoException) => {
       if (err.code === "EADDRINUSE") {

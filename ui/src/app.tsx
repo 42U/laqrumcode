@@ -3,12 +3,22 @@ import { Dashboard } from "./views/Dashboard";
 import { Memories } from "./views/Memories";
 import { Concepts } from "./views/Concepts";
 import { Graph } from "./views/Graph";
+import { Directives } from "./views/Directives";
+import { Soul } from "./views/Soul";
+import { Sessions } from "./views/Sessions";
+import { Retrieval } from "./views/Retrieval";
+import { QuerySandbox } from "./views/QuerySandbox";
 
 const ROUTES: [string, string][] = [
   ["#/dashboard", "Dashboard"],
   ["#/memories", "Memories"],
   ["#/concepts", "Concepts"],
   ["#/graph", "Graph"],
+  ["#/query", "Query sandbox"],
+  ["#/directives", "Directives"],
+  ["#/soul", "Soul"],
+  ["#/sessions", "Sessions"],
+  ["#/retrieval", "Retrieval"],
 ];
 
 /** Minimal dependency-free hash router. The daemon SPA-falls-back unknown /ui/
@@ -39,6 +49,11 @@ export function App() {
         {route === "#/memories" && <Memories />}
         {route === "#/concepts" && <Concepts />}
         {route === "#/graph" && <Graph />}
+        {route === "#/query" && <QuerySandbox />}
+        {route === "#/directives" && <Directives />}
+        {route === "#/soul" && <Soul />}
+        {route === "#/sessions" && <Sessions />}
+        {route === "#/retrieval" && <Retrieval />}
       </main>
     </div>
   );

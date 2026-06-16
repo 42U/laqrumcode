@@ -57,7 +57,15 @@ const DB_CLEAN = `w2_clean_${STAMP}`;
 const DB_DIRTY = `w2_dirty_${STAMP}`;
 
 async function scalar<T>(s: SurrealStore, sql: string): Promise<T | undefined> {
-  return await s.queryMulti<T>(sql);
+  const r = await s.queryMulti<unknown>(sql);
+  // SurrealDB 3.1.x honors `SELECT VALUE count() ... GROUP ALL` inconsistently:
+  // a scanned count unwraps to a bare number, but when a UNIQUE index drives the
+  // aggregate it comes back as { count: N }. Normalize so numeric assertions hold
+  // regardless of index state (the value is identical; only the wrapper differs).
+  if (r !== null && typeof r === "object" && "count" in (r as Record<string, unknown>)) {
+    return (r as Record<string, unknown>).count as T;
+  }
+  return r as T;
 }
 
 beforeAll(async () => {

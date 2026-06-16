@@ -62,7 +62,15 @@ const callSupersede = async (old_text: string, new_text: string) => {
   return JSON.parse(r.content[0].text);
 };
 async function scalar<T>(sql: string, binds?: Record<string, unknown>): Promise<T | undefined> {
-  return await store!.queryMulti<T>(sql, binds);
+  const r = await store!.queryMulti<unknown>(sql, binds);
+  // SurrealDB 3.1.x honors `SELECT VALUE count() ... GROUP ALL` inconsistently:
+  // a scanned count unwraps to a bare number, but when a UNIQUE index drives the
+  // aggregate it comes back as { count: N }. Normalize so numeric assertions hold
+  // regardless of index state (the value is identical; only the wrapper differs).
+  if (r !== null && typeof r === "object" && "count" in (r as Record<string, unknown>)) {
+    return (r as Record<string, unknown>).count as T;
+  }
+  return r as T;
 }
 
 beforeAll(async () => {

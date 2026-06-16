@@ -14,8 +14,14 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { readFile } from "node:fs/promises";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createServer as httpCreateServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import { SurrealStore } from "../src/engine/surreal.js";
-import { dashboard, listMemories, listConcepts, graphNeighborhood, nodeDetail } from "../src/ui-server.js";
+import {
+  dashboard, listMemories, listConcepts, graphNeighborhood, nodeDetail,
+  listDirectives, soulView, listSessions, listRetrievalOutcomes, querySandbox,
+  uiRequestHandler,
+} from "../src/ui-server.js";
 import type { GlobalPluginState } from "../src/engine/state.js";
 
 const URL = process.env.SURREAL_URL ?? "ws://127.0.0.1:8000/rpc";
@@ -37,6 +43,11 @@ beforeAll(async () => {
     ns: TEST_NS,
     db: TEST_DB,
   });
+  // NB: ns/db are intentionally NOT pre-provisioned here — SurrealStore.runSchema()
+  // now issues idempotent DEFINE NAMESPACE/DATABASE IF NOT EXISTS, so initialize()
+  // provisions a fresh ns/db itself (the fresh-install fix). This suite passing is
+  // an implicit integration check of that path; see test/fresh-provision.test.ts
+  // for the focused regression.
   try {
     await Promise.race([
       store.initialize(),
@@ -65,7 +76,26 @@ beforeAll(async () => {
     `CREATE memory:uitest_m1 SET text = $t, category = 'correction', importance = 0.8, status = 'active'`,
     { t: "a correction about the ui-server probe" },
   );
-  state = { store } as unknown as GlobalPluginState;
+  // v2 view fixtures (GH #15 v2): directives, identity/soul, session, retrieval outcome.
+  await store.queryExec(
+    `CREATE core_memory:uitest_d1 SET text = $t, category = 'rules', tier = 0, priority = 100, active = true, created_at = time::now()`,
+    { t: "uitest directive — always loaded" },
+  );
+  await store.queryExec(
+    `CREATE identity_chunk:uitest_i1 SET source = 'soul', chunk_index = 0, text = $t, importance = 0.9, identity_version = 'v1', active = true, agent_id = 'test', embedding = $e`,
+    { t: "uitest soul chunk — working style", e: Array(1024).fill(0.02) },
+  );
+  await store.queryExec(
+    `CREATE session:uitest_s1 SET agent_id = 'test', started_at = time::now(), last_active = time::now(), turn_count = 5, total_input_tokens = 100, total_output_tokens = 50, kc_session_id = 'kc-uitest'`,
+  );
+  await store.queryExec(
+    `CREATE retrieval_outcome:uitest_r1 SET memory_table = 'concept', memory_id = 'uitest_c1', retrieval_score = 0.8, utilization = 0.5, recency = 0.9, importance = 0.7, was_neighbor = false, session_id = 'kc-uitest', turn_id = 'turn-uitest', created_at = time::now(), query_embedding = $e`,
+    { e: Array(1024).fill(0.03) },
+  );
+  state = {
+    store,
+    embeddings: { isAvailable: () => true, embed: async () => Array(1024).fill(0.01) },
+  } as unknown as GlobalPluginState;
 }, 30_000);
 
 afterAll(async () => {
@@ -121,5 +151,79 @@ describe("ui-server read endpoints (live, kong_test)", () => {
   itDb("node detail rejects a non-allowlisted table", async () => {
     const n = await nodeDetail(state, "turn", "anything");
     expect(n).toBeNull();
+  });
+
+  // ── v2 views ────────────────────────────────────────────────────────────────
+  itDb("directives lists active Tier-0 entries with text + tier", async () => {
+    const d = await listDirectives(state) as any;
+    const row = d.rows.find((r: any) => r.id === "uitest_d1");
+    expect(row).toBeTruthy();
+    expect(row.tier).toBe(0);
+    expect(row.text).toContain("always loaded");
+  });
+
+  itDb("soul returns identity chunks + version history, embedding stripped", async () => {
+    const s = await soulView(state) as any;
+    const chunk = s.chunks.find((c: any) => c.id === "uitest_i1");
+    expect(chunk).toBeTruthy();
+    expect(chunk.text).toContain("working style");
+    expect("embedding" in chunk).toBe(false);
+    expect(s.versions.some((v: any) => v.identity_version === "v1")).toBe(true);
+  });
+
+  itDb("sessions list returns the session with turn + token counts", async () => {
+    const s = await listSessions(state, 50, 0) as any;
+    expect(s.total).toBeGreaterThanOrEqual(1);
+    const row = s.rows.find((r: any) => r.id === "uitest_s1");
+    expect(row).toBeTruthy();
+    expect(row.turn_count).toBe(5);
+  });
+
+  itDb("retrieval outcomes list NEVER leaks query_embedding", async () => {
+    const r = await listRetrievalOutcomes(state, 50, 0) as any;
+    expect(r.total).toBeGreaterThanOrEqual(1);
+    const row = r.rows.find((x: any) => x.id === "uitest_r1");
+    expect(row).toBeTruthy();
+    expect(row.retrieval_score).toBeCloseTo(0.8);
+    expect("query_embedding" in row).toBe(false);
+  });
+
+  itDb("query sandbox returns scored hits, embedding-stripped, and writes nothing", async () => {
+    const before = await store!.queryBatch<{ c: number }>([`SELECT count() AS c FROM retrieval_outcome GROUP ALL`]);
+    const beforeN = before[0]?.[0]?.c ?? 0;
+    const q = await querySandbox(state, "alpha gateway", 10) as any;
+    expect(q.available).toBe(true);
+    expect(q.primary.length).toBeGreaterThanOrEqual(1);
+    expect(typeof q.primary[0].score).toBe("number");
+    expect("embedding" in q.primary[0]).toBe(false);
+    // Read-only invariant: running a sandbox query must not stage an ACAN row.
+    const after = await store!.queryBatch<{ c: number }>([`SELECT count() AS c FROM retrieval_outcome GROUP ALL`]);
+    expect(after[0]?.[0]?.c ?? 0).toBe(beforeN);
+  });
+
+  // ── HTTP security envelope (drives the real request handler) ──────────────────
+  itDb("HTTP envelope: 401 unauthed, 405 on write, 403 traversal, 200 authed", async () => {
+    const TOKEN = "ui-test-token-9f3a";
+    const srv = httpCreateServer(uiRequestHandler(state, TOKEN));
+    await new Promise<void>((r) => srv.listen(0, "127.0.0.1", () => r()));
+    const base = `http://127.0.0.1:${(srv.address() as AddressInfo).port}`;
+    const auth = { authorization: `Bearer ${TOKEN}` };
+    try {
+      // No credential → the whole /api surface is closed.
+      expect((await fetch(`${base}/api/ui/directives`)).status).toBe(401);
+      expect((await fetch(`${base}/ui/`)).status).toBe(401);
+      // Authenticated but non-GET → read-only enforcement.
+      expect((await fetch(`${base}/api/ui/directives`, { method: "POST", headers: auth })).status).toBe(405);
+      expect((await fetch(`${base}/api/ui/query`, { method: "DELETE", headers: auth })).status).toBe(405);
+      // Path traversal (percent-encoded so URL parsing can't collapse it) → rejected.
+      const trav = await fetch(`${base}/ui/%2e%2e%2f%2e%2e%2fpackage.json`, { headers: auth });
+      expect(trav.status).toBe(403);
+      // Authenticated GET of a new v2 endpoint → 200 with data.
+      const ok = await fetch(`${base}/api/ui/directives`, { headers: auth });
+      expect(ok.status).toBe(200);
+      expect(Array.isArray((await ok.json() as any).rows)).toBe(true);
+    } finally {
+      await new Promise<void>((r) => srv.close(() => r()));
+    }
   });
 });

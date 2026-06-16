@@ -4,6 +4,49 @@ All notable changes to KongCode are documented here. The 0.7.x series introduced
 
 ## [Unreleased]
 
+## [0.7.123] — 2026-06-16
+
+Fresh-install provisioning fix for the SurrealDB 3.1.x engine, plus the read-only
+web-UI v2 views. Shipped through the QA waterfall (independent auditor + validator):
+auditor CLEAN on all code, validator VERIFIED_FIXED on live probes.
+
+### Fixed
+- **Fresh installs could not provision a graph on SurrealDB 3.1.x.** 3.1.x no
+  longer lazily creates a namespace/database on first write OR DDL (3.0.x did);
+  `SurrealStore.connect()` only SELECTS the ns/db context. A brand-new install —
+  or a 2nd OS user's fresh UID-offset managed instance (GH #13) — therefore failed
+  `initialize()` → `runSchema()` with `The namespace '<ns>' does not exist` and
+  could never bootstrap. Existing/migrated graphs were unaffected (their ns/db
+  already existed), which masked the gap after the 2026-06-12 cutover. `runSchema()`
+  now issues idempotent `DEFINE NAMESPACE/DATABASE IF NOT EXISTS` before applying
+  the schema — best-effort (a restricted user on a shared instance where the ns/db
+  already exist still proceeds; the schema apply remains the authoritative gate).
+  Verified end-to-end on a throwaway 3.1.4 store: `kong` namespace goes absent →
+  present, `initialize()` resolves true, graph is writable. (`src/engine/surreal.ts`)
+
+### Added — web UI v2 (GH #15)
+- Five new **read-only** views served by the daemon's loopback UI server, all behind
+  the existing token auth + GET-only (`405`) gate, all with explicit column
+  projection (never leak `embedding`/`query_embedding`): **Query sandbox** (runs the
+  recall pipeline read-only — no access-count bumps, no ACAN staging), **Directives**
+  (Tier-0/1 viewer), **Soul** (identity chunks + version history), **Sessions**
+  (timeline), **Retrieval outcomes** (ACAN feed). The request handler is extracted as
+  `uiRequestHandler` so the auth/405/path-traversal envelope is unit-testable.
+  (`src/ui-server.ts`, `ui/src/views/*`, `ui/src/api.ts`, `ui/src/app.tsx`)
+
+### Tests
+- **Resurrected silently-skipping live-DB suites.** Several suites relied on 3.0.x
+  lazy ns/db creation and had been passing-while-skipping since the cutover
+  (`record-retrieval-feedback`, `dedup-integration`, `ui-server`, `wave2-fixes`); the
+  provisioning fix makes them actually execute again.
+- **`test/fresh-provision.test.ts`** — binding regression for the fix: a brand-new
+  ns/db through `initialize()` must succeed when a DB is reachable; it skips only when
+  no DB is reachable at all, never the reverse (the masking that hid the original bug).
+- **3.1.x `SELECT VALUE count() … GROUP ALL` shape variance** — hardened the `scalar()`
+  helper in `wave2-fixes` + `knowledge-write-guards`: the `VALUE` projection unwraps to
+  a bare number for a scanned count but `{count:N}` when a UNIQUE index drives the
+  aggregate. Production uses `VALUE count()` zero times, so this is test-only.
+
 ## [0.7.122] — 2026-06-12
 
 Post-cutover hardening: two live bugs caught by the queued v3.1.4 re-checks,

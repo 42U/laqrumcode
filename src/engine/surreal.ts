@@ -365,6 +365,24 @@ export class SurrealStore {
 
   private async runSchema(): Promise<void> {
     const schema = loadSchema();
+    // SurrealDB 3.1.x no longer lazily creates a namespace/database on first
+    // write OR DDL — 3.0.x did. connect() only SELECTS the ns/db context, it
+    // does not create them, so a fresh install (or a 2nd OS user's brand-new
+    // UID-offset managed instance, GH #13) would fail the schema apply below
+    // with "The namespace '<ns>' does not exist". Provision idempotently first.
+    // Best-effort: a restricted user on a shared external instance may lack
+    // DEFINE perms while the ns/db already exist — the schema apply remains the
+    // authoritative gate, so we log and proceed rather than hard-fail here.
+    // (ns/db are operator config, interpolated bare to match the existing
+    // `USE NS ${ns} DB ${db}` sites in this file.)
+    const provision =
+      `DEFINE NAMESPACE IF NOT EXISTS ${this.config.ns}; ` +
+      `DEFINE DATABASE IF NOT EXISTS ${this.config.db};`;
+    try {
+      await raceWithDeadline(this.db.query(provision), 30_000, "SurrealDB ns/db provision");
+    } catch (e) {
+      log.warn(`[surreal] ns/db provision (DEFINE IF NOT EXISTS) failed; proceeding to schema apply: ${(e as Error).message}`);
+    }
     // Generous fixed deadline so schema DDL over a wedged server fails this
     // step loudly (degraded mode) instead of hanging it. (initialize()'s
     // first db.connect() is a separate, still-undeadlined step — the
