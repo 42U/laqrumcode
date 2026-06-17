@@ -22,7 +22,7 @@ import { isACANActive, scoreWithACAN, type ACANCandidate } from "./acan.js";
 import { swallow } from "./errors.js";
 import { clamp } from "./math.js";
 import { log } from "./log.js";
-import type { LlamaRankingContext } from "node-llama-cpp";
+import type { LlamaRankingContext, Token } from "node-llama-cpp";
 import type { ResourceProfile } from "./resource-tier.js";
 
 // ── Cross-encoder reranker (bge-reranker-v2-m3) ──────────────────────────────
@@ -33,8 +33,31 @@ let _rerankerInitializing: Promise<void> | null = null;
 const RERANK_TOP_N = 30;
 const RERANK_BLEND_VECTOR = 0.6;
 const RERANK_BLEND_CROSS = 0.4;
-const RERANK_MAX_DOC_CHARS = 24000;
+// Cross-encoder cost is ~linear in the (query+doc) TOKENS scored on CPU. The
+// bge-reranker-v2-m3 relevance signal lives in the passage head, so we cap each
+// doc to a SOTA reranker passage (~512 tokens) and bound the whole batch to a
+// fixed token budget. This makes rerank wall-time a HARDWARE-INDEPENDENT bounded
+// constant (work ∝ tokens, capped) — not a function of doc length or graph size,
+// and not dependent on core count. Measured 2026-06-17 @ 4 cores: a single
+// 24000-char (~6500-tok) doc cost ~21s and blew the 45s budget; token-capped, a
+// full 30-doc batch is ~22s (≤~27s at the 8192-token ceiling), scaling down with
+// cores. Truncation is by REAL tokens (not chars) so CJK/code can't overflow the
+// model window. All env-tunable.
+const RERANK_MAX_DOC_TOKENS = Number(process.env.KONGCODE_RERANK_MAX_DOC_TOKENS) || 512;
+const RERANK_QUERY_MAX_TOKENS = Number(process.env.KONGCODE_RERANK_QUERY_MAX_TOKENS) || 512;
+const RERANK_TOTAL_TOKEN_BUDGET = Number(process.env.KONGCODE_RERANK_TOTAL_TOKEN_BUDGET) || 8192;
 const RERANK_CHUNK_SIZE = Number(process.env.KONGCODE_RERANK_CHUNK_SIZE) || 6;
+
+/** Tokenize + cap to a fixed token budget, returning Token[] for rankAll. Passing
+ *  tokens (not a char-truncated string) gives EXACT length control: a char cap
+ *  can't bound tokens on CJK/code-dense text, which would overflow the model
+ *  window and make rankAll throw. Bounded tokens = bounded, hardware-independent
+ *  rerank cost. */
+function capTokens(text: string, maxTokens: number): Token[] {
+  if (!_rankingCtx) return [];
+  const t = _rankingCtx.model.tokenize(text);
+  return t.length > maxTokens ? t.slice(0, maxTokens) : t;
+}
 
 export function configureReranker(modelPath: string, profile?: ResourceProfile): void {
   _rerankerModelPath = modelPath;
@@ -91,13 +114,14 @@ export async function crossEncoderScorePairs(
 ): Promise<number[] | null> {
   if (!_rankingCtx || docs.length === 0) return null;
   try {
-    const trimmed = docs.map(d => d.length > RERANK_MAX_DOC_CHARS ? d.slice(0, RERANK_MAX_DOC_CHARS) : d);
-    const scores: number[] = new Array(trimmed.length);
-    for (let start = 0; start < trimmed.length; start += RERANK_CHUNK_SIZE) {
-      const end = Math.min(start + RERANK_CHUNK_SIZE, trimmed.length);
-      const chunk = await _rankingCtx.rankAll(anchor, trimmed.slice(start, end));
+    const anchorTokens = capTokens(anchor, RERANK_QUERY_MAX_TOKENS);
+    const docTokens = docs.map(d => capTokens(d, RERANK_MAX_DOC_TOKENS));
+    const scores: number[] = new Array(docTokens.length);
+    for (let start = 0; start < docTokens.length; start += RERANK_CHUNK_SIZE) {
+      const end = Math.min(start + RERANK_CHUNK_SIZE, docTokens.length);
+      const chunk = await _rankingCtx.rankAll(anchorTokens, docTokens.slice(start, end));
       for (let i = 0; i < chunk.length; i++) scores[start + i] = chunk[i];
-      if (end < trimmed.length) await new Promise<void>(r => setImmediate(r));
+      if (end < docTokens.length) await new Promise<void>(r => setImmediate(r));
     }
     return scores;
   } catch {
@@ -174,35 +198,45 @@ async function rerankResults<T extends { id: string; text?: string; finalScore: 
   try {
     const topN = Math.min(RERANK_TOP_N, deduped.length);
     const candidates = deduped.slice(0, topN);
-    const texts = candidates.map((r) => {
-      const text = r.text ?? "";
-      return text.length > RERANK_MAX_DOC_CHARS ? text.slice(0, RERANK_MAX_DOC_CHARS) : text;
-    });
-    const crossScores: number[] = new Array(texts.length);
-    for (let start = 0; start < texts.length; start += RERANK_CHUNK_SIZE) {
-      const end = Math.min(start + RERANK_CHUNK_SIZE, texts.length);
-      const chunkScores = await _rankingCtx.rankAll(queryText, texts.slice(start, end));
+    const qTokens = capTokens(queryText, RERANK_QUERY_MAX_TOKENS);
+    // Token-cap each doc and accumulate until the per-batch token budget is hit.
+    // `candidates` are WMR/ACAN-sorted desc, so the budget keeps the HIGHEST-scored
+    // ones; the rest (lowest-WMR within top-N, only in rare outlier-heavy batches)
+    // bypass the cross-encoder and are dropped — same contract as the tail-drop.
+    // This bounds total rerank work to a hardware-independent constant.
+    const docTokens: Token[][] = [];
+    let budget = RERANK_TOTAL_TOKEN_BUDGET;
+    for (const c of candidates) {
+      const dt = capTokens(c.text ?? "", RERANK_MAX_DOC_TOKENS);
+      if (docTokens.length > 0 && dt.length > budget) break;
+      budget -= dt.length;
+      docTokens.push(dt);
+    }
+    const scored = candidates.slice(0, docTokens.length);
+    const crossScores: number[] = new Array(docTokens.length);
+    for (let start = 0; start < docTokens.length; start += RERANK_CHUNK_SIZE) {
+      const end = Math.min(start + RERANK_CHUNK_SIZE, docTokens.length);
+      const chunkScores = await _rankingCtx.rankAll(qTokens, docTokens.slice(start, end));
       for (let i = 0; i < chunkScores.length; i++) {
         crossScores[start + i] = chunkScores[i];
       }
-      if (end < texts.length) {
+      if (end < docTokens.length) {
         await new Promise<void>(resolve => setImmediate(resolve));
       }
     }
-    for (let i = 0; i < candidates.length; i++) {
+    for (let i = 0; i < scored.length; i++) {
       const cs = crossScores[i];
-      candidates[i].crossScore = cs;
-      candidates[i].band = bandFor(cs);
-      candidates[i].finalScore =
-        RERANK_BLEND_VECTOR * candidates[i].finalScore +
+      scored[i].crossScore = cs;
+      scored[i].band = bandFor(cs);
+      scored[i].finalScore =
+        RERANK_BLEND_VECTOR * scored[i].finalScore +
         RERANK_BLEND_CROSS * cs;
     }
     // Drop hard-noise (cross-encoder strongly disagrees) before re-sorting.
-    const survivors = candidates.filter((c) => (c.crossScore ?? 0) >= BAND_DROP_BELOW);
+    const survivors = scored.filter((c) => (c.crossScore ?? 0) >= BAND_DROP_BELOW);
     survivors.sort((a, b) => b.finalScore - a.finalScore);
-    // Drop unreranked tail entirely. Tail items bypassed the cross-encoder by
-    // definition; shipping them as 'background' injects noise the user can't
-    // account for.
+    // Items not cross-scored (tail past top-N, or past the token budget) are
+    // dropped: shipping un-reranked items injects noise the user can't account for.
     return survivors;
   } catch (e) {
     swallow.warn("graph-context:rerankResults failed — using WMR scores", e);

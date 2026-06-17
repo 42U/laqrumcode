@@ -4,6 +4,40 @@ All notable changes to KongCode are documented here. The 0.7.x series introduced
 
 ## [Unreleased]
 
+## [0.7.125] — 2026-06-17
+
+Hardware-independent fix for the cross-encoder rerank timeout that was silently
+disabling per-turn memory injection. Researched + planned before coding; shipped
+through an independent design review + QA auditor (no CRITICAL/MAJOR).
+
+### Fixed — rerank no longer times out (and the fix is portable)
+- **Root cause (measured):** `graphTransformContext` was timing out at its 45s CPU
+  deadline in the `score-rerank` stage on ~every turn (622 logged), returning raw
+  messages with NO context injected. Cross-encoder cost is ~linear in tokens scored;
+  `RERANK_MAX_DOC_CHARS=24000` let a single outlier doc (tool-output-heavy turns, up
+  to ~6500 tokens) cost ~13s — a few of them blew the budget. Real distribution: turn
+  text mean ~170 tokens, but rare outliers to ~6500.
+- **Fix:** bound rerank work by **tokens**, not chars. Each doc is tokenized and
+  capped to `RERANK_MAX_DOC_TOKENS=512` (a SOTA reranker passage; the bge-reranker-v2-m3
+  signal lives in the head), the query likewise, and the whole batch is ceilinged at
+  `RERANK_TOTAL_TOKEN_BUDGET=8192` (`graph-context.ts`). Truncation passes real
+  `Token[]` to `rankAll`, so CJK/code-dense text can't overflow the model window. This
+  makes rerank wall-time a **bounded, hardware-independent constant** (work ∝ tokens,
+  capped) — it does NOT rely on core count. Measured @ 4 cores (commodity laptop): a
+  full 30-doc batch ≈ 22s (≤~27s at the budget ceiling) vs the OLD path timing out
+  >45s; scales down with cores. All `KONGCODE_RERANK_*` env-tunable.
+- **Side win:** the same token cap bounds the cross-encoder utilization scoring in
+  `retrieval-quality.ts` (each item was scored against the full response — up to
+  ~30×6500 tokens per eval), cutting that hidden cost ~13×. The 512-token response
+  passage is blended with lexical + `[#N]` citation signals.
+- `createRankingContext()` stays at the model-default context window (no override) —
+  the token cap is the overflow guard, not a shrunken window.
+
+### Note
+- A prior in-session attempt that leaned on `threads:0` (all cores of a 64-core dev
+  box) + `contextSize:2048` was reverted: it wasn't portable to commodity hardware and
+  the small context overflowed on CJK/code. The shipped fix is pure work-reduction.
+
 ## [0.7.124] — 2026-06-16
 
 Ingestion-time secret redaction (GH #16 — privacy / data ownership). Shipped through
