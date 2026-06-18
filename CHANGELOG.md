@@ -4,6 +4,45 @@ All notable changes to KongCode are documented here. The 0.7.x series introduced
 
 ## [Unreleased]
 
+## [0.7.126] — 2026-06-18
+
+Fixes the recurring "empty drain" report: the SessionStart / UserPromptSubmit
+"DRAIN NOW — N items" banner firing for a queue that drains to nothing.
+
+### Fixed — DRAIN-NOW banner only fires for actionable work
+- **Root cause:** `session-end` (and `deferred-cleanup`) ALWAYS enqueued a
+  `causal_graduate` + `soul_evolve`/`soul_generate` row regardless of
+  eligibility, and 4 of 5 `buildWorkPayload` cases self-complete empty when
+  there's nothing to do. The banners counted those by `status='pending'` BEFORE
+  any builder ran, so N sessions without an intervening drain piled up ~2N rows
+  and the banner cried "DRAIN NOW, N items" for an all-empty queue. The v0.7.119
+  skip-ahead loop had only hidden the empties from the drain *agent*, not the
+  *banner*.
+- **Banner truthfulness:** new `countActionablePendingWork()` runs the builders'
+  own global eligibility probes (ungraduated chain-groups ≥3; new
+  reflection/causal_chain/monologue since `soul.updated_at`; `checkGraduation`
+  readiness) and only counts work that would actually produce knowledge. Wired
+  into `session-start.ts`, `user-prompt-submit.ts`, and `auto-drain.ts`'s spawn
+  decision. Internal queue-hygiene metrics (observability, health cache) keep
+  the raw count by design — they measure purge risk, not actionability.
+- **Enqueue dedup:** new `SurrealStore.hasPendingWorkOfType()`; `session-end` +
+  `deferred-cleanup` skip enqueuing `causal_graduate`/`soul_*` when a
+  pending+active row of that type already exists in any session — these builders
+  run GLOBAL queries, so one pending row drains all eligible work. Checks
+  `pending` only (a stuck `processing` row is recovered by the 10-min
+  stale-recovery), so it cannot starve graduation. Dedup, not
+  eligibility-gating-at-enqueue, because this session's chains/reflections are
+  produced by the *later* extraction drain and are absent at session-end.
+- **Zombie visibility:** `markTerminal` + the stale-recovery sibling-collision
+  branches now stamp `completed_at`, so empty self-completions are visible to
+  `completed_at`-based metrics. Status stays `processing` to avoid the
+  `(session_id, work_type, status)` UNIQUE-index collision that forced the
+  original `active=false`-only design; existing 148 rows backfilled.
+
+### Added
+- `scripts/diag-empty-drain.mjs` — reconciles the DRAIN-NOW count against what
+  `fetch_pending_work` would actually hand a drain agent (raw vs actionable).
+
 ## [0.7.125] — 2026-06-17
 
 Hardware-independent fix for the cross-encoder rerank timeout that was silently

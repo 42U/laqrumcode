@@ -31,6 +31,7 @@ import { homedir, platform } from "node:os";
 import { fileURLToPath } from "node:url";
 import { log } from "../engine/log.js";
 import { swallow } from "../engine/errors.js";
+import { countActionablePendingWork } from "../tools/pending-work.js";
 let schedulerStarted = false;
 let schedulerTimer = null;
 let claudeBinPath = null;
@@ -563,12 +564,14 @@ async function getPendingCount(state) {
     if (!state.store.isAvailable())
         return 0;
     try {
-        const rows = await state.store.queryFirst(
-        // W2-04: active filter matches fetch_pending_work's claim filter. Without
-        // it the scheduler spawned extractors against soft-archived forensic rows
-        // (counted-but-unfetchable) — the post-storm empty-fetch churn.
-        `SELECT count() AS count FROM pending_work WHERE status = "pending" AND (active = true OR active IS NONE) GROUP ALL`);
-        return rows[0]?.count ?? 0;
+        // Actionable count (eligibility-aware), not raw queue depth. W2-04 added
+        // the active filter so soft-archived rows stopped triggering empty fetches;
+        // this is the next layer (2026-06-18): session-end ALWAYS enqueues
+        // causal_graduate + soul_evolve, which self-complete empty when drained.
+        // Spawning an extractor for an all-empty queue is the wasted-cycle half of
+        // the empty-drain report. countActionablePendingWork runs the builders'
+        // own global eligibility probes.
+        return await countActionablePendingWork(state.store);
     }
     catch (e) {
         swallow.warn("auto-drain:countQuery", e);

@@ -54,11 +54,22 @@ export async function runDeferredCleanup(store) {
                     priority: 1,
                 });
             }
-            // Unconditional pair — no transcript needed; both auto-skip-complete
-            // when nothing is eligible. Queueing them here gives orphan sessions
-            // the same chance at causal graduation / soul evolution as graceful ones.
-            queue({ work_type: "causal_graduate", session_id: kcSid || sessionIdStr, priority: 7 });
-            queue({ work_type: soulExists ? "soul_evolve" : "soul_generate", session_id: kcSid || sessionIdStr, priority: 9 });
+            // Graduation pair — dedup-gated (2026-06-18) exactly like session-end.
+            // Both builders run GLOBAL eligibility queries, so ONE pending row of
+            // each type drains ALL eligible work; enqueuing one per orphan piled up
+            // self-completing empties that inflated the DRAIN-NOW banner. Skip when a
+            // pending+active row of that type already exists (any session) — a stuck
+            // processing row is recovered by the 10-min stale-recovery, so this can't
+            // starve graduation. Eligibility itself is NOT checked here: this
+            // session's chains/reflections are produced by the LATER extraction
+            // drain, so the builders self-complete at drain time if nothing's ready.
+            const soulWt = soulExists ? "soul_evolve" : "soul_generate";
+            if (!(await store.hasPendingWorkOfType("causal_graduate"))) {
+                queue({ work_type: "causal_graduate", session_id: kcSid || sessionIdStr, priority: 7 });
+            }
+            if (!(await store.hasPendingWorkOfType(soulWt))) {
+                queue({ work_type: soulWt, session_id: kcSid || sessionIdStr, priority: 9 });
+            }
             // Surface CREATE failures (e.g. UNIQUE-index rejection from a duplicate
             // work_type+session_id) so we can roll back the claim and let next boot
             // retry. Promise.allSettled would silently swallow them.

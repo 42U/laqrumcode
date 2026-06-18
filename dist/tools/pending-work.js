@@ -97,6 +97,102 @@ const soulSchema = {
     required: ["working_style", "emotional_dimensions", "self_observations", "earned_values"],
 };
 // ── fetch_pending_work ───────────────────────────────────────────────────────
+/**
+ * Count pending_work rows that would ACTUALLY yield work if drained — the
+ * "actionable" count behind the SessionStart / UserPromptSubmit "DRAIN NOW"
+ * banners and the auto-drain spawn decision.
+ *
+ * The raw `status='pending' AND active` count over-reports: session-end
+ * ALWAYS enqueues causal_graduate + soul_evolve/soul_generate regardless of
+ * eligibility (session-end.ts), and 4 of 5 builders self-complete to empty
+ * when ineligible (see buildWorkPayload below). Counting those raw produced
+ * the "DRAIN NOW, N items" banner for a queue that drains to nothing — the
+ * recurring empty-drain report (2026-06-18). This runs the SAME global
+ * eligibility probes the builders use, so a type is only counted when it
+ * would produce a real payload.
+ *
+ * MUST stay in sync with buildWorkPayload's self-completion conditions.
+ * Internal queue-hygiene metrics (observability.ts buildup/aging, the
+ * http-api health cache) deliberately keep the RAW count — they measure
+ * queue depth / 7-day purge risk, not actionability.
+ */
+export async function countActionablePendingWork(store) {
+    if (!store.isAvailable())
+        return 0;
+    const rows = await store.queryFirst(`SELECT work_type, count() AS n FROM pending_work
+       WHERE status = "pending" AND (active = true OR active IS NONE)
+       GROUP BY work_type`);
+    if (rows.length === 0)
+        return 0;
+    // Probe each global-eligibility condition at most once per call.
+    let causalEligible = null;
+    let soulEvolveEligible = null;
+    let soulGenReady = null;
+    let total = 0;
+    for (const r of rows) {
+        const n = r.n ?? 0;
+        switch (r.work_type) {
+            case "coalesced_extraction":
+                // Content-gated at enqueue (userTurnCount >= 2); the blank-transcript
+                // guard in buildWorkPayload is a rare edge we accept counting.
+                total += n;
+                break;
+            case "causal_graduate":
+                if (causalEligible === null)
+                    causalEligible = await hasEligibleCausalChains(store);
+                if (causalEligible)
+                    total += n;
+                break;
+            case "soul_generate":
+                if (soulGenReady === null)
+                    soulGenReady = await checkGraduation(store).then(g => g.ready).catch(() => false);
+                if (soulGenReady)
+                    total += n;
+                break;
+            case "soul_evolve":
+                if (soulEvolveEligible === null)
+                    soulEvolveEligible = await hasNewSoulExperience(store);
+                if (soulEvolveEligible)
+                    total += n;
+                break;
+            default:
+                total += n; // unknown work type — surface it rather than hide it
+        }
+    }
+    return total;
+}
+/** ≥1 ungraduated chain_type with ≥3 high-confidence successful chains.
+ *  Mirrors buildWorkPayload case "causal_graduate". */
+async function hasEligibleCausalChains(store) {
+    try {
+        const groups = await store.queryFirst(`SELECT chain_type, count() AS cnt FROM causal_chain
+         WHERE success = true AND confidence >= 0.7 AND graduated_at IS NONE
+         GROUP BY chain_type`);
+        return groups.some(g => (g.cnt ?? 0) >= 3);
+    }
+    catch {
+        return false;
+    }
+}
+/** Soul exists AND there is new experience (reflection/causal_chain/monologue)
+ *  since soul.updated_at. Mirrors buildWorkPayload case "soul_evolve". */
+async function hasNewSoulExperience(store) {
+    try {
+        const soul = await getSoul(store);
+        if (!soul)
+            return false;
+        const since = soul.updated_at;
+        const [r, c, m] = await Promise.all([
+            store.queryFirst(`SELECT count() AS n FROM reflection WHERE created_at > $since GROUP ALL`, { since }).catch(() => []),
+            store.queryFirst(`SELECT count() AS n FROM causal_chain WHERE created_at > $since GROUP ALL`, { since }).catch(() => []),
+            store.queryFirst(`SELECT count() AS n FROM monologue WHERE timestamp > $since GROUP ALL`, { since }).catch(() => []),
+        ]);
+        return (r[0]?.n ?? 0) + (c[0]?.n ?? 0) + (m[0]?.n ?? 0) > 0;
+    }
+    catch {
+        return false;
+    }
+}
 export async function handleFetchPendingWork(state, _session, _args) {
     const { store } = state;
     if (!store.isAvailable()) {
@@ -150,6 +246,7 @@ export async function handleFetchPendingWork(state, _session, _args) {
                UPDATE ${row.id} SET
                  active = false,
                  archived_at = time::now(),
+                 completed_at = time::now(),
                  archive_reason = "stale_recovery_sibling_won"
              ELSE
                UPDATE ${row.id} SET status = "pending"
@@ -248,6 +345,7 @@ async function markTerminal(state, workId, sessionId, workType, status) {
        UPDATE ${workId} SET
          active = false,
          archived_at = time::now(),
+         completed_at = time::now(),
          archive_reason = "terminal_sibling_canonical"
      ELSE
        UPDATE ${workId} SET status = $st, completed_at = time::now()

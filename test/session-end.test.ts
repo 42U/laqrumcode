@@ -91,6 +91,10 @@ describe("handleSessionEnd — triggerDrainCheck ordering (Wave 2 Fix #2)", () =
       clearSessionClaim,
       queryExec,
       queryFirst: vi.fn(async () => []),
+      // Enqueue dedup gate (2026-06-18): false → no existing pending row, so
+      // the causal_graduate / soul_* enqueues proceed and these ordering tests
+      // see the queryExec calls they expect.
+      hasPendingWorkOfType: vi.fn(async () => false),
     } as unknown as GlobalPluginState["store"];
 
     const state = {

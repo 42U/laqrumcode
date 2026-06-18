@@ -95,34 +95,50 @@ export async function handleSessionEnd(state, payload) {
             },
         }));
     }
-    // Causal chain graduation. The per-session unique index keeps this to ≤1 per
-    // session; the v0.8.0 graduation watermark (graduated_at on causal_chain)
-    // makes any cross-session duplicates harmless — each fetches no ungraduated
-    // chains and self-completes empty. We deliberately do NOT globally coalesce
-    // here: a single stuck `processing` row would then starve ALL future
-    // graduation (observed twice: pending_work:xz4cpp8..., :3w9rh8...).
-    queueOps.push(store.queryExec(`CREATE pending_work CONTENT $data`, {
-        data: {
-            work_type: "causal_graduate",
-            session_id: session.sessionId,
-            surreal_session_id: session.surrealSessionId,
-            task_id: session.taskId,
-            project_id: session.projectId,
-            priority: 7,
-        },
-    }));
-    // Soul graduation or evolution
+    // Causal chain graduation + soul graduation/evolution are DEDUP-GATED
+    // (2026-06-18). Their builders run GLOBAL eligibility queries (causal_graduate
+    // scans all ungraduated chains; soul_* scans all experience since the last
+    // soul update), so ONE pending row of each type drains ALL eligible work.
+    // The old code enqueued one per session unconditionally — N sessions without
+    // an intervening drain piled up 2N rows that all self-complete empty, which
+    // is what inflated the "DRAIN NOW, N items" banner into a recurring empty
+    // drain. We now skip the enqueue when a pending+active row of that type
+    // already exists.
+    //
+    // We check `pending` ONLY (not `processing`): a stuck processing row is
+    // recovered by the 10-min stale-recovery in handleFetchPendingWork, so this
+    // gate cannot reintroduce the graduation-starvation the old comment warned a
+    // permanent global-coalesce would cause. Eligibility is deliberately NOT
+    // checked here — causal_chain/reflection/monologue for THIS session are
+    // produced by the later extraction drain, not yet present at session-end, so
+    // an eligibility gate would always miss and starve graduation. The builders
+    // re-check eligibility at drain time and self-complete if there's nothing.
+    if (!(await store.hasPendingWorkOfType("causal_graduate"))) {
+        queueOps.push(store.queryExec(`CREATE pending_work CONTENT $data`, {
+            data: {
+                work_type: "causal_graduate",
+                session_id: session.sessionId,
+                surreal_session_id: session.surrealSessionId,
+                task_id: session.taskId,
+                project_id: session.projectId,
+                priority: 7,
+            },
+        }));
+    }
     const soulExists = await hasSoul(store).catch(() => false);
-    queueOps.push(store.queryExec(`CREATE pending_work CONTENT $data`, {
-        data: {
-            work_type: soulExists ? "soul_evolve" : "soul_generate",
-            session_id: session.sessionId,
-            surreal_session_id: session.surrealSessionId,
-            task_id: session.taskId,
-            project_id: session.projectId,
-            priority: 9,
-        },
-    }));
+    const soulWorkType = soulExists ? "soul_evolve" : "soul_generate";
+    if (!(await store.hasPendingWorkOfType(soulWorkType))) {
+        queueOps.push(store.queryExec(`CREATE pending_work CONTENT $data`, {
+            data: {
+                work_type: soulWorkType,
+                session_id: session.sessionId,
+                surreal_session_id: session.surrealSessionId,
+                task_id: session.taskId,
+                project_id: session.projectId,
+                priority: 9,
+            },
+        }));
+    }
     const results = await Promise.allSettled(queueOps);
     const failures = results.filter(r => r.status === "rejected");
     for (const f of failures) {

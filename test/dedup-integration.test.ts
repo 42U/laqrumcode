@@ -34,7 +34,7 @@
  * Skip with: `SKIP_INTEGRATION=1 npm test -- --run dedup-integration`
  */
 
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
 import { SurrealStore } from "../src/engine/surreal.js";
 import { GlobalPluginState, SessionState } from "../src/engine/state.js";
 import { handleSessionEnd } from "../src/hook-handlers/session-end.js";
@@ -112,6 +112,17 @@ afterAll(async () => {
   } catch { /* ok if already gone */ }
   try { await store.close(); } catch { /* ok */ }
 }, 15_000);
+
+// The enqueue dedup gate (2026-06-18) keys off pending+active rows across ALL
+// sessions, not just the case's own kc_session_id. Because every case shares
+// one per-file namespace, a graduation row left by an earlier case would make
+// a later case's enqueue correctly skip (→ 0 rows). Clear the queue before
+// each case so the "racing enqueues produce exactly one set" invariant is
+// exercised from an empty global queue — which is what these cases intend.
+beforeEach(async () => {
+  if (SKIP || !store?.isAvailable()) return;
+  await store.queryExec(`DELETE pending_work`).catch(() => { /* table may not exist yet */ });
+});
 
 function itDb(name: string, fn: () => Promise<void>, timeout = 30_000) {
   it(name, async () => {

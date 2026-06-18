@@ -18,6 +18,7 @@ import { log } from "../engine/log.js";
 import { assertRecordId } from "../engine/surreal.js";
 import { runBootstrapMaintenance } from "../engine/maintenance.js";
 import { checkStageTransition } from "../engine/soul.js";
+import { countActionablePendingWork } from "../tools/pending-work.js";
 export async function handleSessionStart(state, payload) {
     const sessionId = payload.session_id ?? "default";
     const session = state.getOrCreateSession(sessionId, sessionId);
@@ -161,12 +162,15 @@ export async function handleSessionStart(state, payload) {
     let pendingNote = null;
     if (store.isAvailable()) {
         try {
-            const rows = await store.queryFirst(
-            // W2-04: active filter matches fetch_pending_work — without it this
-            // banner fired on soft-archived forensic rows and instructed the agent
-            // to spawn an extractor that fetches nothing (phantom-drain churn).
-            `SELECT count() AS count FROM pending_work WHERE status = "pending" AND (active = true OR active IS NONE) GROUP ALL`);
-            const count = rows[0]?.count ?? 0;
+            // Actionable count, not raw queue depth. W2-04 added the active filter so
+            // soft-archived rows stopped triggering phantom drains; this is the next
+            // layer (2026-06-18): session-end ALWAYS enqueues causal_graduate +
+            // soul_evolve regardless of eligibility, and those self-complete empty
+            // when drained. countActionablePendingWork runs the builders' own global
+            // eligibility probes so the banner only fires when a drain would yield
+            // real knowledge — fixing the recurring "DRAIN NOW, N items → empty
+            // drain" report.
+            const count = await countActionablePendingWork(store);
             if (count >= 1) {
                 pendingNote = `[PENDING WORK — DRAIN NOW]\n${count} background item${count === 1 ? "" : "s"} waiting. Items older than 7 days are silently purged, so don't postpone. Spawn a kongcode:memory-extractor subagent (opus, run_in_background=true) and have it loop fetch_pending_work → commit_work_results until empty. Light types (reflection, handoff_note) can run inline.`;
             }

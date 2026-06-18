@@ -14,6 +14,7 @@ import { swallow } from "../engine/errors.js";
 import { stripStructuralTags } from "../engine/sanitize.js";
 import { log } from "../engine/log.js";
 import { detectAnomalies, formatAnomalyBlock } from "../engine/observability.js";
+import { countActionablePendingWork } from "../tools/pending-work.js";
 /** Wrap raw kongcode context in a system-reminder block. Claude Code's harness
  * gives system-reminder blocks higher attention weight than plain injected
  * text — empirically the plain-text injection was hitting ~10% retrieval
@@ -127,19 +128,21 @@ export async function handleUserPromptSubmit(state, payload) {
     const anomalyPromise = state.store.isAvailable()
         ? detectAnomalies(state.store, state.observabilityCooldown).catch(() => [])
         : Promise.resolve([]);
+    // Actionable count (eligibility-aware), not raw queue depth: skips
+    // causal_graduate/soul_evolve rows that would self-complete empty so this
+    // banner stops firing for queues that drain to nothing. See
+    // countActionablePendingWork (2026-06-18 empty-drain fix).
     const pendingPromise = (session.userTurnCount <= 1 && state.store.isAvailable())
-        // W2-04: active filter matches fetch_pending_work (phantom-count fix).
-        ? state.store.queryFirst(`SELECT count() AS count FROM pending_work WHERE status = "pending" AND (active = true OR active IS NONE) GROUP ALL`).catch(() => [])
-        : Promise.resolve([]);
+        ? countActionablePendingWork(state.store).catch(() => 0)
+        : Promise.resolve(0);
     // Run full context retrieval pipeline (concurrent with anomaly + pending)
     const contextString = await assembleContextString(state, session, userPrompt);
     // Await the prefetched anomaly + pending results
-    const [anomalyFlags, pendingRows] = await Promise.all([anomalyPromise, pendingPromise]);
+    const [anomalyFlags, pendingCount] = await Promise.all([anomalyPromise, pendingPromise]);
     let anomalyBlock = "";
     if (anomalyFlags.length > 0)
         anomalyBlock = formatAnomalyBlock(anomalyFlags);
     let pendingWorkMessage = "";
-    const pendingCount = pendingRows[0]?.count ?? 0;
     if (pendingCount > 0) {
         pendingWorkMessage = `\n\n<kongcode_pending_work>
 KongCode has ${pendingCount} pending memory operation${pendingCount > 1 ? "s" : ""} from previous sessions (extraction, reflection, skills, soul).

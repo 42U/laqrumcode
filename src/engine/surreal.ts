@@ -2126,6 +2126,28 @@ export class SurrealStore {
   }
 
   /**
+   * True if a pending+active pending_work row of `workType` already exists in
+   * ANY session — the enqueue gate for session-end + deferred-cleanup.
+   *
+   * causal_graduate / soul_* builders run GLOBAL eligibility queries, so ONE
+   * pending row of a type drains ALL eligible work; enqueuing one per session
+   * just piles up self-completing empties that inflate the DRAIN-NOW banner
+   * (the recurring empty-drain report, 2026-06-18). Checks `pending` ONLY (not
+   * `processing`): a stuck processing row is recovered by the 10-min stale-
+   * recovery in fetch_pending_work, so this gate cannot starve graduation.
+   */
+  async hasPendingWorkOfType(workType: string): Promise<boolean> {
+    try {
+      const rows = await this.queryFirst<{ n: number }>(
+        `SELECT count() AS n FROM pending_work
+           WHERE work_type = $wt AND status = "pending" AND (active = true OR active IS NONE) GROUP ALL`,
+        { wt: workType },
+      );
+      return (rows[0]?.n ?? 0) > 0;
+    } catch { return false; }
+  }
+
+  /**
    * Drop pending_work rows older than 7 days, regardless of status.
    *
    * The queue is consumer-pull (subagents call fetch_pending_work). Without
