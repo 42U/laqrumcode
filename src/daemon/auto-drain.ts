@@ -241,6 +241,11 @@ interface DrainLockMarker {
  *  20m is well beyond any plausible legit drain. */
 const DRAIN_LOCK_STALE_AGE_MS = 20 * 60 * 1000;
 
+// H4: the in-flight drain's lock-release closure, exposed to shutdown so a
+// daemon idle-reap during a child's (long) extraction releases auto-drain.pid
+// instead of leaking it. null when no drain is running.
+let activeDrainRelease: (() => void) | null = null;
+
 /** Check whether a PID's /proc cmdline looks like a plausible drainer.
  *  Returns true → looks like claude/node (likely real drainer)
  *  Returns false → confirmed different process (e.g. shell, browser)
@@ -754,6 +759,7 @@ async function spawnHeadlessDrainer(
     const releaseOnce = () => {
       if (released) return;
       released = true;
+      activeDrainRelease = null; // H4: this drain is no longer the shutdown hook
       // Verify the lock still records our daemon's identity before unlinking
       // — protects against a fresh drainer that stole the lock (e.g. after a
       // very long-running child triggered the stale-age branch).
@@ -768,6 +774,13 @@ async function spawnHeadlessDrainer(
         try { closeSync(lockFd); } catch {}
       }
     };
+    // H4: register with the shutdown path. The child is detached + unref'd and
+    // can outlive the daemon; if the daemon idle-reaps (default ~6s) while the
+    // child is mid-extraction (between MCP calls → daemon looks idle),
+    // child.on("exit") never fires here, so the lock would leak and the next
+    // daemon would refuse to drain for up to DRAIN_LOCK_STALE_AGE_MS (20 min).
+    // stopDrainScheduler() (called from gracefulCleanup) now invokes this.
+    activeDrainRelease = releaseOnce;
     child.on("exit", (code) => {
       log.info(`[auto-drain] extractor pid=${child.pid} exited with code=${code}`);
       releaseOnce();
@@ -865,6 +878,11 @@ export function stopDrainScheduler(): void {
     schedulerTimer = null;
   }
   schedulerStarted = false;
+  // H4: release any in-flight drain lock so a shutdown mid-drain doesn't leave
+  // auto-drain.pid pointing at the orphaned child (which blocks the next
+  // daemon's drains for up to 20 min). Safe to overlap — the C1 commit-CAS
+  // discards any double-write if the orphaned child later commits.
+  try { activeDrainRelease?.(); } catch { /* best-effort on shutdown */ }
 }
 
 /** Event-driven trigger — call from SessionEnd handler after items get queued. */

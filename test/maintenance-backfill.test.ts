@@ -38,6 +38,7 @@ describe("backfillSessionTurnCounts (via runBootstrapMaintenance)", () => {
         garbageCollectMemories: async () => {},
         garbageCollectConcepts: async () => {},
         purgeStalePendingWork: async () => {},
+        purgeOldRetrievalOutcomes: async () => 0,
       } as any,
       embeddings: { embed: async () => [] } as any,
       config: {
@@ -87,6 +88,7 @@ describe("backfillSessionTurnCounts (via runBootstrapMaintenance)", () => {
         garbageCollectMemories: async () => {},
         garbageCollectConcepts: async () => {},
         purgeStalePendingWork: async () => {},
+        purgeOldRetrievalOutcomes: async () => 0,
       } as any,
       embeddings: { embed: async () => [] } as any,
       config: { thresholds: { acanTrainingThreshold: 1 } } as any,
@@ -124,6 +126,7 @@ describe("backfillSessionTurnCounts (via runBootstrapMaintenance)", () => {
         garbageCollectMemories: async () => {},
         garbageCollectConcepts: async () => {},
         purgeStalePendingWork: async () => {},
+        purgeOldRetrievalOutcomes: async () => 0,
       } as any,
       embeddings: { embed: async () => [] } as any,
       config: { thresholds: { acanTrainingThreshold: 1 } } as any,
