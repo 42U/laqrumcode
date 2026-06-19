@@ -90,7 +90,7 @@ describe("soul_generate field sanitization", () => {
     // We'll test by checking what queryExec receives
     const { handleCommitWorkResults } = await import("../src/tools/pending-work.js");
     store.queryFirst.mockImplementation(async (sql: string) => {
-      if (sql.includes("SELECT * FROM pending_work:test1")) return [item];
+      if (sql.includes("UPDATE pending_work:test1") && sql.includes("RETURN BEFORE")) return [item];
       if (sql.includes("FROM soul:kongbrain") && !sql.includes("SELECT *")) return [];
       if (sql.includes("SELECT * FROM soul:kongbrain")) return [];
       if (sql.includes("graduation_event")) return [];
@@ -148,7 +148,7 @@ describe("soul_generate field sanitization", () => {
     const item = { id: "pending_work:test2", work_type: "soul_generate", session_id: "s1" } as any;
     const { handleCommitWorkResults } = await import("../src/tools/pending-work.js");
     store.queryFirst.mockImplementation(async (sql: string) => {
-      if (sql.includes("SELECT * FROM pending_work:test2")) return [item];
+      if (sql.includes("UPDATE pending_work:test2") && sql.includes("RETURN BEFORE")) return [item];
       if (sql.includes("FROM soul:kongbrain")) return [];
       if (sql.includes("graduation_event")) return [];
       if (sql.includes("count")) return [{ count: 500 }];

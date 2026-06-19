@@ -223,9 +223,16 @@ export async function handleFetchPendingWork(state, _session, _args) {
             // picks at random. Under multi-stuck conditions that can DELETE the
             // wrong row. Stable ordering ensures the oldest stuck row is recovered
             // first, matching FIFO intuition.
-            const stuck = await store.queryFirst(`SELECT id, session_id, work_type FROM pending_work
-           WHERE status = "processing"
-             AND created_at < time::now() - 10m
+            const stuck = await store.queryFirst(
+            // M2: key the stale window off processing_started_at (when the row was
+            // CLAIMED), falling back to created_at for legacy rows — otherwise a
+            // long-but-healthy extraction created >10m ago but claimed seconds ago
+            // is wrongly reverted while the drainer is still working it (feeds the
+            // C1 double-write). Also catch the transient "committing" state so a
+            // crash between the commit-CAS and markTerminal can't wedge a row.
+            `SELECT id, session_id, work_type FROM pending_work
+           WHERE (status = "processing" OR status = "committing")
+             AND (processing_started_at ?? created_at) < time::now() - 10m
              AND (active = true OR active IS NONE)
            ORDER BY created_at ASC`);
             for (const row of stuck) {
@@ -291,7 +298,7 @@ export async function handleFetchPendingWork(state, _session, _args) {
                 assertRecordId(claimedId);
                 // Direct interpolation safe: assertRecordId validates format above.
                 // WHERE status="pending" ensures only the first claimer wins the race.
-                const items = await store.queryFirst(`UPDATE ${claimedId} SET status = "processing" WHERE status = "pending" RETURN AFTER`);
+                const items = await store.queryFirst(`UPDATE ${claimedId} SET status = "processing", processing_started_at = time::now() WHERE status = "pending" RETURN AFTER`);
                 if (items.length > 0) {
                     item = items[0];
                     break;
@@ -512,12 +519,23 @@ export async function handleCommitWorkResults(state, _session, args) {
         return text("Error: work_id is required");
     if (!store.isAvailable())
         return text("Error: database unavailable");
-    // Look up the work item to know what type it is
     assertRecordId(workId);
-    const items = await store.queryFirst(`SELECT * FROM ${workId}`);
-    if (items.length === 0)
-        return text(`Error: work item not found: ${workId}`);
-    const item = items[0];
+    // C1: atomically claim the commit. Only one caller can flip
+    // processing→committing; if stale-recovery reverted this row and another
+    // drainer re-claimed it (or it was already committed), the CAS matches no row
+    // and we DISCARD the extraction rather than double-write knowledge / double-
+    // apply a (non-idempotent) soul revision. RETURN BEFORE also yields the item.
+    const claimed = await store.queryFirst(`UPDATE ${workId} SET status = "committing" WHERE status = "processing" RETURN BEFORE`);
+    if (claimed.length === 0) {
+        // Row is not in "processing": already committed, reverted by stale-recovery
+        // and reclaimed, or unknown id. Discard to avoid a double-write.
+        return text(JSON.stringify({
+            success: false,
+            skipped: true,
+            message: `work item ${workId} is no longer in 'processing' (already committed or reclaimed); extraction discarded to avoid a double-write`,
+        }));
+    }
+    const item = claimed[0];
     try {
         const outcome = await commitResults(item, results, state);
         // Mark completed. Uses markTerminal so a sibling completed row for the
