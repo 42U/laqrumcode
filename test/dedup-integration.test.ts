@@ -40,7 +40,7 @@ import { GlobalPluginState, SessionState } from "../src/engine/state.js";
 import { handleSessionEnd } from "../src/hook-handlers/session-end.js";
 import { runDeferredCleanup } from "../src/engine/deferred-cleanup.js";
 import type { EmbeddingService } from "../src/engine/embeddings.js";
-import type { KongBrainConfig } from "../src/engine/config.js";
+import type { MemoryConfig } from "../src/engine/config.js";
 
 const SKIP = process.env.SKIP_INTEGRATION === "1";
 
@@ -61,7 +61,7 @@ let state: GlobalPluginState | undefined;
 // so a null-fronted stub is enough. The only fields handleSessionEnd reads
 // off `config` are paths.cacheDir and thresholds — both via auto-drain, which
 // we've disabled via env var above.
-function makeMinimalConfig(): KongBrainConfig {
+function makeMinimalConfig(): MemoryConfig {
   return {
     surreal: {
       url: SURREAL_URL,
@@ -79,7 +79,7 @@ function makeMinimalConfig(): KongBrainConfig {
     embedding: { modelPath: "/dev/null", dimension: 1024 } as any,
     thresholds: { midSessionCleanupThreshold: 25_000 } as any,
     paths: { cacheDir: "/tmp", dataDir: "/tmp" } as any,
-  } as unknown as KongBrainConfig;
+  } as unknown as MemoryConfig;
 }
 
 const fakeEmbeddings = {} as unknown as EmbeddingService;

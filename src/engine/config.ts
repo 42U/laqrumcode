@@ -48,7 +48,7 @@ export interface PathsConfig {
   surrealBinPath: string | null;
 }
 
-export interface KongCodeConfig {
+export interface MemoryConfig {
   surreal: SurrealConfig;
   embedding: EmbeddingConfig;
   reranker: RerankerConfig;
@@ -60,7 +60,7 @@ export interface KongCodeConfig {
  * Parse config from environment variables and optional JSON config,
  * with sensible defaults.
  */
-export function parsePluginConfig(raw?: Record<string, unknown>): KongCodeConfig {
+export function parsePluginConfig(raw?: Record<string, unknown>): MemoryConfig {
   const surreal = (raw?.surreal ?? {}) as Record<string, unknown>;
   const embedding = (raw?.embedding ?? {}) as Record<string, unknown>;
   const thresholds = (raw?.thresholds ?? {}) as Record<string, unknown>;

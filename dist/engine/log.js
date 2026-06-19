@@ -2,7 +2,7 @@ import { inspect } from "node:util";
 const LEVELS = { error: 0, warn: 1, info: 2, debug: 3 };
 const currentLevel = process.env.KONGCODE_LOG_LEVEL ?? "warn";
 if (currentLevel === "debug") {
-    console.warn("[kongcode] KONGCODE_LOG_LEVEL=debug — logs may contain user prompts and query data. Do not use in shared environments.");
+    console.warn("[agent-memory] KONGCODE_LOG_LEVEL=debug — logs may contain user prompts and query data. Do not use in shared environments.");
 }
 /**
  * Default console depth is 2, which collapses nested `.cause.cause` chains to
@@ -40,11 +40,11 @@ function expandErrors(args) {
 }
 export const log = {
     error: (...args) => { if (LEVELS[currentLevel] >= LEVELS.error)
-        console.error("[kongcode]", ...expandErrors(args)); },
+        console.error("[agent-memory]", ...expandErrors(args)); },
     warn: (...args) => { if (LEVELS[currentLevel] >= LEVELS.warn)
-        console.warn("[kongcode]", ...expandErrors(args)); },
+        console.warn("[agent-memory]", ...expandErrors(args)); },
     info: (...args) => { if (LEVELS[currentLevel] >= LEVELS.info)
-        console.info("[kongcode]", ...expandErrors(args)); },
+        console.info("[agent-memory]", ...expandErrors(args)); },
     debug: (...args) => { if (LEVELS[currentLevel] >= LEVELS.debug)
-        console.debug("[kongcode]", ...expandErrors(args)); },
+        console.debug("[agent-memory]", ...expandErrors(args)); },
 };

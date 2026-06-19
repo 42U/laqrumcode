@@ -25,7 +25,7 @@
 import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import { SurrealStore } from "../src/engine/surreal.js";
 import { GlobalPluginState, SessionState } from "../src/engine/state.js";
-import type { KongBrainConfig } from "../src/engine/config.js";
+import type { MemoryConfig } from "../src/engine/config.js";
 import type { EmbeddingService } from "../src/engine/embeddings.js";
 import { createCoreMemoryToolDef } from "../src/engine/tools/core-memory.js";
 import { seedIdentity } from "../src/engine/identity.js";
@@ -274,7 +274,7 @@ describe("SurrealStore.claimSessionForCleanup", () => {
 function makeState(): GlobalPluginState {
   const fakeConfig = {
     thresholds: { midSessionCleanupThreshold: 25_000 },
-  } as unknown as KongBrainConfig;
+  } as unknown as MemoryConfig;
   const fakeStore = { isAvailable: () => false } as any;
   const fakeEmbeddings = { isAvailable: () => false, dispose: async () => {} } as any;
   return new GlobalPluginState(fakeConfig, fakeStore, fakeEmbeddings);

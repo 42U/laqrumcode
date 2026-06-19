@@ -40,7 +40,7 @@ export interface PathsConfig {
     /** Path to the SurrealDB binary. Default <cacheDir>/surreal-<version>/<binaryName>. */
     surrealBinPath: string | null;
 }
-export interface KongCodeConfig {
+export interface MemoryConfig {
     surreal: SurrealConfig;
     embedding: EmbeddingConfig;
     reranker: RerankerConfig;
@@ -51,4 +51,4 @@ export interface KongCodeConfig {
  * Parse config from environment variables and optional JSON config,
  * with sensible defaults.
  */
-export declare function parsePluginConfig(raw?: Record<string, unknown>): KongCodeConfig;
+export declare function parsePluginConfig(raw?: Record<string, unknown>): MemoryConfig;

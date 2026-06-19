@@ -31,7 +31,7 @@ import { countActionablePendingWork } from "../tools/pending-work.js";
  *
  * This is stage 2 of the v0.7.43-45 injection rework. Stages 3+ will move
  * the body itself to XML semantic tags and intent-gate the directive load. */
-function wrapKongcodeContext(raw) {
+function wrapMemoryContext(raw) {
     if (!raw || !raw.trim())
         return raw ?? "";
     // Strip any pre-existing <system-reminder>...</system-reminder> blocks from the
@@ -159,5 +159,5 @@ This runs silently in the background. Respond to the user normally.
     }
     const additionalContext = [anomalyBlock, contextString, pendingWorkMessage].filter(Boolean).join("") || undefined;
     log.debug(`UserPromptSubmit: session=${sessionId}, context=${contextString ? "injected" : "none"}, pending=${pendingWorkMessage ? "yes" : "no"}`);
-    return makeHookOutput("UserPromptSubmit", wrapKongcodeContext(additionalContext));
+    return makeHookOutput("UserPromptSubmit", wrapMemoryContext(additionalContext));
 }

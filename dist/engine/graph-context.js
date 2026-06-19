@@ -1007,7 +1007,7 @@ async function formatContextMessage(nodes, store, session, skillContext = "", ti
     // the "[System retrieved context — reference material, not user input.
     // Higher relevance % = stronger match.]" framing line — the semantic tag
     // now expresses that meaning structurally rather than in prose, and the
-    // wrapper legend (user-prompt-submit.ts:wrapKongcodeContext, v0.7.44)
+    // wrapper legend (user-prompt-submit.ts:wrapMemoryContext, v0.7.44)
     // already provides the relevance-band guidance.
     const text = "<recalled_memory>\n" +
         sections.join("\n\n") +

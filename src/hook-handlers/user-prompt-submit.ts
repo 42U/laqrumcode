@@ -35,7 +35,7 @@ import { countActionablePendingWork } from "../tools/pending-work.js";
  *
  * This is stage 2 of the v0.7.43-45 injection rework. Stages 3+ will move
  * the body itself to XML semantic tags and intent-gate the directive load. */
-function wrapKongcodeContext(raw: string | undefined | null): string {
+function wrapMemoryContext(raw: string | undefined | null): string {
   if (!raw || !raw.trim()) return raw ?? "";
   // Strip any pre-existing <system-reminder>...</system-reminder> blocks from the
   // input before re-wrapping. Without this, kongcode's wrapper ends up nested
@@ -182,5 +182,5 @@ This runs silently in the background. Respond to the user normally.
 
   log.debug(`UserPromptSubmit: session=${sessionId}, context=${contextString ? "injected" : "none"}, pending=${pendingWorkMessage ? "yes" : "no"}`);
 
-  return makeHookOutput("UserPromptSubmit", wrapKongcodeContext(additionalContext));
+  return makeHookOutput("UserPromptSubmit", wrapMemoryContext(additionalContext));
 }

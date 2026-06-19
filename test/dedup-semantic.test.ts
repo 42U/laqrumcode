@@ -25,7 +25,7 @@ import { SurrealStore } from "../src/engine/surreal.js";
 import { commitKnowledge } from "../src/engine/commit.js";
 import { findRelevantSkills, smoothedSkillUtility, shouldRecordSkillOutcome, SKILL_ENGAGEMENT_MIN } from "../src/engine/skills.js";
 import type { EmbeddingService } from "../src/engine/embeddings.js";
-import type { KongBrainConfig } from "../src/engine/config.js";
+import type { MemoryConfig } from "../src/engine/config.js";
 
 const SKIP = process.env.SKIP_INTEGRATION === "1";
 process.env.KONGCODE_AUTO_DRAIN = "0";
@@ -42,7 +42,7 @@ let store: SurrealStore | undefined;
 // embedding is ever needed, and dedup assertions don't depend on concept edges.
 const fakeEmbeddings = { isAvailable: () => false } as unknown as EmbeddingService;
 
-function makeConfig(): KongBrainConfig {
+function makeConfig(): MemoryConfig {
   return {
     surreal: {
       url: SURREAL_URL,
@@ -54,7 +54,7 @@ function makeConfig(): KongBrainConfig {
     embedding: { modelPath: "/dev/null", dimension: 1024 } as any,
     thresholds: { midSessionCleanupThreshold: 25_000 } as any,
     paths: { cacheDir: "/tmp", dataDir: "/tmp" } as any,
-  } as unknown as KongBrainConfig;
+  } as unknown as MemoryConfig;
 }
 
 const DIM = 1024;

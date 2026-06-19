@@ -6,7 +6,7 @@ type Level = keyof typeof LEVELS;
 const currentLevel: Level = (process.env.KONGCODE_LOG_LEVEL as Level) ?? "warn";
 
 if (currentLevel === "debug") {
-  console.warn("[kongcode] KONGCODE_LOG_LEVEL=debug — logs may contain user prompts and query data. Do not use in shared environments.");
+  console.warn("[agent-memory] KONGCODE_LOG_LEVEL=debug — logs may contain user prompts and query data. Do not use in shared environments.");
 }
 
 /**
@@ -43,8 +43,8 @@ function expandErrors(args: unknown[]): unknown[] {
 }
 
 export const log = {
-  error: (...args: unknown[]) => { if (LEVELS[currentLevel] >= LEVELS.error) console.error("[kongcode]", ...expandErrors(args)); },
-  warn: (...args: unknown[]) => { if (LEVELS[currentLevel] >= LEVELS.warn) console.warn("[kongcode]", ...expandErrors(args)); },
-  info: (...args: unknown[]) => { if (LEVELS[currentLevel] >= LEVELS.info) console.info("[kongcode]", ...expandErrors(args)); },
-  debug: (...args: unknown[]) => { if (LEVELS[currentLevel] >= LEVELS.debug) console.debug("[kongcode]", ...expandErrors(args)); },
+  error: (...args: unknown[]) => { if (LEVELS[currentLevel] >= LEVELS.error) console.error("[agent-memory]", ...expandErrors(args)); },
+  warn: (...args: unknown[]) => { if (LEVELS[currentLevel] >= LEVELS.warn) console.warn("[agent-memory]", ...expandErrors(args)); },
+  info: (...args: unknown[]) => { if (LEVELS[currentLevel] >= LEVELS.info) console.info("[agent-memory]", ...expandErrors(args)); },
+  debug: (...args: unknown[]) => { if (LEVELS[currentLevel] >= LEVELS.debug) console.debug("[agent-memory]", ...expandErrors(args)); },
 };

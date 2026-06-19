@@ -1,4 +1,4 @@
-import type { KongCodeConfig } from "./config.js";
+import type { MemoryConfig } from "./config.js";
 import type { SurrealStore } from "./surreal.js";
 import type { EmbeddingService } from "./embeddings.js";
 import type { AdaptiveConfig } from "./orchestrator.js";
@@ -172,7 +172,7 @@ export type SessionRemovedCallback = (
 
 /** Singleton shared state: config, SurrealDB store, embedding service, and session map. */
 export class GlobalPluginState {
-  readonly config: KongCodeConfig;
+  readonly config: MemoryConfig;
   readonly store: SurrealStore;
   readonly embeddings: EmbeddingService;
   workspaceDir?: string;
@@ -210,7 +210,7 @@ export class GlobalPluginState {
   private readonly sessionRemovedCallbacks = new Set<SessionRemovedCallback>();
 
   constructor(
-    config: KongCodeConfig,
+    config: MemoryConfig,
     store: SurrealStore,
     embeddings: EmbeddingService,
   ) {
