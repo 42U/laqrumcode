@@ -4,7 +4,7 @@ All notable changes to KongCode are documented here. The 0.7.x series introduced
 
 ## [Unreleased]
 
-## [0.7.128] — 2026-06-19
+## [0.7.129] — 2026-06-19
 
 ### Added — `update_skill` MCP tool
 - New `update_skill` tool revises an EXISTING DB-resident skill — the counterpart
@@ -21,12 +21,14 @@ All notable changes to KongCode are documented here. The 0.7.x series introduced
   re-embed, NONE-fallback, not-found, no-field, and short-body paths.
 
 ### Fixed — CI timing robustness
-- Raised the `mcp-handshake` test's latency ceiling (3000ms → 8000ms) so a cold
-  `node dist/mcp-server.js` start on the loaded 4-job CI matrix (observed 3127ms)
-  no longer trips it; the test still asserts the ordering guarantee (initialize
-  answered before init() completes), only the "didn't hang" guard moved. Cut the
-  `update-skill` test's SurrealDB-absent connect ceiling (15s → 8s) to reduce
-  worker-blocking contention. (v0.7.127's CI tripped the old ceiling.)
+- v0.7.127/0.7.128's CI failed because the new real-SurrealStore `update-skill`
+  test blocked a vitest worker for seconds on a SurrealDB-absent connect (CI has
+  no SurrealDB), starving the concurrent `mcp-handshake` subprocess spawn and
+  tripping its latency ceiling. Converted that test to a mock-based unit test
+  (no connect, no heavy module load) so it adds no CI contention, and raised the
+  `mcp-handshake` ceiling 3000ms → 6000ms (~2x the observed cold start) as
+  headroom. The ordering assertion (initialize answered before init() completes)
+  is unchanged.
 
 ## [0.7.126] — 2026-06-18
 

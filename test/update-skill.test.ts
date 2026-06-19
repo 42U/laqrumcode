@@ -1,181 +1,117 @@
 /**
- * update_skill behavior test.
+ * update_skill handler unit test (mock store + mock embeddings).
  *
- * Proves the tool patches an existing skill AND keeps the vector index in sync
- * — the gap that a raw `UPDATE skill SET body=...` left open (stale embedding
- * matching the old body). Uses a real SurrealStore in a throwaway namespace
- * plus a deterministic fake embedding service so a body change produces a
- * measurably different vector.
+ * Verifies the handler builds the correct UPDATE (patched fields + body_len)
+ * and ALWAYS keeps the vector index in sync — re-embedding from
+ * `${name}: ${description}\n\n${body}`, or clearing to `embedding = NONE` when
+ * the embedding service is down so the maintenance backfill recomputes it
+ * (never a stale vector). Mock-based by design: a real-SurrealStore variant
+ * was dropped because its connect-timeout beforeAll blocked a CI worker long
+ * enough to starve the concurrent mcp-handshake subprocess spawn.
  */
 
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { SurrealStore } from "../src/engine/surreal.js";
-import { GlobalPluginState } from "../src/engine/state.js";
+import { describe, it, expect, vi } from "vitest";
 import { handleUpdateSkill } from "../src/tools/update-skill.js";
-import type { EmbeddingService } from "../src/engine/embeddings.js";
-import type { KongBrainConfig } from "../src/engine/config.js";
+import type { GlobalPluginState, SessionState } from "../src/engine/state.js";
 
-const SKIP = process.env.SKIP_INTEGRATION === "1";
-const TEST_NS = `kctest_updskill_${Date.now()}_${Math.floor(Math.random() * 1e6)}`;
-const TEST_DB = "updskill";
-const SURREAL_URL = process.env.SURREAL_URL ?? "ws://127.0.0.1:8000/rpc";
-const SURREAL_USER = process.env.SURREAL_USER ?? "root";
-const SURREAL_PASS = process.env.SURREAL_PASS ?? "root";
+const sess = { sessionId: "test" } as unknown as SessionState;
 
-let store: SurrealStore | undefined;
-let state: GlobalPluginState | undefined;
+type Existing = { id: string; description: string; body: string } | undefined;
 
-// Deterministic embeddings: vector varies by text so a body change yields a
-// different vector (lets us assert the row was actually re-embedded).
-// 1024-dim to satisfy the skill table's HNSW vector index; content-dependent
-// so a body change yields a different vector.
-function vecFor(text: string): number[] {
-  const v = new Array(1024).fill(0);
-  for (let i = 0; i < text.length; i++) v[i % 1024] += text.charCodeAt(i) + i;
-  return v;
-}
-let embedAvailable = true;
-const fakeEmbeddings = {
-  isAvailable: () => embedAvailable,
-  embed: async (text: string) => (embedAvailable ? vecFor(text) : []),
-} as unknown as EmbeddingService;
+function makeState(opts: { existing: Existing; embedAvailable?: boolean }) {
+  const updateCalls: { sql: string; params: Record<string, unknown> }[] = [];
+  let embedArg: string | null = null;
+  const embedAvailable = opts.embedAvailable !== false;
 
-function makeConfig(): KongBrainConfig {
-  return {
-    surreal: {
-      url: SURREAL_URL,
-      get httpUrl() { return SURREAL_URL.replace("ws://", "http://").replace("wss://", "https://").replace("/rpc", ""); },
-      user: SURREAL_USER, pass: SURREAL_PASS, ns: TEST_NS, db: TEST_DB,
-    },
-    embedding: { modelPath: "/dev/null", dimension: 1024 } as any,
-    thresholds: { midSessionCleanupThreshold: 25_000 } as any,
-    paths: { cacheDir: "/tmp", dataDir: "/tmp" } as any,
-  } as unknown as KongBrainConfig;
+  const store = {
+    isAvailable: () => true,
+    queryFirst: vi.fn(async (sql: string, params: Record<string, unknown>) => {
+      if (/^\s*SELECT/i.test(sql)) return opts.existing ? [opts.existing] : [];
+      if (/^\s*UPDATE/i.test(sql)) {
+        updateCalls.push({ sql, params });
+        return [{ id: opts.existing?.id ?? "skill:x" }];
+      }
+      return [];
+    }),
+  };
+  const embeddings = {
+    isAvailable: () => embedAvailable,
+    embed: vi.fn(async (t: string) => { embedArg = t; return embedAvailable ? new Array(1024).fill(0.1) : []; }),
+  };
+  const state = { store, embeddings } as unknown as GlobalPluginState;
+  return { state, updateCalls, getEmbedArg: () => embedArg, embedFn: embeddings.embed };
 }
 
-beforeAll(async () => {
-  if (SKIP) return;
-  store = new SurrealStore(makeConfig().surreal);
-  try {
-    // 8s connect ceiling: a live SurrealDB connects sub-second locally, so this
-    // only bounds the SKIP path when SurrealDB is absent (CI). Kept short to
-    // minimize the worker-blocking / CPU-contention footprint that the
-    // mcp-handshake cold-start test is sensitive to on the loaded CI matrix.
-    await Promise.race([
-      store.initialize(),
-      new Promise<never>((_, reject) => setTimeout(() => reject(new Error("SurrealDB timed out")), 8_000)),
-    ]);
-  } catch (e) {
-    console.warn("SurrealDB unavailable, skipping update_skill test:", (e as Error).message);
-    store = undefined;
-    return;
-  }
-  state = new GlobalPluginState(makeConfig(), store, fakeEmbeddings);
-}, 30_000);
-
-afterAll(async () => {
-  if (!store) return;
-  try { await store.queryExec(`REMOVE NAMESPACE ${TEST_NS}`); } catch { /* ok */ }
-  try { await store.close(); } catch { /* ok */ }
-}, 15_000);
-
-function itDb(name: string, fn: () => Promise<void>, timeout = 30_000) {
-  it(name, async () => { if (SKIP || !store?.isAvailable() || !state) return; await fn(); }, timeout);
+function parse(res: { content: Array<{ type: "text"; text: string }> }) {
+  return res.content[0].text;
 }
 
-const sess = { sessionId: "test-update-skill" } as any;
+const EXISTING = { id: "skill:abc", description: "old description", body: "the old body content" };
 
-async function seedSkill(name: string, body: string, desc = "seed description") {
-  await store!.queryExec(
-    `CREATE skill CONTENT { name: $name, description: $desc, body: $body, body_len: $len, embedding: $emb, confidence: 1.0, active: true, source: "test" }`,
-    { name, desc, body, len: body.length, emb: vecFor(`${name}: ${desc}\n\n${body}`) },
-  );
-}
-async function getSkill(name: string): Promise<any> {
-  const r = await store!.queryFirst<any>(
-    `SELECT name, description, body, body_len, embedding, updated_at FROM skill WHERE name = $name LIMIT 1`,
-    { name },
-  );
-  return r[0];
-}
-
-describe("update_skill", () => {
-  itDb("updates body, body_len, and RE-EMBEDS (vector changes)", async () => {
-    const name = `upd-body-${Date.now()}`;
-    await seedSkill(name, "Original skill body, comfortably over twenty characters.");
-    const before = await getSkill(name);
-    const origVec = before.embedding;
-
-    const newBody = "Totally rewritten skill body, also well over twenty characters in length.";
-    const res = await handleUpdateSkill(state!, sess, { name, body: newBody });
-    const out = JSON.parse(res.content[0].text);
+describe("update_skill handler", () => {
+  it("updates body + body_len and re-embeds from name+description+body", async () => {
+    const { state, updateCalls, getEmbedArg } = makeState({ existing: { ...EXISTING } });
+    const newBody = "Totally rewritten body, well over twenty characters in length here.";
+    const out = JSON.parse(parse(await handleUpdateSkill(state, sess, { name: "my-skill", body: newBody })));
 
     expect(out.ok).toBe(true);
     expect(out.re_embedded).toBe(true);
     expect(out.fields_updated).toEqual(["body"]);
+    expect(out.body_length).toBe(newBody.length);
 
-    const after = await getSkill(name);
-    expect(after.body).toBe(newBody);
-    expect(after.body_len).toBe(newBody.length);
-    expect(after.embedding).not.toEqual(origVec); // index kept in sync
-    expect(after.updated_at).toBeTruthy();
+    // Re-embed target mirrors create_skill / the maintenance backfill exactly.
+    expect(getEmbedArg()).toBe(`my-skill: old description\n\n${newBody}`);
+    const { sql, params } = updateCalls[0];
+    expect(sql).toContain("body = $body");
+    expect(sql).toContain("body_len = $body_len");
+    expect(sql).toContain("embedding = $vec");
+    expect(sql).toContain("updated_at = time::now()");
+    expect(params.body).toBe(newBody);
+    expect(params.body_len).toBe(newBody.length);
   });
 
-  itDb("updates description and steps together", async () => {
-    const name = `upd-multi-${Date.now()}`;
-    await seedSkill(name, "Body that stays the same across this update call here.");
-    const res = await handleUpdateSkill(state!, sess, {
-      name, description: "new one-line description", steps: ["step a", "step b"],
-    });
-    const out = JSON.parse(res.content[0].text);
+  it("updates description + steps together (no body change)", async () => {
+    const { state, updateCalls, getEmbedArg } = makeState({ existing: { ...EXISTING } });
+    const out = JSON.parse(parse(await handleUpdateSkill(state, sess, {
+      name: "my-skill", description: "new desc", steps: ["a", "b"],
+    })));
     expect(out.ok).toBe(true);
     expect(out.fields_updated.sort()).toEqual(["description", "steps"]);
-
-    const after = await getSkill(name);
-    expect(after.description).toBe("new one-line description");
+    // embed target uses the NEW description and the UNCHANGED existing body.
+    expect(getEmbedArg()).toBe("my-skill: new desc\n\nthe old body content");
+    expect(updateCalls[0].sql).toContain("description = $description");
+    expect(updateCalls[0].sql).toContain("steps = $steps");
   });
 
-  itDb("errors on a skill that does not exist (does not create one)", async () => {
-    const res = await handleUpdateSkill(state!, sess, {
-      name: "definitely-no-such-skill-xyz", body: "a body that is long enough to pass the guard.",
-    });
-    expect(res.content[0].text).toMatch(/no skill named/i);
-    expect(await getSkill("definitely-no-such-skill-xyz")).toBeUndefined();
+  it("errors on a skill that does not exist (no UPDATE issued)", async () => {
+    const { state, updateCalls } = makeState({ existing: undefined });
+    const res = parse(await handleUpdateSkill(state, sess, { name: "nope", body: "a body long enough to pass the guard." }));
+    expect(res).toMatch(/no skill named/i);
+    expect(updateCalls.length).toBe(0);
   });
 
-  itDb("errors when no mutable field is provided", async () => {
-    const name = `upd-empty-${Date.now()}`;
-    await seedSkill(name, "Body content here, comfortably over twenty characters long.");
-    const res = await handleUpdateSkill(state!, sess, { name });
-    expect(res.content[0].text).toMatch(/at least one field/i);
+  it("errors when no mutable field is provided", async () => {
+    const { state, updateCalls } = makeState({ existing: { ...EXISTING } });
+    const res = parse(await handleUpdateSkill(state, sess, { name: "my-skill" }));
+    expect(res).toMatch(/at least one field/i);
+    expect(updateCalls.length).toBe(0);
   });
 
-  itDb("rejects a too-short body", async () => {
-    const name = `upd-short-${Date.now()}`;
-    await seedSkill(name, "Body content here, comfortably over twenty characters long.");
-    const res = await handleUpdateSkill(state!, sess, { name, body: "too short" });
-    expect(res.content[0].text).toMatch(/at least 20 characters/i);
+  it("rejects a too-short body", async () => {
+    const { state } = makeState({ existing: { ...EXISTING } });
+    const res = parse(await handleUpdateSkill(state, sess, { name: "my-skill", body: "too short" }));
+    expect(res).toMatch(/at least 20 characters/i);
   });
 
-  itDb("sets embedding=NONE when embeddings unavailable (no stale vector; backfill recomputes)", async () => {
-    const name = `upd-noembed-${Date.now()}`;
-    await seedSkill(name, "Body content here, comfortably over twenty characters long.");
-    embedAvailable = false;
-    try {
-      const res = await handleUpdateSkill(state!, sess, {
-        name, body: "A new body written while the embedding service is unavailable here.",
-      });
-      const out = JSON.parse(res.content[0].text);
-      expect(out.ok).toBe(true);
-      expect(out.re_embedded).toBe(false);
-
-      const after = await getSkill(name);
-      expect(after.body).toContain("A new body written");
-      // embedding cleared to NONE so the maintenance backfill recomputes it —
-      // never left as the stale pre-update vector.
-      expect(after.embedding == null).toBe(true);
-    } finally {
-      embedAvailable = true;
-    }
+  it("sets embedding=NONE (not a stale vector) when embeddings unavailable", async () => {
+    const { state, updateCalls, embedFn } = makeState({ existing: { ...EXISTING }, embedAvailable: false });
+    const out = JSON.parse(parse(await handleUpdateSkill(state, sess, {
+      name: "my-skill", body: "a new body written while embeddings are down, long enough.",
+    })));
+    expect(out.ok).toBe(true);
+    expect(out.re_embedded).toBe(false);
+    expect(embedFn).not.toHaveBeenCalled();
+    expect(updateCalls[0].sql).toContain("embedding = NONE");
+    expect(updateCalls[0].sql).not.toContain("embedding = $vec");
   });
 });
