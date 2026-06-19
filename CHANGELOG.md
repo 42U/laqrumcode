@@ -4,7 +4,7 @@ All notable changes to KongCode are documented here. The 0.7.x series introduced
 
 ## [Unreleased]
 
-## [0.7.129] — 2026-06-19
+## [0.7.130] — 2026-06-19
 
 ### Added — `update_skill` MCP tool
 - New `update_skill` tool revises an EXISTING DB-resident skill — the counterpart
@@ -20,15 +20,18 @@ All notable changes to KongCode are documented here. The 0.7.x series introduced
 - Wired across all 5 MCP tool surfaces; `test/update-skill.test.ts` covers the
   re-embed, NONE-fallback, not-found, no-field, and short-body paths.
 
-### Fixed — CI timing robustness
-- v0.7.127/0.7.128's CI failed because the new real-SurrealStore `update-skill`
-  test blocked a vitest worker for seconds on a SurrealDB-absent connect (CI has
-  no SurrealDB), starving the concurrent `mcp-handshake` subprocess spawn and
-  tripping its latency ceiling. Converted that test to a mock-based unit test
-  (no connect, no heavy module load) so it adds no CI contention, and raised the
-  `mcp-handshake` ceiling 3000ms → 6000ms (~2x the observed cold start) as
-  headroom. The ordering assertion (initialize answered before init() completes)
-  is unchanged.
+### Fixed — ship the new tool's compiled output
+- v0.7.127–0.7.129 failed CI for one root cause: the release commits staged
+  sources with `git add -u`, which skips NEW untracked files — so the compiled
+  `dist/tools/update-skill.js` was never committed. CI runs the test suite
+  against the committed `dist/` (there is no prebuild step), so `node
+  dist/mcp-server.js` hit a missing-module import, crashed on startup, and the
+  `mcp-handshake` test timed out waiting for a response. The earlier "CI timing"
+  and "contention" theories were wrong — re-running v0.7.126's workflow stayed
+  green, isolating the cause to this release's diff. The dist file is now
+  committed; release staging uses `git add -A` so generated output can't be
+  dropped again. (`update-skill.test.ts` is a mock-based unit test, kept from the
+  investigation — fast, no DB dependency.)
 
 ## [0.7.126] — 2026-06-18
 
