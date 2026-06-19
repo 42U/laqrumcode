@@ -106,6 +106,7 @@ export function runBootstrapMaintenance(state) {
     Promise.all([
         store.runMemoryMaintenance(),
         store.purgeStalePendingWork(),
+        store.purgeOldRetrievalOutcomes(),
         purgeStaleEmbedCache(state),
     ]).then(async () => {
         // Group 2: moderate cost — after cheap queries complete

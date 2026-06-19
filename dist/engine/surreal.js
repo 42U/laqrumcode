@@ -1846,6 +1846,46 @@ export class SurrealStore {
             return 0;
         }
     }
+    /**
+     * Hard-delete old retrieval_outcome rows beyond the retention window.
+     *
+     * retrieval_outcome is the fastest-growing table — ~5-15 rows per turn, each
+     * carrying a 1024-dim query_embedding (~4-8 KB) — and is pure ACAN training
+     * telemetry, NOT knowledge (the D4 no-DELETE-content-tables lint exempts it).
+     * The trainer only ever reads the most recent MAX_TRAINING_SAMPLES (15K);
+     * older rows have zero value. Keep 2x the window (30K) for margin and
+     * hard-delete the rest so the table — the dominant disk consumer at scale —
+     * stays bounded instead of growing forever.
+     */
+    async purgeOldRetrievalOutcomes() {
+        const RETAIN = 30_000;
+        const started = Date.now();
+        try {
+            const countRows = await this.queryFirst(`SELECT count() AS count FROM retrieval_outcome GROUP ALL`);
+            const count = countRows[0]?.count ?? 0;
+            // Only act when meaningfully over target (avoid churn right at the bound).
+            if (count <= RETAIN + 5_000)
+                return 0;
+            if (!(await this.shouldRunMaintenance("purgeOldRetrievalOutcomes", 60, 1, count)))
+                return 0;
+            // created_at of the RETAIN-th most-recent row → delete everything older
+            // (uses ro_created_idx for the ORDER BY and the DELETE predicate).
+            const cutoffRows = await this.queryFirst(`SELECT created_at FROM retrieval_outcome ORDER BY created_at DESC LIMIT 1 START ${RETAIN}`);
+            const cutoff = cutoffRows[0]?.created_at;
+            if (!cutoff)
+                return 0;
+            // DELETE OK on retrieval_outcome (telemetry, not content — D4 exempt).
+            await this.queryExec(`DELETE retrieval_outcome WHERE created_at < $cutoff`, { cutoff });
+            const afterRows = await this.queryFirst(`SELECT count() AS count FROM retrieval_outcome GROUP ALL`);
+            const n = count - (afterRows[0]?.count ?? count);
+            await this.recordMaintenanceRun("purgeOldRetrievalOutcomes", n, Date.now() - started);
+            return n;
+        }
+        catch (e) {
+            swallow.warn("surreal:purgeOldRetrievalOutcomes", e);
+            return 0;
+        }
+    }
     async archiveOldTurns() {
         const started = Date.now();
         try {

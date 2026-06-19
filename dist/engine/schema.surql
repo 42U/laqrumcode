@@ -303,6 +303,11 @@ DEFINE FIELD IF NOT EXISTS created_at ON retrieval_outcome TYPE datetime DEFAULT
 DEFINE INDEX IF NOT EXISTS ro_session_idx ON retrieval_outcome FIELDS session_id;
 DEFINE INDEX IF NOT EXISTS ro_memory_idx ON retrieval_outcome FIELDS memory_id;
 DEFINE INDEX IF NOT EXISTS ro_turn_idx ON retrieval_outcome FIELDS turn_id;
+-- created_at index: the ACAN trainer sorts the most-recent 15K samples by
+-- created_at every retrain, and purgeOldRetrievalOutcomes deletes older rows by
+-- created_at. Without it both were unindexed full scans/sorts over a
+-- forever-growing table.
+DEFINE INDEX IF NOT EXISTS ro_created_idx ON retrieval_outcome FIELDS created_at;
 
 -- ============================================================
 -- THREE-BUCKET TURN SCORING

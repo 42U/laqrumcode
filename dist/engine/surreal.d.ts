@@ -373,6 +373,18 @@ export declare class SurrealStore {
      * will be re-enqueued by future maintenance if still relevant.
      */
     purgeStalePendingWork(): Promise<number>;
+    /**
+     * Hard-delete old retrieval_outcome rows beyond the retention window.
+     *
+     * retrieval_outcome is the fastest-growing table — ~5-15 rows per turn, each
+     * carrying a 1024-dim query_embedding (~4-8 KB) — and is pure ACAN training
+     * telemetry, NOT knowledge (the D4 no-DELETE-content-tables lint exempts it).
+     * The trainer only ever reads the most recent MAX_TRAINING_SAMPLES (15K);
+     * older rows have zero value. Keep 2x the window (30K) for margin and
+     * hard-delete the rest so the table — the dominant disk consumer at scale —
+     * stays bounded instead of growing forever.
+     */
+    purgeOldRetrievalOutcomes(): Promise<number>;
     archiveOldTurns(): Promise<number>;
     consolidateMemories(embedFn: (text: string) => Promise<number[]>): Promise<number>;
     getSessionRetrievedMemories(sessionId: string): Promise<{

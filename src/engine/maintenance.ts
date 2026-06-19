@@ -110,6 +110,7 @@ export function runBootstrapMaintenance(state: GlobalPluginState): void {
   Promise.all([
     store.runMemoryMaintenance(),
     store.purgeStalePendingWork(),
+    store.purgeOldRetrievalOutcomes(),
     purgeStaleEmbedCache(state),
   ]).then(async () => {
     // Group 2: moderate cost — after cheap queries complete
