@@ -208,6 +208,14 @@ export async function assembleContextString(state, session, userPrompt) {
  */
 export async function ingestTurn(state, session, role, text) {
     const { store, embeddings } = state;
+    // C3: clear the assistant-turn pointer up front. If this assistant turn is
+    // empty / ignored-project / filler and early-returns below without creating a
+    // turn row, the pointer must NOT keep referencing a PRIOR assistant turn —
+    // stop.ts attributes retrieval_outcome (ACAN training) rows to
+    // lastAssistantTurnId, and a stale id mis-attributes them to the wrong turn
+    // (or collides on the (session,turn,memory) UNIQUE and silently drops them).
+    if (role === "assistant")
+        session.lastAssistantTurnId = "";
     if (!store.isAvailable() || !text)
         return;
     // GH #16 privacy: never persist content from an ignored project, and strip

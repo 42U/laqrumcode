@@ -704,6 +704,14 @@ async function spawnHeadlessDrainer(
         "--print",
         "--output-format", "text",
         "--permission-mode", "bypassPermissions",
+        // Defense-in-depth (audit security-M1): the drain subagent processes
+        // UNTRUSTED past-conversation transcripts under bypassPermissions. The
+        // agent file pins it to a few MCP tools, but if --agent ever
+        // misresolves (agent not found → default agent with full tools),
+        // bypassPermissions would become an RCE/exfil primitive driven by
+        // stored untrusted data. A hard --disallowed-tools deny removes the
+        // dangerous primitives regardless of how --agent resolves.
+        "--disallowed-tools", "Bash,BashOutput,KillShell,Write,Edit,NotebookEdit,WebFetch,WebSearch,Task",
         DRAIN_PROMPT,
       ],
       {

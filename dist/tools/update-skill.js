@@ -19,6 +19,7 @@
  * (body, description, steps, preconditions, postconditions) must be provided.
  */
 import { swallow } from "../engine/errors.js";
+import { assertRecordId } from "../engine/surreal.js";
 export async function handleUpdateSkill(state, _session, args) {
     const name = typeof args.name === "string" ? args.name.trim() : "";
     if (!name)
@@ -93,7 +94,13 @@ export async function handleUpdateSkill(state, _session, args) {
     if (!reEmbedded)
         setClauses.push("embedding = NONE");
     setClauses.push("updated_at = time::now()");
-    const updated = await store.queryFirst(`UPDATE skill SET ${setClauses.join(", ")} WHERE name = $name RETURN id`, params);
+    // Target the exact row read above by id, NOT `WHERE name`: skill.name has no
+    // UNIQUE index (schema.surql), so a name-scoped UPDATE would clobber EVERY
+    // same-named skill and recompute each one's embedding from THIS row's body.
+    // (audit C2)
+    const skillId = String(cur.id);
+    assertRecordId(skillId);
+    const updated = await store.queryFirst(`UPDATE ${skillId} SET ${setClauses.join(", ")} RETURN id`, params);
     return text(JSON.stringify({
         ok: updated.length > 0,
         skill_id: String(updated[0]?.id ?? cur.id),

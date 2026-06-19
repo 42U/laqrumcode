@@ -13,7 +13,7 @@
 import { validateExtraction } from "../engine/daemon-types.js";
 import { buildCoalescedPrompt, buildTranscript, writeExtractionResults } from "../engine/memory-daemon.js";
 import { createSoul, seedSoulAsCoreMemory, reviseSoul, getSoul, checkGraduation, getQualitySignals, recordGraduationEvent } from "../engine/soul.js";
-import { swallow } from "../engine/errors.js";
+import { swallow, isUniqueViolation } from "../engine/errors.js";
 import { clamp01 } from "../engine/math.js";
 import { log } from "../engine/log.js";
 import { stripStructuralTags } from "../engine/sanitize.js";
@@ -156,7 +156,10 @@ export async function countActionablePendingWork(store) {
                     total += n;
                 break;
             default:
-                total += n; // unknown work type — surface it rather than hide it
+                // Unknown work types self-complete empty in buildWorkPayload (they
+                // never yield knowledge), so they are NOT actionable — counting them
+                // would re-create the empty-drain banner this function exists to kill.
+                break;
         }
     }
     return total;
@@ -335,22 +338,41 @@ async function markTerminal(state, workId, sessionId, workType, status) {
     assertRecordId(workId);
     // v0.7.95 append-only: was DELETE on terminal-sibling collision — now
     // soft-archives. Sibling already occupies the canonical (session, work,
-    // status) triple, so this row is the duplicate; preserve the forensic
-    // trail via UPDATE active=false.
-    await state.store.queryExec(`BEGIN TRANSACTION;
-     LET $siblings = (SELECT id FROM pending_work
-       WHERE session_id = $sid AND work_type = $wt AND status = $st AND id != ${workId}
-         AND (active = true OR active IS NONE) LIMIT 1);
-     IF array::len($siblings) > 0 THEN
-       UPDATE ${workId} SET
-         active = false,
-         archived_at = time::now(),
-         completed_at = time::now(),
-         archive_reason = "terminal_sibling_canonical"
-     ELSE
-       UPDATE ${workId} SET status = $st, completed_at = time::now()
-     END;
-     COMMIT TRANSACTION;`, { sid: sessionId, wt: workType, st: status });
+    // status) triple, so this row is the duplicate; preserve the forensic trail
+    // via UPDATE active=false. `archived_status` records the intended terminal
+    // status for audit WITHOUT setting `status` (which would collide on the
+    // (session,work_type,status) UNIQUE index — the very reason this branch
+    // archives instead). (audit C4)
+    try {
+        await state.store.queryExec(`BEGIN TRANSACTION;
+       LET $siblings = (SELECT id FROM pending_work
+         WHERE session_id = $sid AND work_type = $wt AND status = $st AND id != ${workId}
+           AND (active = true OR active IS NONE) LIMIT 1);
+       IF array::len($siblings) > 0 THEN
+         UPDATE ${workId} SET
+           active = false,
+           archived_at = time::now(),
+           completed_at = time::now(),
+           archived_status = $st,
+           archive_reason = "terminal_sibling_canonical"
+       ELSE
+         UPDATE ${workId} SET status = $st, completed_at = time::now()
+       END;
+       COMMIT TRANSACTION;`, { sid: sessionId, wt: workType, st: status });
+    }
+    catch (e) {
+        // C2: the LET $siblings check is a snapshot read. Under concurrency two
+        // terminal transitions for the same (session, work_type, status) can both
+        // see no sibling, both take the ELSE branch, and the second COMMIT violates
+        // the UNIQUE index. Pre-fix that threw and left this row stuck in
+        // "processing", wedging the claim path. A sibling now demonstrably holds the
+        // canonical triple, so archive this row instead of re-throwing.
+        if (isUniqueViolation(e)) {
+            await state.store.queryExec(`UPDATE ${workId} SET active = false, archived_at = time::now(), completed_at = time::now(), archived_status = $st, archive_reason = "terminal_unique_race_lost"`, { st: status }).catch(err => swallow.warn("markTerminal:raceArchive", err));
+            return;
+        }
+        throw e;
+    }
 }
 async function buildWorkPayload(item, state) {
     const { store } = state;
@@ -472,8 +494,11 @@ async function buildWorkPayload(item, state) {
             };
         }
         default: {
-            assertRecordId(item.id);
-            await store.queryExec(`UPDATE ${item.id} SET status = "completed", completed_at = time::now()`);
+            // Route through markTerminal (not a naive UPDATE-to-completed) so an
+            // unknown-type row with a terminal sibling soft-archives instead of
+            // colliding on the (session_id, work_type, status) UNIQUE index and
+            // wedging the claim path. (audit C6)
+            await markTerminal(state, item.id, item.session_id, item.work_type, "completed");
             return { work_id: item.id, work_type: item.work_type, empty: true, message: `Unknown work type: ${item.work_type}` };
         }
     }
@@ -637,10 +662,18 @@ async function commitResults(item, results, state) {
                 }
                 catch {
                     const match = results.match(/\{[\s\S]*\}/);
-                    if (match)
-                        results = JSON.parse(match[0]);
-                    else
+                    if (!match)
                         throw new Error("Could not parse extraction JSON");
+                    // Guard the recovery parse too — the greedy {...} can still capture
+                    // invalid JSON (trailing comma, merged blocks). Without this, the
+                    // throw lands the whole coalesced extraction in markTerminal(failed)
+                    // and discards it with no retry. (audit C1)
+                    try {
+                        results = JSON.parse(match[0]);
+                    }
+                    catch {
+                        throw new Error("Could not parse extraction JSON");
+                    }
                 }
             }
             const { data: validated, errors: schemaErrors } = validateExtraction(results);

@@ -21,6 +21,7 @@
 
 import type { GlobalPluginState, SessionState } from "../engine/state.js";
 import { swallow } from "../engine/errors.js";
+import { assertRecordId } from "../engine/surreal.js";
 
 type ToolResult = { content: Array<{ type: "text"; text: string }> };
 
@@ -106,8 +107,14 @@ export async function handleUpdateSkill(
   if (!reEmbedded) setClauses.push("embedding = NONE");
   setClauses.push("updated_at = time::now()");
 
+  // Target the exact row read above by id, NOT `WHERE name`: skill.name has no
+  // UNIQUE index (schema.surql), so a name-scoped UPDATE would clobber EVERY
+  // same-named skill and recompute each one's embedding from THIS row's body.
+  // (audit C2)
+  const skillId = String(cur.id);
+  assertRecordId(skillId);
   const updated = await store.queryFirst<{ id: string }>(
-    `UPDATE skill SET ${setClauses.join(", ")} WHERE name = $name RETURN id`,
+    `UPDATE ${skillId} SET ${setClauses.join(", ")} RETURN id`,
     params,
   );
 
