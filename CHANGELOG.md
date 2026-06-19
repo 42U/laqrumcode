@@ -4,7 +4,7 @@ All notable changes to KongCode are documented here. The 0.7.x series introduced
 
 ## [Unreleased]
 
-## [0.7.127] — 2026-06-19
+## [0.7.128] — 2026-06-19
 
 ### Added — `update_skill` MCP tool
 - New `update_skill` tool revises an EXISTING DB-resident skill — the counterpart
@@ -19,6 +19,14 @@ All notable changes to KongCode are documented here. The 0.7.x series introduced
   `embedding = NONE` rather than leaving it stale, so the backfill recomputes it.
 - Wired across all 5 MCP tool surfaces; `test/update-skill.test.ts` covers the
   re-embed, NONE-fallback, not-found, no-field, and short-body paths.
+
+### Fixed — CI timing robustness
+- Raised the `mcp-handshake` test's latency ceiling (3000ms → 8000ms) so a cold
+  `node dist/mcp-server.js` start on the loaded 4-job CI matrix (observed 3127ms)
+  no longer trips it; the test still asserts the ordering guarantee (initialize
+  answered before init() completes), only the "didn't hang" guard moved. Cut the
+  `update-skill` test's SurrealDB-absent connect ceiling (15s → 8s) to reduce
+  worker-blocking contention. (v0.7.127's CI tripped the old ceiling.)
 
 ## [0.7.126] — 2026-06-18
 

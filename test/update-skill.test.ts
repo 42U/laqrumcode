@@ -57,9 +57,13 @@ beforeAll(async () => {
   if (SKIP) return;
   store = new SurrealStore(makeConfig().surreal);
   try {
+    // 8s connect ceiling: a live SurrealDB connects sub-second locally, so this
+    // only bounds the SKIP path when SurrealDB is absent (CI). Kept short to
+    // minimize the worker-blocking / CPU-contention footprint that the
+    // mcp-handshake cold-start test is sensitive to on the loaded CI matrix.
     await Promise.race([
       store.initialize(),
-      new Promise<never>((_, reject) => setTimeout(() => reject(new Error("SurrealDB timed out")), 15_000)),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error("SurrealDB timed out")), 8_000)),
     ]);
   } catch (e) {
     console.warn("SurrealDB unavailable, skipping update_skill test:", (e as Error).message);

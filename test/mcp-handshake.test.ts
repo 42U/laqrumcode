@@ -51,10 +51,17 @@ describe("MCP handshake ordering (issue #4)", () => {
 
       proc.stdin!.write(initMsg);
 
+      // Ceiling is a "didn't hang" guard, NOT the assertion. What this test
+      // proves is the ORDERING — initialize is answered (result.protocolVersion
+      // present) before the deferred init() finishes. The latency ceiling must
+      // tolerate a cold `node dist/mcp-server.js` start (full module-graph load)
+      // on a heavily-loaded CI matrix: the 4-job SEA build observed a 3127ms
+      // cold start, tripping the old 3000ms ceiling. 8000ms keeps the ordering
+      // assertion intact while absorbing CI load.
       const response = await Promise.race([
         responsePromise,
         new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error("handshake timeout > 3000ms")), 3000),
+          setTimeout(() => reject(new Error("handshake timeout > 8000ms")), 8000),
         ),
       ]);
 
@@ -67,5 +74,5 @@ describe("MCP handshake ordering (issue #4)", () => {
       await new Promise(r => setTimeout(r, 100));
       if (proc.exitCode === null) proc.kill("SIGKILL");
     }
-  }, 6000);
+  }, 12000);
 });
