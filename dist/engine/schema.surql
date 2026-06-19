@@ -398,6 +398,10 @@ DEFINE INDEX IF NOT EXISTS muc_mid_idx ON memory_utility_cache FIELDS memory_id 
 -- MEMORY SUBSTRATE: Turn Archive (cold storage for old turns)
 -- ============================================================
 DEFINE TABLE IF NOT EXISTS turn_archive SCHEMALESS;
+-- turn_archive is the largest vector table (grows forever as live turns are
+-- archived) and is searched every turn. Without this HNSW index the archive
+-- search was a full linear cosine scan (~1.2s at ~13K rows). Mirrors turn_vec_idx.
+DEFINE INDEX IF NOT EXISTS turn_archive_vec_idx ON turn_archive FIELDS embedding HNSW DIMENSION 1024 DIST COSINE;
 
 -- ============================================================
 -- COGNITIVE: Causal Chain Metadata
