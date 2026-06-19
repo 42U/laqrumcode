@@ -380,6 +380,39 @@ export declare const MCP_TOOLS: readonly [{
         };
         readonly required: readonly ["name"];
     };
+}, {
+    readonly name: "update_skill";
+    readonly description: "Revise an EXISTING skill in the kongcode DB (counterpart to create_skill, which rejects name collisions). Patches the provided fields on the skill matched by `name` and RE-EMBEDS so recall(scope=\"skills\") reflects the new content — a raw SurrealQL UPDATE would leave the old embedding stale. `name` identifies the skill and is not changed; provide at least one mutable field.";
+    readonly inputSchema: {
+        readonly type: "object";
+        readonly properties: {
+            readonly name: {
+                readonly type: "string";
+                readonly description: "Kebab-case name of the EXISTING skill to update (the slash-command name).";
+            };
+            readonly body: {
+                readonly type: "string";
+                readonly description: "New full markdown body (min 20 chars). Replaces the existing body.";
+            };
+            readonly description: {
+                readonly type: "string";
+                readonly description: "New one-line summary (embedding + slash-command suggestion target).";
+            };
+            readonly preconditions: {
+                readonly type: "string";
+                readonly description: "New structured preconditions text.";
+            };
+            readonly postconditions: {
+                readonly type: "string";
+                readonly description: "New structured postconditions text.";
+            };
+            readonly steps: {
+                readonly type: "array";
+                readonly description: "New structured step list (strings or {tool, description, argsPattern} objects).";
+            };
+        };
+        readonly required: readonly ["name"];
+    };
 }];
 /** Map MCP tool name (snake_case, what Claude Code sends) to IPC method name
  *  (dotted camelCase, what the daemon expects). The thin client looks up here

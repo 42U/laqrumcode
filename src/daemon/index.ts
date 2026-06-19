@@ -62,6 +62,7 @@ import { handleClusterScan } from "../tools/cluster-scan.js";
 import { handleWhatIsMissing } from "../tools/what-is-missing.js";
 import { handleCreateSkill } from "../tools/create-skill.js";
 import { handleGetSkillBody } from "../tools/get-skill-body.js";
+import { handleUpdateSkill } from "../tools/update-skill.js";
 import { handleSessionStart } from "../hook-handlers/session-start.js";
 import { handleSessionEnd } from "../hook-handlers/session-end.js";
 import { handleUserPromptSubmit } from "../hook-handlers/user-prompt-submit.js";
@@ -841,6 +842,7 @@ async function main(): Promise<void> {
   server.register("tool.whatIsMissing", wrapToolHandler(handleWhatIsMissing, "what_is_missing"));
   server.register("tool.createSkill", wrapToolHandler(handleCreateSkill, "create_skill"));
   server.register("tool.getSkillBody", wrapToolHandler(handleGetSkillBody, "get_skill_body"));
+  server.register("tool.updateSkill", wrapToolHandler(handleUpdateSkill, "update_skill"));
 
   // Hook handlers — different signature from tools: (state, payload) → HookResponse,
   // where payload is the raw Claude Code hook event (already includes session_id,

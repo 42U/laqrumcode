@@ -4,6 +4,22 @@ All notable changes to KongCode are documented here. The 0.7.x series introduced
 
 ## [Unreleased]
 
+## [0.7.127] — 2026-06-19
+
+### Added — `update_skill` MCP tool
+- New `update_skill` tool revises an EXISTING DB-resident skill — the counterpart
+  to `create_skill`, which deliberately rejects name collisions. Patches any of
+  `body` / `description` / `steps` / `preconditions` / `postconditions` on the
+  skill matched by `name`, and **re-embeds** so `recall(scope="skills")` reflects
+  the new content. Before this, the only way to revise a shipped skill body was
+  raw SurrealQL — and a naive `UPDATE skill SET body = ...` left the OLD embedding
+  in place (the maintenance backfill only fills rows `WHERE embedding IS NONE`, so
+  it never refreshes a stale-but-present vector), silently desyncing the vector
+  index from the body. If the embedding service is unavailable the tool sets
+  `embedding = NONE` rather than leaving it stale, so the backfill recomputes it.
+- Wired across all 5 MCP tool surfaces; `test/update-skill.test.ts` covers the
+  re-embed, NONE-fallback, not-found, no-field, and short-body paths.
+
 ## [0.7.126] — 2026-06-18
 
 Fixes the recurring "empty drain" report: the SessionStart / UserPromptSubmit

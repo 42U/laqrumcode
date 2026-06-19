@@ -41,6 +41,7 @@ import { handleClusterScan } from "./tools/cluster-scan.js";
 import { handleWhatIsMissing } from "./tools/what-is-missing.js";
 import { handleCreateSkill } from "./tools/create-skill.js";
 import { handleGetSkillBody } from "./tools/get-skill-body.js";
+import { handleUpdateSkill } from "./tools/update-skill.js";
 import { log } from "./engine/log.js";
 import { runBootstrapMaintenance } from "./engine/maintenance.js";
 // ── Global state ──────────────────────────────────────────────────────────────
@@ -299,6 +300,22 @@ const TOOLS = [
             required: ["name"],
         },
     },
+    {
+        name: "update_skill",
+        description: "Revise an EXISTING skill in the kongcode DB (counterpart to create_skill, which rejects name collisions). Patches the provided fields on the skill matched by `name` and RE-EMBEDS so recall(scope=\"skills\") reflects the new content — a raw SurrealQL UPDATE would leave the old embedding stale. `name` identifies the skill and is not changed; provide at least one mutable field.",
+        inputSchema: {
+            type: "object",
+            properties: {
+                name: { type: "string", description: "Kebab-case name of the EXISTING skill to update (the slash-command name)." },
+                body: { type: "string", description: "New full markdown body (min 20 chars). Replaces the existing body." },
+                description: { type: "string", description: "New one-line summary (embedding + slash-command suggestion target)." },
+                preconditions: { type: "string", description: "New structured preconditions text." },
+                postconditions: { type: "string", description: "New structured postconditions text." },
+                steps: { type: "array", description: "New structured step list (strings or {tool, description, argsPattern} objects)." },
+            },
+            required: ["name"],
+        },
+    },
 ];
 // ── Tool handlers ─────────────────────────────────────────────────────────────
 /** Get or create a session for tool calls. Uses KONGCODE_SESSION_ID env var or a default. */
@@ -371,6 +388,8 @@ async function handleToolCall(name, args) {
                 return await handleCreateSkill(globalState, session, args);
             case "get_skill_body":
                 return await handleGetSkillBody(globalState, session, args);
+            case "update_skill":
+                return await handleUpdateSkill(globalState, session, args);
             default:
                 return { content: [{ type: "text", text: `Unknown tool: ${name}` }] };
         }
@@ -506,7 +525,7 @@ async function shutdown() {
 }
 // ── Main ──────────────────────────────────────────────────────────────────────
 async function main() {
-    const server = new Server({ name: "kongcode", version: "0.7.126" }, { capabilities: { tools: {} } });
+    const server = new Server({ name: "kongcode", version: "0.7.127" }, { capabilities: { tools: {} } });
     // Register tool list handler
     server.setRequestHandler(ListToolsRequestSchema, async () => ({
         tools: TOOLS,

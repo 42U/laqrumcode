@@ -67,7 +67,7 @@ export type IpcPayload = Record<string, unknown>;
  *    2. Implement the handler in `src/daemon/handlers.ts`
  *    3. Add a typed wrapper in `src/mcp-client/rpc-stub.ts`
  *  All three live in the same repo, so type errors flag missing wiring. */
-export declare const IPC_METHODS: readonly ["meta.handshake", "meta.health", "meta.shutdown", "meta.requestSupersede", "tool.recall", "tool.coreMemory", "tool.introspect", "tool.fetchPendingWork", "tool.commitWorkResults", "tool.createKnowledgeGems", "tool.memoryHealth", "tool.linkHierarchy", "tool.supersede", "tool.recordRetrievalFeedback", "tool.recordFinding", "tool.clusterScan", "tool.whatIsMissing", "tool.createSkill", "tool.getSkillBody", "hook.sessionStart", "hook.userPromptSubmit", "hook.preToolUse", "hook.postToolUse", "hook.stop", "hook.preCompact", "hook.postCompact", "hook.sessionEnd", "hook.taskCreated", "hook.subagentStop"];
+export declare const IPC_METHODS: readonly ["meta.handshake", "meta.health", "meta.shutdown", "meta.requestSupersede", "tool.recall", "tool.coreMemory", "tool.introspect", "tool.fetchPendingWork", "tool.commitWorkResults", "tool.createKnowledgeGems", "tool.memoryHealth", "tool.linkHierarchy", "tool.supersede", "tool.recordRetrievalFeedback", "tool.recordFinding", "tool.clusterScan", "tool.whatIsMissing", "tool.createSkill", "tool.getSkillBody", "tool.updateSkill", "hook.sessionStart", "hook.userPromptSubmit", "hook.preToolUse", "hook.postToolUse", "hook.stop", "hook.preCompact", "hook.postCompact", "hook.sessionEnd", "hook.taskCreated", "hook.subagentStop"];
 export type IpcMethod = typeof IPC_METHODS[number];
 /** Type-safety helper: narrows arbitrary strings to known method names at
  *  the dispatcher boundary. Returns null for unknown methods (daemon then

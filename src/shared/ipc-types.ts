@@ -109,6 +109,7 @@ export const IPC_METHODS = [
   "tool.whatIsMissing",
   "tool.createSkill",
   "tool.getSkillBody",
+  "tool.updateSkill",
 
   // ── Claude Code hook handlers (mirror src/hook-handlers/*.ts) ──
   "hook.sessionStart",
