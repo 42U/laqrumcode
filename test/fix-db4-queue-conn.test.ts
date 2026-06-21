@@ -181,8 +181,8 @@ describe("K17-maint — embedding_cache prune loops to drain and is periodically
 
   it("loops in batches until the backlog is drained (not a single 500-row pass)", () => {
     expect(fn).toMatch(/for \(let i = 0; i < MAX_BATCHES/);
-    expect(fn).toMatch(/RETURN \{ n: array::len\(\$stale\) \}/);
-    expect(fn).toMatch(/if \(n < BATCH\) break/);
+    expect(fn).toMatch(/SELECT id FROM embedding_cache/);   // JS-collect a bounded batch
+    expect(fn).toMatch(/if \(ids\.length < BATCH\) break/); // drains across batches
   });
 
   it("is armed on the 6h interval alongside runEmbeddingBackfills", () => {
@@ -195,10 +195,19 @@ describe("K17-maint — embedding_cache prune loops to drain and is periodically
     expect(interval).toMatch(/void purgeStaleEmbedCache\(state\)/);
   });
 
-  it("still soft-tags (telemetry hard-delete allowed, but writer filters pruned_at)", () => {
-    expect(fn).toMatch(/pruned_at = time::now\(\)/);
-    expect(fn).toMatch(/prune_reason = "stale_30d"/);
-    expect(fn).not.toMatch(/\bDELETE\b/);
+  it("Phase 1 soft-tags only; Phase 2 (G10B) hard-deletes already-pruned rows", () => {
+    // G10B split purgeStaleEmbedCache into two phases. Scope the no-DELETE
+    // guard to Phase 1 (soft-tag) and positively assert Phase 2's bounded,
+    // pruned_at-rechecked hard delete (embedding_cache is telemetry → DELETE-OK).
+    const marker = fn.indexOf("Phase 2 (G10B)");
+    expect(marker).toBeGreaterThan(0);
+    const phase1 = fn.slice(0, marker);
+    const phase2 = fn.slice(marker);
+    expect(phase1).toMatch(/pruned_at = time::now\(\)/);
+    expect(phase1).toMatch(/prune_reason = "stale_30d"/);
+    expect(phase1).not.toMatch(/DELETE embedding_cache/); // Phase 1 soft-tags via UPDATE, never deletes
+    expect(phase2).toMatch(/DELETE embedding_cache WHERE id IN \[/);
+    expect(phase2).toMatch(/pruned_at IS NOT NONE/);
   });
 });
 

@@ -274,6 +274,27 @@ read-filtered by G3, never deleted), snapshots the danglers, deletes per table, 
   sweep.test.ts` guards the contract. Edge tables aren't content-bearing (lint-legal), but the sweep
   still runs the full snapshot + after-verify QA gate.
 
+### Hardened — Phase 2 Round 2b: GC wired into daemon maintenance + G10B embedding_cache purge
+
+Made the GC self-maintaining in the daemon's own maintenance cycle (the 1M-right path — every
+install cleans its own graph on boot + every 6h, no ad-hoc scripts):
+- **G10B — `purgeStaleEmbedCache` now hard-deletes pruned rows.** embedding_cache is telemetry
+  (D4 DELETE-OK), and a pruned row is truly dead (l2Get filters `pruned_at IS NONE`; l2Put
+  recomputes on miss). **Live-verified end-to-end**: the boot purge drained 16,384+ pruned rows →
+  **pruned = 0** (embedding_cache 29,775 → 13,266, −55%), usable cache untouched (13,237 preserved).
+- **`gcSweepOrphanedEdges` wired into the maintenance job list** (Group 2 + the 6h re-arm) — a cheap
+  no-op now that the keystone co-deletes incident edges and the D4 lint blocks ad-hoc deletes.
+
+**Bug caught by LIVE verification (the gate the subagents' "live probe" missed):** the first cut used
+a `LET $x = (SELECT … LIMIT $batch); FOR $row IN $x { UPDATE/DELETE … }` form via `queryMulti`. The
+daemon log proved it **parse-errors** on this SurrealDB (`Unexpected token LIMIT, expected Eof` — a
+write statement inside `FOR` combined with a `LIMIT`-in-`LET` subquery). Worse, the **pre-existing
+Phase-1 soft-tag used the identical form and was the first statement**, so its error silently skipped
+the whole purge — the embedding_cache prune had been **broken before G10B too** (the swallow.warn ate
+it). Both phases rewritten to the proven keystone idiom: `SELECT id … LIMIT N` (queryFirst) →
+`DELETE/UPDATE … WHERE id IN [<validated Things>]` (queryExec). `fix-g10b-embed-cache-purge.test.ts`
++ the K17-maint guards in `fix-db4-queue-conn.test.ts` updated to the new shape. Full suite green.
+
 ## [0.7.130] — 2026-06-19
 
 ### Added — `update_skill` MCP tool

@@ -25,7 +25,8 @@
 
 import type { GlobalPluginState } from "./state.js";
 import { checkACANReadiness } from "./acan.js";
-import { swallow } from "./errors.js";
+import { gcSweepOrphanedEdges } from "./gc.js";
+import { swallow, RECORD_ID_RE } from "./errors.js";
 import { copyFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
@@ -118,6 +119,10 @@ export function runBootstrapMaintenance(state: GlobalPluginState): void {
     await store.archiveOldTurns().catch(e => swallow.warn("maintenance:archiveOldTurns", e));
     await store.garbageCollectMemories().catch(e => swallow.warn("maintenance:gcMemories", e));
     await store.garbageCollectConcepts().catch(e => swallow.warn("maintenance:gcConcepts", e));
+    // G2: sweep orphaned edges (in/out endpoint hard-deleted) once per cycle.
+    // Best-effort, swallow errors like the GC siblings. Runs AFTER the node GCs
+    // so any edges those just orphaned are caught in the same cycle.
+    await sweepOrphanedEdges(state);
     await backfillSessionTurnCounts(state);
     await seedSkillsFromJson(state);
     await backfillSkillEmbeddings(state);
@@ -138,6 +143,10 @@ export function runBootstrapMaintenance(state: GlobalPluginState): void {
       // purgeStaleEmbedCache self-guards on store availability and now loops to
       // full drain, so arming it unconditionally here is safe.
       void purgeStaleEmbedCache(state);
+      // G2: re-arm the orphaned-edge sweep on the same 6h cadence so a
+      // long-lived daemon keeps the graph clean between restarts. Normally a
+      // cheap no-op (see sweepOrphanedEdges' note); self-guarded on store.
+      void sweepOrphanedEdges(state);
     }, 6 * 3_600_000);
     backfillInterval.unref?.();
 
@@ -176,6 +185,36 @@ export async function runEmbeddingBackfills(state: GlobalPluginState): Promise<v
     await backfillTurnEmbeddings(state);
     await backfillMemoryEmbeddings(state);
   } catch (e) { swallow.warn("maintenance:backfill-indexed", e); }
+}
+
+/** G2 wrapper — best-effort orphaned-edge sweep for the maintenance cycle.
+ *  Store-guarded + error-swallowed so it matches its job-list siblings
+ *  (fire-and-forget, never throws into the chain).
+ *
+ *  CADENCE DECISION (run EVERY cycle, not throttled): the sweep scans the 26
+ *  relation tables with `in.id IS NONE` and is bounded by the per-install graph
+ *  size — kongcode is one daemon + local SurrealDB PER HOST, so a real install's
+ *  graph is modest (the dev graph's 182k edges is an outlier from heavy testing).
+ *  Crucially it is normally a CHEAP NO-OP going forward: new orphans should be
+ *  ~0 because the only sanctioned content delete (gc.ts gcHardDelete keystone)
+ *  co-deletes every incident edge in the same op, and the D4 lint blocks ad-hoc
+ *  `DELETE <content_table>` everywhere else. The 309 it removed once were
+ *  pre-keystone residue. gcSweepOrphanedEdges early-returns
+ *  {orphaned:0,removed:0,snapshot:""} the instant it finds zero orphans (no
+ *  snapshot write, no DELETE, no after-verify loop), so the steady-state cost is
+ *  just the detect SELECTs — fine on a per-install graph at a 6h cadence.
+ *  Throttling (e.g. every Nth cycle) would only defer cleanup of any orphan a
+ *  future bug introduces, with no real savings on the normal no-op path. */
+async function sweepOrphanedEdges(state: GlobalPluginState): Promise<void> {
+  if (!state.store.isAvailable()) return;
+  try {
+    const res = await gcSweepOrphanedEdges(state, { reason: "maintenance-cycle" });
+    if (res.removed > 0) {
+      log.info(`[maintenance] orphaned-edge sweep: removed ${res.removed} dangling edge(s) across ${Object.keys(res.perTable).length} table(s)`);
+    }
+  } catch (e) {
+    swallow.warn("maintenance:sweepOrphanedEdges", e);
+  }
 }
 
 /** 0.7.118: live `turn` rows were the one embedded table with NO backfill —
@@ -718,7 +757,21 @@ async function backfillTurnArchiveEmbeddings(state: GlobalPluginState): Promise<
  *  all). Now: (1) loop batches until no stale rows remain (bounded by
  *  MAX_BATCHES so a clock skew / mis-set pruned_at can't spin forever), and
  *  (2) the caller arms it on the same 6h interval as runEmbeddingBackfills so a
- *  daemon that stays up for weeks keeps draining. */
+ *  daemon that stays up for weeks keeps draining.
+ *
+ *  G10B (2026-06-21): the soft-tag phase above only EVER sets pruned_at — under
+ *  the old never-delete rule pruned rows accumulated forever (16.3k of 29.7k on
+ *  the dev graph). embedding_cache is TELEMETRY, NOT a content table (D4 lists
+ *  it as "DELETE OK"; gc.ts GC_CONTENT_TABLES does not include it), so it needs
+ *  no keystone/GATED-GC marker — a plain `DELETE embedding_cache WHERE ...` is
+ *  lint-legal. A pruned row is truly dead: l2Get (embeddings.ts:120) filters
+ *  `pruned_at IS NONE` so it is never read, and l2Put's UPSERT recomputes the
+ *  embedding on a cache miss (embeddings.ts:145 SETs embedding=$vec), so a
+ *  re-cached hash gains nothing from a resurrected row over a fresh insert —
+ *  hard-deleting a pruned row loses nothing. So after soft-tagging we HARD-DELETE
+ *  already-pruned rows in the SAME bounded loop shape (LET+FOR+LIMIT+MAX_BATCHES)
+ *  so a huge backlog can't spin forever. Idempotent + store-guarded like the
+ *  soft-tag phase. */
 async function purgeStaleEmbedCache(state: GlobalPluginState): Promise<void> {
   if (!state.store.isAvailable()) return;
   // Per-batch cap kept at 500 (each batch is one bounded transaction); the loop
@@ -727,27 +780,57 @@ async function purgeStaleEmbedCache(state: GlobalPluginState): Promise<void> {
   // the moment a batch tags < BATCH rows (the common steady-state path).
   const BATCH = 500;
   const MAX_BATCHES = 200;
+  // Extract + validate the record-id list from a `SELECT id` result. ids are
+  // DB-sourced (embedding_cache:<alnum>), all RECORD_ID_RE-valid, so interpolating
+  // them as a Thing list (`IN [id, ...]`) is injection-safe AND the only binding
+  // form this engine treats as record refs (a string-array $bind silently no-ops).
+  const idsOf = (rows: Array<{ id: unknown }>) =>
+    rows.map((r) => String(r.id)).filter((id) => RECORD_ID_RE.test(id));
   try {
+    // 2026-06-21: the prior LET+FOR(write)+LIMIT form sent via queryMulti
+    // parse-errored ("Unexpected token LIMIT, expected Eof") — a write statement
+    // inside FOR combined with a LIMIT-in-LET subquery is rejected by this
+    // SurrealDB, and since Phase 1 was the FIRST statement its error skipped
+    // Phase 2 too (the swallow.warn ate both). So the maintenance prune silently
+    // never ran via this path. Rewritten to the proven keystone idiom:
+    // JS-collect a bounded id batch via a plain SELECT, then UPDATE/DELETE
+    // ... WHERE id IN [<validated Things>].
+    //
+    // Phase 1 — soft-tag >30d rows (sets pruned_at; l2Get then stops reading them).
     for (let i = 0; i < MAX_BATCHES; i++) {
-      // GH #17: SurrealDB rejects `LIMIT` on UPDATE ("Unexpected token 'LIMIT'"),
-      // so the prune uses the proven LET+FOR pattern (mirrors
-      // purgeStalePendingWork) — LIMIT is valid on the SELECT. RETURN the count
-      // tagged this batch so the loop knows when the backlog is drained.
-      const res = await state.store.queryMulti<{ n: number }>(
-        `LET $stale = (SELECT id FROM embedding_cache
-           WHERE created_at < time::now() - 30d
-             AND pruned_at IS NONE
-           LIMIT $batch);
-         FOR $row IN $stale {
-           UPDATE $row.id SET
-             pruned_at = time::now(),
-             prune_reason = "stale_30d";
-         };
-         RETURN { n: array::len($stale) };`,
-        { batch: BATCH },
+      const rows = await state.store.queryFirst<{ id: unknown }>(
+        `SELECT id FROM embedding_cache
+           WHERE created_at < time::now() - 30d AND pruned_at IS NONE
+           LIMIT ${BATCH}`,
       );
-      const n = Number(res?.n ?? 0);
-      if (n < BATCH) break; // last (partial) batch — backlog drained
+      const ids = idsOf(rows);
+      if (ids.length === 0) break;
+      await state.store.queryExec(
+        `UPDATE embedding_cache SET pruned_at = time::now(), prune_reason = "stale_30d"
+           WHERE id IN [${ids.join(", ")}]`,
+      );
+      if (ids.length < BATCH) break; // last (partial) batch — backlog drained
+    }
+
+    // Phase 2 (G10B) — hard-delete already-pruned rows. embedding_cache is
+    // TELEMETRY (NOT a content table; D4 lists it DELETE-OK, gc.ts excludes it),
+    // so a WHERE-bounded `DELETE embedding_cache WHERE id IN [...]` is lint-legal
+    // and needs no keystone/GATED-GC marker. A pruned row is truly dead (l2Get
+    // filters pruned_at IS NONE; l2Put recomputes on miss), so deleting loses
+    // nothing. Bounded per batch; loop drains the backlog across runs.
+    let removed = 0;
+    for (let i = 0; i < MAX_BATCHES; i++) {
+      const rows = await state.store.queryFirst<{ id: unknown }>(
+        `SELECT id FROM embedding_cache WHERE pruned_at IS NOT NONE LIMIT ${BATCH}`,
+      );
+      const ids = idsOf(rows);
+      if (ids.length === 0) break;
+      await state.store.queryExec(`DELETE embedding_cache WHERE id IN [${ids.join(", ")}]`);
+      removed += ids.length;
+      if (ids.length < BATCH) break; // last (partial) batch — pruned backlog drained
+    }
+    if (removed > 0) {
+      log.info(`[maintenance] purgeStaleEmbedCache: hard-deleted ${removed} pruned embedding_cache row(s)`);
     }
   } catch (e) {
     swallow.warn("maintenance:purgeEmbedCache", e);
