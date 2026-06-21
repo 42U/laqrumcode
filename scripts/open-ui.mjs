@@ -7,13 +7,21 @@
  * an HttpOnly cookie and redirects to the app — so the token is presented once
  * and never lingers in the URL bar afterwards.
  *
- * Port: KONGCODE_UI_PORT, else the UID-offset default (matches uiPort() in
- * src/ui-server.ts). Loopback only.
+ * Port: imported directly from uiPort() in dist/ui-server.js — the single
+ * source of truth the daemon binds with (KONGCODE_UI_PORT override, else the
+ * UID-offset default). Loopback only. Never recompute the port here.
  */
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
 import { platform, homedir } from "node:os";
+// V1: single source of truth for the UI port — the SAME uiPort() the daemon
+// binds with (dist/ui-server.js, value-imports only node builtins + the tiny
+// logger). Round-9 U1 moved the base 28900→33000 in ui-server.ts but this
+// launcher kept a duplicated 28900 literal, so the default-config UI opened on
+// the wrong port (and would hand the bearer token to whatever held the stale
+// one). Importing the function eliminates the duplication for good.
+import { uiPort } from "../dist/ui-server.js";
 
 const tokenPath = join(homedir(), ".kongcode", "cache", "auth-token");
 let token;
@@ -29,9 +37,7 @@ if (!token) {
   process.exit(1);
 }
 
-const envPort = Number(process.env.KONGCODE_UI_PORT);
-const uid = typeof process.getuid === "function" ? process.getuid() : 0;
-const port = Number.isFinite(envPort) && envPort > 0 ? Math.floor(envPort) : 28900 + (uid % 10000);
+const port = uiPort();
 const url = `http://127.0.0.1:${port}/ui/auth?token=${token}`;
 
 console.log(`kongcode web UI → http://127.0.0.1:${port}/ui`);

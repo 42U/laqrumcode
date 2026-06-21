@@ -144,6 +144,22 @@ CRITICAL/HIGH/MEDIUM remain). Both fixed; full suite green (1456 tests).
 - **U2 (doc):** T3 left a stale JSDoc still describing the old [18764, 28763] window
   — corrected to the real [28765, 32764].
 
+### Hardened — round 10/11: V1 (half-applied UI-port move) + flaky-test root cause
+
+A sixth review round found 1 HIGH (V1); fixing it surfaced a pre-existing flaky
+test whose root cause is also fixed. Full suite green (1460+ tests).
+
+- **V1 (HIGH, half-applied U1):** the round-9 UI-port move (28900→33000) updated
+  `src/ui-server.ts` but NOT the user-facing launcher `scripts/open-ui.mjs` (nor
+  the skill doc), which kept a duplicated `28900` literal → on the default config
+  the daemon bound `:3X000` while `node scripts/open-ui.mjs` opened `:29900`, so
+  the web UI was unreachable for ~100% of default installs (and would hand the
+  daemon bearer token via `?token=` to whatever held the stale port). Fixed at the
+  root: the launcher now **imports `uiPort()` from `dist/ui-server.js`** (single
+  source of truth — no duplicated formula), docs corrected, and
+  `test/fix-v1-open-ui-port-parity.test.ts` forbids re-introducing a literal. This
+  closes the port-derivation-duplication class (R6→S6→T3→U1→V1).
+
 ## [0.7.130] — 2026-06-19
 
 ### Added — `update_skill` MCP tool

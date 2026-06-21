@@ -17,7 +17,8 @@ node scripts/open-ui.mjs
 
 This reads the daemon's auth token (`~/.kongcode/cache/auth-token`) and opens
 `http://127.0.0.1:<port>/ui` in the browser. The default port is
-`28900 + (uid % 10000)`; override with `KONGCODE_UI_PORT`.
+`33000 + (uid % 10000)` (kept above the daemon's IPC port window); override
+with `KONGCODE_UI_PORT`.
 
 ## Requirements
 
