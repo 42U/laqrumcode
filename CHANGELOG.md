@@ -175,6 +175,29 @@ re-running a CAS is safe). The previously-flaky test now passes 10/10;
 `test/fix-withretry-tx-conflict.test.ts` is a CI-safe unit guard (the real-DB
 test skips in CI). Full suite green (1463 tests).
 
+### Hardened — round 13 (live verification): memory_utility_cache.memory_id type
+
+Restarting the daemon onto the final build (mandatory live-verification gate)
+surfaced a runtime error the whole test suite missed: `updateUtilityCache`
+logged `Couldn't coerce ... Expected record<memory>|record<concept>|record<turn>
+but found artifact:...` on every artifact (and skill) retrieval. `retrieval-quality.ts`
+caches utility for ANY scored record id (memory/concept/turn/**artifact/skill**
+— all recall scopes), but `memory_utility_cache.memory_id` was typed as only the
+3-table union, so artifact/skill utility writebacks were silently rejected and
+those proven-utility signals were lost. Same schema-narrower-than-code class as
+K0; invisible to CI (swallowed runtime error on the live hook path only).
+
+- Widened to `DEFINE FIELD OVERWRITE memory_id ON memory_utility_cache TYPE
+  option<record>` (any record table — matches the field's documented "keyed by
+  any retrieved-record id" intent). `OVERWRITE` because `IF NOT EXISTS` no-ops a
+  type change; widening can't invalidate an existing value so the re-validation
+  is safe. Verified live: the DB now accepts `artifact:`/`skill:` `memory_id`
+  rows, daemon re-applies schema green on the populated DB, no coercion errors.
+- Also confirmed live this restart: schema applies cleanly on ~10.8K/3.5K/8.6K
+  rows; R1's `REMOVE INDEX muc_mid_idx` is gone (direct DB query: indexes `[]`);
+  the K13 timeout-breaker + K40 all-dropped floor degrade gracefully under
+  CPU-slow rerank.
+
 ## [0.7.130] — 2026-06-19
 
 ### Added — `update_skill` MCP tool

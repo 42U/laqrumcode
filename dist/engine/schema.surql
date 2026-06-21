@@ -429,12 +429,19 @@ DEFINE TABLE IF NOT EXISTS memory_utility_cache SCHEMALESS;
 -- retype before this DEFINE takes effect (SurrealDB no-ops re-declarations
 -- that only change type, matching the concept.superseded_by precedent).
 --
--- The union covers all three tables actually written here: memory (via
--- retrieval-quality writeback), concept (via context-engine recall paths
--- that surface concept rows alongside memory rows), and turn (turns are
--- also scored and cached). The name "memory_id" is historical — the cache
--- is keyed by any retrieved-record id, not just memory rows.
-DEFINE FIELD IF NOT EXISTS memory_id ON memory_utility_cache TYPE option<record<memory> | record<concept> | record<turn>>;
+-- The cache is keyed by ANY retrieved-record id — retrieval-quality writes a
+-- utility row for every scored item, which includes memory, concept, turn AND
+-- artifact + skill (all are recall scopes). The prior 3-table union
+-- (record<memory>|record<concept>|record<turn>) REJECTED artifact:/skill: ids
+-- with "Couldn't coerce ... Expected record<...> but found artifact:..." on
+-- every such retrieval (live-observed after the 1M campaign restart) — the same
+-- schema-narrower-than-code class as K0. option<record> (any record table)
+-- matches the documented "keyed by any retrieved-record id" intent and is
+-- future-proof. OVERWRITE (not IF NOT EXISTS) because SurrealDB no-ops a
+-- re-declaration that only changes type, so existing installs would otherwise
+-- keep the narrow union; widening (union → any record) cannot invalidate an
+-- existing value, so the OVERWRITE re-validation is safe.
+DEFINE FIELD OVERWRITE memory_id ON memory_utility_cache TYPE option<record>;
 -- K21: avg_utilization relaxed to option<float>. The race-free writer no longer
 -- materializes it (it would require a non-atomic read-compute-write); the mean
 -- is computed at read time from util_sum/retrieval_count. Legacy rows that still
