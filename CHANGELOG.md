@@ -130,6 +130,20 @@ fixed by hand; full suite green (1451 tests).
 - **T4:** S3's pre-compact 64KB cap head-sliced (dropped the actively-edited recent
   file from the FILES: resume summary) → tail-slice (recency-biased).
 
+### Hardened — round 8/9 (convergence floor): 1 LOW regression + 1 stale doc
+
+A fifth review round found only **1 LOW + 1 doc** (trend: 36 → 19 → 6 → 4 → 1; no
+CRITICAL/HIGH/MEDIUM remain). Both fixed; full suite green (1456 tests).
+
+- **U1 (LOW):** T3's daemon IPC window [28765, 32764] overlapped the read-only UI
+  server window (`uiPort = 28900 + uid%10000`) → ~1/4000 TCP-transport users got a
+  working daemon whose web UI silently failed to bind (non-fatal: the IPC server
+  wins the port, the UI skips). Moved the UI base to 33000 (exported `UI_PORT_BASE`,
+  above the IPC ceiling 32765); `test/fix-u1-ui-daemon-port-disjoint.test.ts` now
+  guards the two windows' disjointness so it can't recur.
+- **U2 (doc):** T3 left a stale JSDoc still describing the old [18764, 28763] window
+  — corrected to the real [28765, 32764].
+
 ## [0.7.130] — 2026-06-19
 
 ### Added — `update_skill` MCP tool

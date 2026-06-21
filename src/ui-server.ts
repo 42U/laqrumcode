@@ -50,14 +50,26 @@ const MIME: Record<string, string> = {
   ".map": "application/json; charset=utf-8",
 };
 
+/** U1: base of the read-only UI port window. MUST stay >= the daemon IPC window
+ *  ceiling (daemon-spawn.ts PORT_OFFSET_BASE + PORT_OFFSET_RANGE = 28765+4000 =
+ *  32765) so the UI never collides with the load-bearing IPC port. Pre-U1 this
+ *  was 28900, which after T3 raised the IPC window to [28765,32764] overlapped
+ *  it → ~1/4000 TCP-transport users got a working daemon whose UI silently
+ *  failed to bind. 33000 sits just above that ceiling. It IS in the low-ephemeral
+ *  range, which is acceptable ONLY because the UI binds 127.0.0.1 and is
+ *  NON-FATAL on EADDRINUSE (ui-server.ts:438-446) — unlike the IPC port, which
+ *  must stay below the 32768 ephemeral floor. Guarded by
+ *  test/fix-u1-ui-daemon-port-disjoint.test.ts. */
+export const UI_PORT_BASE = 33000;
+
 /** Loopback-only UI port. Env override, else a UID-offset default that avoids
- *  cross-user collision (mirrors the managed-surreal port scheme) while staying
- *  clear of the 18765-range managed DB ports. */
+ *  cross-user collision (mirrors the managed-surreal port scheme), disjoint from
+ *  both the managed-SurrealDB window [18765,28764] AND the daemon IPC window. */
 export function uiPort(): number {
   const env = Number(process.env.KONGCODE_UI_PORT);
   if (Number.isFinite(env) && env > 0 && env < 65536) return Math.floor(env);
   const uid = typeof process.getuid === "function" ? process.getuid() : 0;
-  return 28900 + (uid % 10000);
+  return UI_PORT_BASE + (uid % 10000);
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────────

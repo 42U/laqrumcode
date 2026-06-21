@@ -64,11 +64,12 @@ export function resolveTransport(env: NodeJS.ProcessEnv = process.env, plat: Nod
   return "uds";
 }
 
-/** Width of the per-user TCP-port window. The daemon's loopback port is
- *  DEFAULT_DAEMON_TCP_PORT + (hash(username) % PORT_OFFSET_RANGE), keeping it in
- *  [18764, 18764+9999] — well clear of the ephemeral range and of the managed
- *  SurrealDB window (18765 + uid%10000) that bootstrap.pickPort() uses. Same
- *  modulus shape as pickPort so the two derivations are auditable side by side. */
+/** Per-user TCP-port window for the daemon's loopback IPC: the daemon binds
+ *  PORT_OFFSET_BASE + (hash(osUserDiscriminator) % PORT_OFFSET_RANGE), i.e. the
+ *  [28765, 32764] window described in the T3 note below. Same modulus shape as
+ *  bootstrap.pickPort()'s managed-SurrealDB port so the derivations are auditable
+ *  side by side. (The read-only UI port — ui-server.ts UI_PORT_BASE/uiPort() —
+ *  starts ABOVE this window's ceiling, 32765, so the two never collide. U1.) */
 // T3: anchor the per-user offset window in [28765, 32764] — the gap ABOVE the
 // managed-SurrealDB window ([18765, 28764] = 18765 + uid%10000, fixed 18765 on
 // win32) and BELOW the 32768 ephemeral-port floor. The pre-T3 window
@@ -114,7 +115,7 @@ export function stableHash32(s: string): number {
 /** The TCP port the daemon binds. Must match daemon/index.ts exactly:
  *  - KONGCODE_DAEMON_PORT if set and valid → used verbatim, NO per-user offset
  *    (explicit operator intent; mirrors pickPort's env-override-wins rule).
- *  - else DEFAULT_DAEMON_TCP_PORT + (hash(osUserDiscriminator) % PORT_OFFSET_RANGE).
+ *  - else PORT_OFFSET_BASE + (hash(osUserDiscriminator) % PORT_OFFSET_RANGE) — the [28765,32764] window (T3).
  *
  *  S6 (multi-OS-user Windows host): the prior flat default (18764 for every
  *  user) let a 2nd OS user's client fast-path-ping 127.0.0.1:18764 and ADOPT
