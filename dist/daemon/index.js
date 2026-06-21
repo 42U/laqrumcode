@@ -104,6 +104,19 @@ const startedAt = Date.now();
 /** Module-level state — once initialized, every IPC handler closes over this.
  *  Mirrors mcp-server.ts's globalState pattern but lives in the daemon now. */
 let globalState = null;
+/** K1: periodic stale-session reaper. reapStaleSessions() existed but had ZERO
+ *  callers — the daemon's sessions Map was only ever pruned by the SessionEnd
+ *  hook's removeSession(), so any session whose SessionEnd never fired (crashed
+ *  client, killed tab, drain subprocess) leaked forever. On a long-lived
+ *  per-host daemon that is an unbounded-growth → OOM path. This interval reaps
+ *  idle sessions on a cadence; the hard size cap in GlobalPluginState is the
+ *  backstop. Unref'd so it never keeps the event loop alive past idle-reap.
+ *  Cleared in gracefulCleanup. */
+let sessionReaperTimer = null;
+/** How often the stale-session reaper sweeps. 10 min is well below the default
+ *  2h stale threshold in reapStaleSessions, so a leaked session is reclaimed
+ *  within a couple of hours without adding measurable load. */
+const SESSION_REAP_INTERVAL_MS = 10 * 60_000;
 // GPU/CPU selection — resolved at module load, BEFORE detectResourceProfile()
 // (which reads KONGCODE_NO_GPU) and before any CUDA init. Opt-in, no-op by
 // default. A device value pins CUDA_VISIBLE_DEVICES; a CPU sentinel
@@ -217,6 +230,26 @@ async function initializeStack() {
     // session ends. Without this, the module-scoped Map would leak entries
     // indefinitely as new sessions arrive.
     registerRetrievalQualityCleanup(globalState);
+    // K1: arm the periodic stale-session reaper. Without this, reapStaleSessions
+    // was dead code and the sessions Map only shrank via SessionEnd — a client
+    // whose SessionEnd never fired leaked its SessionState (and any module-scoped
+    // session-keyed entries) forever. Idempotent guard so a duplicate
+    // initializeStack (shouldn't happen, but cheap) doesn't double-arm. Unref'd
+    // so it never blocks the daemon's idle-reap exit.
+    if (!sessionReaperTimer) {
+        sessionReaperTimer = setInterval(() => {
+            try {
+                const reaped = globalState?.reapStaleSessions() ?? 0;
+                if (reaped > 0)
+                    log.info(`[daemon] stale-session reaper: reaped ${reaped} idle session(s), ${globalState?.sessionCount ?? 0} remaining`);
+            }
+            catch (e) {
+                log.warn(`[daemon] stale-session reaper threw: ${e.message}`);
+            }
+        }, SESSION_REAP_INTERVAL_MS);
+        sessionReaperTimer.unref?.();
+        log.info(`[daemon] stale-session reaper armed (every ${Math.round(SESSION_REAP_INTERVAL_MS / 60_000)}min)`);
+    }
     // Start auto-drain scheduler EARLY — before any `await store.initialize()`
     // or `await embeddings.initialize()` so the periodic timer arms even when
     // a downstream init step hangs or takes a long time. The scheduler only
@@ -661,6 +694,11 @@ async function main() {
         }, 8_000);
         watchdog.unref();
         stopDrainScheduler();
+        // K1: stop the periodic stale-session reaper.
+        if (sessionReaperTimer) {
+            clearInterval(sessionReaperTimer);
+            sessionReaperTimer = null;
+        }
         try {
             await server.close();
         }

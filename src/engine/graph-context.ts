@@ -47,6 +47,93 @@ const RERANK_MAX_DOC_TOKENS = Number(process.env.KONGCODE_RERANK_MAX_DOC_TOKENS)
 const RERANK_QUERY_MAX_TOKENS = Number(process.env.KONGCODE_RERANK_QUERY_MAX_TOKENS) || 512;
 const RERANK_TOTAL_TOKEN_BUDGET = Number(process.env.KONGCODE_RERANK_TOTAL_TOKEN_BUDGET) || 8192;
 const RERANK_CHUNK_SIZE = Number(process.env.KONGCODE_RERANK_CHUNK_SIZE) || 6;
+// K40: when the cross-encoder disagrees with WMR on EVERY candidate, keep at
+// most this many top-by-blended-score rather than returning an empty set.
+const RERANK_ALL_DROPPED_KEEP = Number(process.env.KONGCODE_RERANK_ALL_DROPPED_KEEP) || 5;
+
+// ── Cross-encoder timeout + circuit breaker (K13) ────────────────────────────
+// The bge-reranker rankAll() is a synchronous-ish CPU kernel that can wedge on
+// pathological input or a half-initialized model context. Token-capping bounds
+// the *expected* cost, but a wedged context still hangs the awaiting caller
+// forever — and Stop awaits evaluateRetrieval which awaits the cross-encoder, so
+// one stuck rankAll would freeze the turn boundary. We wrap every rankAll in a
+// per-chunk deadline (mirrors the embeddings compute-timeout) plus a
+// consecutive-timeout breaker (mirrors EmbeddingService.consecutiveTimeouts):
+// after N consecutive deadline hits the cross-encoder is disabled for a cooldown
+// and callers fall back to lexical / distribution-band scoring. All env-tunable.
+const RERANK_TIMEOUT_MS = Number(process.env.KONGCODE_RERANK_TIMEOUT_MS) || 10_000;
+const RERANK_MAX_CONSECUTIVE_TIMEOUTS =
+  Number(process.env.KONGCODE_RERANK_MAX_TIMEOUTS) || 3;
+const RERANK_BREAKER_COOLDOWN_MS =
+  Number(process.env.KONGCODE_RERANK_BREAKER_COOLDOWN_MS) || 60_000;
+let _rerankConsecutiveTimeouts = 0;
+let _rerankBreakerOpenedAt: number | null = null;
+
+/** True when the consecutive-timeout breaker is open and still inside its
+ *  cooldown window — callers should skip the cross-encoder entirely and fall
+ *  back. Re-closes (returns false) once the cooldown elapses so the next call
+ *  acts as a half-open probe. */
+function rerankBreakerOpen(): boolean {
+  if (_rerankConsecutiveTimeouts < RERANK_MAX_CONSECUTIVE_TIMEOUTS) return false;
+  if (_rerankBreakerOpenedAt == null) return false;
+  return Date.now() - _rerankBreakerOpenedAt < RERANK_BREAKER_COOLDOWN_MS;
+}
+
+/** @internal test helper — reset breaker state between cases. */
+export function _resetRerankBreaker(): void {
+  _rerankConsecutiveTimeouts = 0;
+  _rerankBreakerOpenedAt = null;
+}
+
+/** @internal test helper — inspect breaker state. */
+export function _rerankBreakerState(): { consecutiveTimeouts: number; open: boolean } {
+  return { consecutiveTimeouts: _rerankConsecutiveTimeouts, open: rerankBreakerOpen() };
+}
+
+/** Run rankAll under a deadline + the consecutive-timeout breaker. Throws on
+ *  timeout (so the caller's try/catch falls back); resets the breaker on any
+ *  successful return. Returns null only when the breaker is already open (caller
+ *  should fall back without computing). */
+async function rankAllWithDeadline(
+  ctx: LlamaRankingContext,
+  query: Token[],
+  docs: Token[][],
+): Promise<number[] | null> {
+  if (rerankBreakerOpen()) return null;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const scores = await Promise.race([
+      ctx.rankAll(query, docs),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`rankAll timed out after ${RERANK_TIMEOUT_MS}ms`)),
+          RERANK_TIMEOUT_MS,
+        );
+      }),
+    ]);
+    // Success closes the breaker.
+    if (_rerankConsecutiveTimeouts > 0) {
+      log.warn("[rerank] cross-encoder recovered — timeout breaker closed");
+    }
+    _rerankConsecutiveTimeouts = 0;
+    _rerankBreakerOpenedAt = null;
+    return scores;
+  } catch (e) {
+    if (e instanceof Error && e.message.includes("timed out")) {
+      _rerankConsecutiveTimeouts++;
+      if (_rerankConsecutiveTimeouts >= RERANK_MAX_CONSECUTIVE_TIMEOUTS) {
+        _rerankBreakerOpenedAt = Date.now();
+        log.error(
+          `[rerank] timeout #${_rerankConsecutiveTimeouts}/${RERANK_MAX_CONSECUTIVE_TIMEOUTS}` +
+          " — CROSS-ENCODER CIRCUIT BREAKER OPEN, falling back to lexical/distribution scoring",
+        );
+      }
+    }
+    throw e;
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
 
 /** Tokenize + cap to a fixed token budget, returning Token[] for rankAll. Passing
  *  tokens (not a char-truncated string) gives EXACT length control: a char cap
@@ -113,13 +200,17 @@ export async function crossEncoderScorePairs(
   docs: string[],
 ): Promise<number[] | null> {
   if (!_rankingCtx || docs.length === 0) return null;
+  // K13: skip compute entirely while the breaker is open so a wedged
+  // cross-encoder can't hang evaluateRetrieval on the Stop path.
+  if (rerankBreakerOpen()) return null;
   try {
     const anchorTokens = capTokens(anchor, RERANK_QUERY_MAX_TOKENS);
     const docTokens = docs.map(d => capTokens(d, RERANK_MAX_DOC_TOKENS));
     const scores: number[] = new Array(docTokens.length);
     for (let start = 0; start < docTokens.length; start += RERANK_CHUNK_SIZE) {
       const end = Math.min(start + RERANK_CHUNK_SIZE, docTokens.length);
-      const chunk = await _rankingCtx.rankAll(anchorTokens, docTokens.slice(start, end));
+      const chunk = await rankAllWithDeadline(_rankingCtx, anchorTokens, docTokens.slice(start, end));
+      if (chunk == null) return null; // breaker opened mid-batch
       for (let i = 0; i < chunk.length; i++) scores[start + i] = chunk[i];
       if (end < docTokens.length) await new Promise<void>(r => setImmediate(r));
     }
@@ -195,6 +286,12 @@ async function rerankResults<T extends { id: string; text?: string; finalScore: 
   if (deduped.length <= 5) return deduped;
   const loaded = await ensureRerankerLoaded();
   if (!loaded || !_rankingCtx) return deduped;
+  // K13: breaker open → skip the cross-encoder and band by distribution so the
+  // formatter still gets salience anchors instead of raw relevance %.
+  if (rerankBreakerOpen()) {
+    applyDistributionBands(deduped);
+    return deduped;
+  }
   try {
     const topN = Math.min(RERANK_TOP_N, deduped.length);
     const candidates = deduped.slice(0, topN);
@@ -216,7 +313,13 @@ async function rerankResults<T extends { id: string; text?: string; finalScore: 
     const crossScores: number[] = new Array(docTokens.length);
     for (let start = 0; start < docTokens.length; start += RERANK_CHUNK_SIZE) {
       const end = Math.min(start + RERANK_CHUNK_SIZE, docTokens.length);
-      const chunkScores = await _rankingCtx.rankAll(qTokens, docTokens.slice(start, end));
+      // K13: each chunk under the deadline + breaker. null = breaker tripped
+      // mid-batch; bail to the catch's WMR/distribution fallback below.
+      const chunkScores = await rankAllWithDeadline(_rankingCtx, qTokens, docTokens.slice(start, end));
+      if (chunkScores == null) {
+        applyDistributionBands(deduped);
+        return deduped;
+      }
       for (let i = 0; i < chunkScores.length; i++) {
         crossScores[start + i] = chunkScores[i];
       }
@@ -235,6 +338,19 @@ async function rerankResults<T extends { id: string; text?: string; finalScore: 
     // Drop hard-noise (cross-encoder strongly disagrees) before re-sorting.
     const survivors = scored.filter((c) => (c.crossScore ?? 0) >= BAND_DROP_BELOW);
     survivors.sort((a, b) => b.finalScore - a.finalScore);
+    // K40: all-dropped floor. If the cross-encoder disagreed with WMR on EVERY
+    // candidate (survivors empty) but we did score some, never zero out the
+    // whole result set — that would strand the turn with no recalled_memory at
+    // all. Keep the top-N by blended finalScore so the strongest items still
+    // ship; they keep their bands so the formatter renders salience honestly.
+    if (survivors.length === 0 && scored.length > 0) {
+      const floored = [...scored].sort((a, b) => b.finalScore - a.finalScore);
+      log.warn(
+        `[rerank] cross-encoder dropped all ${scored.length} candidates below ` +
+        `${BAND_DROP_BELOW}; keeping top ${Math.min(RERANK_ALL_DROPPED_KEEP, floored.length)} by blended score`,
+      );
+      return floored.slice(0, RERANK_ALL_DROPPED_KEEP);
+    }
     // Items not cross-scored (tail past top-N, or past the token budget) are
     // dropped: shipping un-reranked items injects noise the user can't account for.
     return survivors;
@@ -677,7 +793,11 @@ async function scoreResults(
     utilityMap.set(id, entry.avg_utilization);
   }
   if (utilityMap.size === 0 && eligibleIds.length > 0) {
-    utilityMap = await getHistoricalUtilityBatch(eligibleIds);
+    // K22: getHistoricalUtilityBatch needs the store (without it the fn
+    // returns an empty map and this fallback is dead), and memory_id is a
+    // TYPE string column — eligibleIds may be RecordId Things, so stringify
+    // before the `WHERE memory_id IN $ids` bind or nothing ever matches.
+    utilityMap = await getHistoricalUtilityBatch(eligibleIds.map(String), store);
   }
   const floor = INTENT_SCORE_FLOORS[currentIntent] ?? SCORE_FLOOR_DEFAULT;
 
@@ -1494,13 +1614,24 @@ async function graphTransformInner(
   embeddings: EmbeddingService,
   contextWindow: number,
   budgets: Budgets,
-  _signal?: AbortSignal,
+  signal?: AbortSignal,
   /** Tier 0 entries already fetched by wrapper — avoids double DB fetch. */
   tier0FromWrapper: CoreMemoryEntry[] = [],
   /** B17 stage trace owned by the wrapper — marks stage STARTS. */
   stageTrace?: TransformStageTrace,
 ): Promise<GraphTransformResult> {
   const mark = (stage: string): void => { stageTrace?.marks.push({ stage, at: Date.now() }); };
+  // K6-gc: honor the deadline AbortSignal. The wrapper's Promise.race rejects
+  // on timeout and returns raw messages, but the inner pipeline kept running —
+  // a leaked, post-deadline computation that still burned CPU and (worse) wrote
+  // a stale entry into the prefetch cache after the caller had moved on. We
+  // check the signal at each stage boundary and throw, which the inner try/catch
+  // (or the wrapper) turns into the same recency-only/passthrough fallback the
+  // timeout already returned. Cheap stages aren't gated; the expensive rerank
+  // and the cache WRITE are gated explicitly below.
+  const checkAbort = (): void => {
+    if (signal?.aborted) throw new Error("graphTransformInner aborted (deadline exceeded)");
+  };
   function makeStats(
     sent: AgentMessage[], graphNodes: number, neighborNodes: number,
     recentTurnCount: number, mode: ContextStats["mode"], prefetchHit = false,
@@ -1614,6 +1745,7 @@ async function graphTransformInner(
       await mergeAccessDeltas(store, filteredCached);
       const ranked = await scoreResults(filteredCached, new Set(), queryVec, store, currentIntent);
       const deduped = deduplicateResults(ranked);
+      checkAbort(); // K6-gc: don't burn the CPU-bound cross-encoder post-deadline
       const reranked = await rerankResults(deduped, queryText);
       applyDistributionBands(reranked);
       let contextNodes = takeWithConstraints(reranked, tokenBudget, budgets.maxContextItems);
@@ -1742,6 +1874,7 @@ async function graphTransformInner(
     await mergeAccessDeltas(store, allResults);
     const ranked = await scoreResults(allResults, neighborIds, queryVec, store, currentIntent);
     const deduped = deduplicateResults(ranked);
+    checkAbort(); // K6-gc: don't burn the CPU-bound cross-encoder post-deadline
     const reranked = await rerankResults(deduped, queryText);
     applyDistributionBands(reranked);
     let contextNodes = takeWithConstraints(reranked, tokenBudget, budgets.maxContextItems);
@@ -1781,8 +1914,13 @@ async function graphTransformInner(
     let reflectionContext = "";
     if (reflectionsFound.length > 0) reflectionContext = formatReflectionContext(reflectionsFound);
 
-    // Write full pipeline results back to prefetch cache for subsequent similar queries
-    setCachedContext(queryVec, contextNodes, skillsFound, reflectionsFound, session.sessionId, session.projectId || undefined);
+    // Write full pipeline results back to prefetch cache for subsequent similar
+    // queries. K6-gc: skip the write if the caller already abandoned us on the
+    // deadline — caching a result the assembler discarded would serve a stale,
+    // late-completing entry to the NEXT turn under a cache hit.
+    if (!signal?.aborted) {
+      setCachedContext(queryVec, contextNodes, skillsFound, reflectionsFound, session.sessionId, session.projectId || undefined);
+    }
 
     mark("format-context");
     const injectedContext = await formatContextMessage(contextNodes, store, session, skillContext + reflectionContext, tier0, tier1);

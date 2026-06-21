@@ -59,6 +59,13 @@ export declare class EmbeddingService {
     private embedQueue;
     private queueDraining;
     private queueDepthMax;
+    /** K12 backpressure: hard cap on pending embed requests. llama serializes
+     *  compute (one item at a time), so an unbounded push lets a burst of hook
+     *  traffic / a wedged embedder grow the FIFO without limit — each entry
+     *  pins its text + two closures, so the queue is the leak surface on a
+     *  long-lived daemon. Past this depth embed() fast-fails with a retryable
+     *  error instead of enqueueing. Override via KONGCODE_EMBED_QUEUE_MAX. */
+    private readonly maxQueueDepth;
     embed(text: string): Promise<number[]>;
     private drainEmbedQueue;
     private computeAndSettle;

@@ -516,19 +516,34 @@ export async function createSoul(
   // inner-object timestamp stays as a string because revisions is
   // `array<object>` (unconstrained inner types), not a datetime field.
   const now = new Date().toISOString();
-  await store.queryExec(`CREATE soul:kongbrain CONTENT $data`, {
-    data: {
-      agent_id: "kongbrain",
-      ...doc,
-      revisions: [{
-        timestamp: now,
-        section: "all",
-        change: "Initial soul document created at graduation",
-        rationale: "Agent accumulated sufficient experiential data and demonstrated quality performance to meaningfully self-observe",
-      }],
-    },
-  });
-  return true;
+  // K42: the hasSoul()→CREATE gap is a TOCTOU window. soul:kongbrain is a
+  // FIXED record id, so a concurrent caller (two session-end pipelines, or a
+  // retry) that slips between the check and the CREATE causes the second
+  // CREATE to throw "Database record `soul:kongbrain` already exists". Treat
+  // that as idempotent success — the soul exists, which is what the caller
+  // wanted. Mirrors the markTerminal/CAS idempotency philosophy. Re-check
+  // hasSoul after catch so a genuine write failure still returns false.
+  try {
+    await store.queryExec(`CREATE soul:kongbrain CONTENT $data`, {
+      data: {
+        agent_id: "kongbrain",
+        ...doc,
+        revisions: [{
+          timestamp: now,
+          section: "all",
+          change: "Initial soul document created at graduation",
+          rationale: "Agent accumulated sufficient experiential data and demonstrated quality performance to meaningfully self-observe",
+        }],
+      },
+    });
+    return true;
+  } catch (e) {
+    // Already-exists (lost the create race) is success; anything else is a
+    // real failure — confirm via hasSoul before claiming the soul is present.
+    if (await hasSoul(store)) return true;
+    swallow.warn("soul:createSoul", e);
+    return false;
+  }
 }
 
 export async function reviseSoul(

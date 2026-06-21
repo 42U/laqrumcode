@@ -4,6 +4,52 @@ All notable changes to KongCode are documented here. The 0.7.x series introduced
 
 ## [Unreleased]
 
+### Hardened — enterprise 1M-install readiness pass (branch `harden-1m-and-rename`)
+
+A 118-agent review (fan-out → triage → 3-lens adversarial verify) of the whole
+engine for ~1M independent single-host installs surfaced **36 confirmed defects**
+(+ K0); 15 were refuted (one — orchestrator_metrics retention — because the
+proposed hard-DELETE would have violated the Tier-0 NEVER-DELETE directive). All
+confirmed defects are fixed below; full suite green (1318 tests). Frame: 1M users
+= 1M local daemons, so the bar is deterministic correctness + per-host
+resource/cost discipline, not server sharding. No content-table hard-deletes were
+added; all new indexes are non-UNIQUE / IF NOT EXISTS (boot-safe).
+
+- **K0 — drain pipeline unbroken.** `pending_work.status` SCHEMAFULL enum was
+  missing the `committing` transient that batch-2a's C1 CAS writes, so
+  `commit_work_results` failed deterministically and NO work item could commit.
+  Enum fixed; added `test/schema-status-enum-drift.test.ts` (non-mocked static
+  guard for the whole code-vs-schema status-enum class — the mocked
+  `commit-claim-guard` test couldn't see it).
+- **Concurrency (CRITICAL/HIGH):** K3 concept dedup race sealed via deterministic
+  `concept:⟨sha256(lowercased content)⟩` record id (no risky UNIQUE migration);
+  K15 stale-recovery no longer reverts an in-flight `committing` row (clock reset
+  at the CAS + pre-write ownership re-assert); K41 commit CAS made idempotent
+  across a withRetry re-fire via `committing_token`; K31 causal_graduate claims
+  chains at fetch time (RETURN BEFORE) so concurrent drains can't double-synthesize
+  skills; K10 auto-drain lock no longer steals a live child's lock by age / unlinks
+  a sibling's lock; K21 utility-cache running-average replaced with commutative
+  `util_sum`/`count` accumulators; K9 consolidate mutual-archive guarded; K42
+  createSoul idempotent.
+- **Scalability hot path (CRITICAL/HIGH):** K4 `tagBoostedConcepts`, K19/K20
+  consolidate + concept-dedup, K18 reflection membership, K14 PreCompact reads —
+  all converted off full linear cosine/`WITH NOINDEX` scans to HNSW-KNN /
+  index-served bounded reads; K2/K23 retrieval-eval bounded + batched + moved off
+  the Stop critical path; K6 deadline now cancels the inner pipeline (AbortSignal
+  honored); K13 cross-encoder `rankAll` got a timeout + circuit breaker; K28
+  graduation aggregations no longer run twice per prompt; K8/K29/K33 added missing
+  `created_at`/`timestamp`/`importance` indexes + turn_score retention.
+- **Resilience / resource (HIGH/MED/LOW):** K1 dead session-reaper wired +
+  hard sessions-Map cap; K48 `_observedFilePaths` cap + bounded scan; K11
+  daemon close() drains in-flight RPCs before disposing the store; K12 RPC + embed
+  backpressure; K5 ingest embed-failure degrades to an un-embedded (heal-able) row
+  instead of dropping the turn; K16 concept backfill keys off `content` (not the
+  dead `name` column); K17 embedding_cache periodic prune + pruned_at reset; K51
+  memory backfill embeds the original short target; K32/K38/K39 added connect /
+  readiness / download timeouts; K34 ACAN training uses transferable buffers; K40
+  rerank all-dropped floor; K47 drain-log fd closed on spawn failure; K50 relay
+  process-level rejection handlers; K35 UI search bounded.
+
 ## [0.7.130] — 2026-06-19
 
 ### Added — `update_skill` MCP tool

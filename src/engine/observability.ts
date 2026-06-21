@@ -226,12 +226,23 @@ export async function rollupDailyMetrics(
 export async function pruneRawMetrics(store: SurrealStore, retentionDays = 30): Promise<void> {
   if (!store.isAvailable()) return;
   try {
-    await store.queryExec(
-      `UPDATE orchestrator_metrics SET
-         pruned_at = time::now(),
-         prune_reason = "retention_${retentionDays}d"
-       WHERE created_at < time::now() - ${retentionDays}d
-         AND pruned_at IS NONE`,
+    // K7: was one unbounded soft-tag UPDATE. On a long-lived daemon's first
+    // run (or after a long idle), the cold-start backlog can be a huge number
+    // of rows, and SurrealDB rejects `LIMIT` on UPDATE, so it can't be capped
+    // inline. Mirror purgeStaleEmbedCache's LET+FOR pattern — LIMIT is valid on
+    // the SELECT, so the backlog is processed in bounded 500-row chunks per
+    // run. Still SOFT-TAG (pruned_at + prune_reason); NEVER DELETE (Tier-0).
+    // Indexed scan relies on om_created_idx (orchestrator_metrics.created_at).
+    await store.queryMulti(
+      `LET $stale = (SELECT id FROM orchestrator_metrics
+         WHERE created_at < time::now() - ${retentionDays}d
+           AND pruned_at IS NONE
+         LIMIT 500);
+       FOR $row IN $stale {
+         UPDATE $row.id SET
+           pruned_at = time::now(),
+           prune_reason = "retention_${retentionDays}d";
+       };`,
     );
   } catch (e) {
     swallow.warn("observability:pruneRawMetrics", e);
@@ -294,10 +305,17 @@ export async function computeTrends(
 let _anomalyCacheRaw: AnomalyFlag[] = [];
 let _anomalyCacheAt = 0;
 const ANOMALY_CACHE_TTL_MS = 60_000;
+// K28: in-flight computation promise. The old check-then-set cache had a
+// stampede window — N concurrent UserPromptSubmit calls in the same tick all
+// saw a stale `_anomalyCacheAt` and each ran the full detector batch (each of
+// which runs ~13 GROUP-ALL aggregations via checkGraduation). Storing the
+// in-flight Promise makes concurrent callers AWAIT one computation instead.
+let _anomalyComputation: Promise<AnomalyFlag[]> | null = null;
 
 export function resetAnomalyCache(): void {
   _anomalyCacheRaw = [];
   _anomalyCacheAt = 0;
+  _anomalyComputation = null;
 }
 
 // ── Substrate-health module state ──
@@ -415,32 +433,25 @@ export async function detectAnomalies(
   let rawFlags: AnomalyFlag[];
   if (now - _anomalyCacheAt < ANOMALY_CACHE_TTL_MS) {
     rawFlags = _anomalyCacheRaw;
+  } else if (_anomalyComputation) {
+    // K28: a computation is already in flight (concurrent caller in the same
+    // ~60s window). Await it instead of starting a stampeding second batch.
+    rawFlags = await _anomalyComputation;
   } else {
-    // Detectors that do NOT need DB access (run synchronously, wrapped in
-    // Promise so the Promise.allSettled batch is uniform).
-    const syncDetectors: Array<() => AnomalyFlag | null> = [
-      detectDbUnreachable,
-      detectCacheWriteFailures,
-      detectEmbeddingServiceDown,
-    ];
-    const dbDetectors: Array<(s: SurrealStore) => Promise<AnomalyFlag | null>> = [
-      detectContextTransformFailures,
-      detectEmbeddingGap,
-      detectPendingWorkBuildup,
-      detectPendingWorkAging,
-      detectGraduationReady,
-      detectGraduationClose,
-    ];
-    const results = await Promise.allSettled([
-      ...syncDetectors.map(d => Promise.resolve(d())),
-      ...dbDetectors.map(d => d(store)),
-    ]);
-    rawFlags = [];
-    for (const r of results) {
-      if (r.status === "fulfilled" && r.value) rawFlags.push(r.value);
-    }
-    _anomalyCacheRaw = rawFlags;
-    _anomalyCacheAt = now;
+    // Start the single shared computation. Subsequent concurrent callers hit
+    // the branch above and await this same Promise. Cleared in finally so a
+    // throw doesn't strand future runs.
+    _anomalyComputation = (async () => {
+      try {
+        const flags = await computeRawAnomalyFlags(store);
+        _anomalyCacheRaw = flags;
+        _anomalyCacheAt = Date.now();
+        return flags;
+      } finally {
+        _anomalyComputation = null;
+      }
+    })();
+    rawFlags = await _anomalyComputation;
   }
 
   const flags: AnomalyFlag[] = [];
@@ -451,6 +462,58 @@ export async function detectAnomalies(
     flags.push(flag);
   }
   return flags;
+}
+
+/**
+ * Run every detector once and collect the raw (pre-cooldown) flags. Factored
+ * out of detectAnomalies so the in-flight-Promise dedupe (K28) wraps a single
+ * function. The graduation context (hasSoul + checkGraduation) is computed
+ * ONCE here and shared by both graduation detectors instead of each detector
+ * re-running ~13 GROUP-ALL aggregations.
+ */
+async function computeRawAnomalyFlags(store: SurrealStore): Promise<AnomalyFlag[]> {
+  // Build the shared graduation context once. checkGraduation runs ~13
+  // GROUP-ALL aggregations; computing it twice (once per graduation detector)
+  // doubled that cost on every UserPromptSubmit.
+  const { checkGraduation, hasSoul } = await import("./soul.js");
+  const gradCtxPromise: Promise<GraduationContext> = (async () => {
+    const [soulExists, report] = await Promise.all([hasSoul(store), checkGraduation(store)]);
+    return { soulExists, report };
+  })();
+
+  // Detectors that do NOT need DB access (run synchronously, wrapped in
+  // Promise so the Promise.allSettled batch is uniform).
+  const syncDetectors: Array<() => AnomalyFlag | null> = [
+    detectDbUnreachable,
+    detectCacheWriteFailures,
+    detectEmbeddingServiceDown,
+  ];
+  const dbDetectors: Array<(s: SurrealStore) => Promise<AnomalyFlag | null>> = [
+    detectContextTransformFailures,
+    detectEmbeddingGap,
+    detectPendingWorkBuildup,
+    detectPendingWorkAging,
+  ];
+  // Graduation detectors share one precomputed context (K28).
+  const gradDetectors: Array<(ctx: GraduationContext) => AnomalyFlag | null> = [
+    detectGraduationReady,
+    detectGraduationClose,
+  ];
+  const results = await Promise.allSettled([
+    ...syncDetectors.map(d => Promise.resolve(d())),
+    ...dbDetectors.map(d => d(store)),
+    gradCtxPromise.then(ctx => gradDetectors.map(d => d(ctx))),
+  ]);
+  const rawFlags: AnomalyFlag[] = [];
+  for (const r of results) {
+    if (r.status !== "fulfilled" || !r.value) continue;
+    if (Array.isArray(r.value)) {
+      for (const f of r.value) if (f) rawFlags.push(f);
+    } else {
+      rawFlags.push(r.value);
+    }
+  }
+  return rawFlags;
 }
 
 export function makeCooldownState(): CooldownState {
@@ -617,14 +680,28 @@ async function detectPendingWorkAging(store: SurrealStore): Promise<AnomalyFlag 
   };
 }
 
-async function detectGraduationReady(store: SurrealStore): Promise<AnomalyFlag | null> {
+/**
+ * K28: the two graduation detectors used to each call hasSoul() +
+ * checkGraduation() independently — and checkGraduation() runs ~13 GROUP-ALL
+ * aggregations. Running both detectors meant ~2x that scan cost on every
+ * UserPromptSubmit. detectAnomalies() now computes the graduation context
+ * ONCE per batch and passes it to both. The shape is imported lazily by the
+ * caller; here we just consume the precomputed values.
+ */
+interface GraduationContext {
+  soulExists: boolean;
+  // Computed ONCE per detectAnomalies batch and shared by both graduation
+  // detectors (each used to recompute it — ~13 GROUP-ALL aggregations x2).
+  report: import("./soul.js").GraduationReport;
+}
+
+function detectGraduationReady(ctx: GraduationContext): AnomalyFlag | null {
   // One-shot announcement when both volume AND quality are green.
   // Soul graduation is a ONE-TIME event tied to the existence of soul:kongbrain.
   // After the soul exists graduation has already happened, so this detector
   // must suppress — otherwise it keeps celebrating an event from months ago.
-  const { checkGraduation, hasSoul } = await import("./soul.js");
-  if (await hasSoul(store)) return null; // already graduated; no further "ready" alert
-  const report = await checkGraduation(store);
+  if (ctx.soulExists) return null; // already graduated; no further "ready" alert
+  const report = ctx.report;
   if (!report.ready) return null;
   return {
     code: "gate.graduation_ready",
@@ -635,7 +712,7 @@ async function detectGraduationReady(store: SurrealStore): Promise<AnomalyFlag |
   };
 }
 
-async function detectGraduationClose(store: SurrealStore): Promise<AnomalyFlag | null> {
+function detectGraduationClose(ctx: GraduationContext): AnomalyFlag | null {
   // Two modes depending on whether soul already exists:
   //   - Pre-soul: this is a genuine "you're approaching graduation" alert
   //     (gate.graduation_close, info severity).
@@ -644,9 +721,8 @@ async function detectGraduationClose(store: SurrealStore): Promise<AnomalyFlag |
   //     qualified the agent — i.e. a regression watch, not a graduation
   //     approach. Reframe under a different code so the language stays
   //     truthful.
-  const { checkGraduation, hasSoul } = await import("./soul.js");
-  const soulExists = await hasSoul(store);
-  const report = await checkGraduation(store);
+  const soulExists = ctx.soulExists;
+  const report = ctx.report;
   if (report.qualityScore < 0.80) return null;
 
   if (!soulExists) {

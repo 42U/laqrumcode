@@ -26,7 +26,27 @@ export interface ACANCandidate {
     provenUtility: number;
     reflectionBoost?: number;
 }
+interface TrainingSample {
+    query_embedding: number[];
+    memory_embedding: number[];
+    retrieval_score: number;
+    was_neighbor: boolean;
+    utilization: number;
+    importance: number;
+    access_count: number;
+    recency: number;
+}
+interface TrainingConfig {
+    epochs: number;
+    lr: number;
+    earlyStopPatience: number;
+    lrDecayPatience: number;
+    lrFloor: number;
+    valSplit: number;
+}
 export declare function initACAN(weightsDir?: string): boolean;
 export declare function isACANActive(): boolean;
 export declare function scoreWithACAN(queryEmbedding: number[], candidates: ACANCandidate[]): number[];
+export declare function trainInBackground(samples: TrainingSample[], weightsPath: string, warmStart?: ACANWeights, config?: Partial<TrainingConfig>, releaseLock?: () => void): void;
 export declare function checkACANReadiness(store?: SurrealStore, trainingThreshold?: number, weightsDir?: string): Promise<void>;
+export {};

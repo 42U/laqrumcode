@@ -603,7 +603,10 @@ async function commitMemory(
   }
 
   // 2. Insert the memory row. createMemory signature is
-  //    (text, embedding, importance, category, sessionId?).
+  //    (text, embedding, importance, category, sessionId?, projectId?,
+  //     embeddingTarget?). K51: pass embeddingText as the persisted embed
+  //    target so backfillMemoryEmbeddings can heal an un-embedded row with the
+  //    same short target this path used (preserving short-query match quality).
   const memoryId = await store.createMemory(
     data.text,
     embedding,
@@ -611,6 +614,7 @@ async function commitMemory(
     data.category,
     data.sessionId,
     data.projectId,
+    data.embeddingText,
   );
   let edges = 0;
 

@@ -230,8 +230,11 @@ async function commitMemory(deps, data) {
         }
     }
     // 2. Insert the memory row. createMemory signature is
-    //    (text, embedding, importance, category, sessionId?).
-    const memoryId = await store.createMemory(data.text, embedding, data.importance, data.category, data.sessionId, data.projectId);
+    //    (text, embedding, importance, category, sessionId?, projectId?,
+    //     embeddingTarget?). K51: pass embeddingText as the persisted embed
+    //    target so backfillMemoryEmbeddings can heal an un-embedded row with the
+    //    same short target this path used (preserving short-query match quality).
+    const memoryId = await store.createMemory(data.text, embedding, data.importance, data.category, data.sessionId, data.projectId, data.embeddingText);
     let edges = 0;
     // 3. Auto-seal: memory → concepts (about_concept) by semantic similarity.
     //    Previously this linking was only done inside the dormant memory-daemon;

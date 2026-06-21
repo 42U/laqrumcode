@@ -16,6 +16,14 @@ import { readLatestAssistantText, readTurnTokenUsage } from "../engine/transcrip
 import { rollupDailyMetrics, pruneRawMetrics } from "../engine/observability.js";
 import { todayUtc } from "../daemon/auto-drain.js";
 
+// K49: the day the daily rollup is CURRENTLY in flight for. Guards against the
+// concurrent double-fire — many Stop hooks can land in the window between the
+// fire and `state.lastRollupDay` being committed (which we now defer until the
+// async rollup actually resolves), and without this each would re-fire the
+// expensive rollup+prune. Module-scoped (one daemon owns the rollup) and reset
+// in the promise's finally so a failed run is retried on the next turn.
+let _rollupInFlightDay: string | null = null;
+
 export async function handleStop(
   state: GlobalPluginState,
   payload: Record<string, unknown>,
@@ -62,18 +70,21 @@ export async function handleStop(
     }
   }
 
-  // Evaluate retrieval quality for ACAN training
+  // Evaluate retrieval quality for ACAN training. K2: fire-and-forget — do
+  // NOT await. evaluateRetrieval cross-encodes staged items, which is bounded
+  // (top-K + token budget) but still CPU work the user shouldn't wait on at the
+  // turn boundary. Awaiting it here put CE throughput directly on the
+  // user-visible Stop latency. Staging is race-safe across the gap: the
+  // evaluator marks its entry `evaluating` and only deletes the entry it still
+  // owns, so a next-turn stageRetrieval can replace it without being clobbered.
+  // We snapshot turnId/text into locals because the session fields can be
+  // overwritten by the next turn before the async evaluator reads them.
   if (store.isAvailable() && session.lastAssistantTurnId) {
-    try {
-      await evaluateRetrieval(
-        session.sessionId,
-        session.lastAssistantTurnId,
-        session.lastAssistantText,
-        store,
-      );
-    } catch (e) {
-      swallow("stop:retrievalQuality", e);
-    }
+    const evalSessionId = session.sessionId;
+    const evalTurnId = session.lastAssistantTurnId;
+    const evalText = session.lastAssistantText;
+    void evaluateRetrieval(evalSessionId, evalTurnId, evalText, store)
+      .catch(e => swallow("stop:retrievalQuality", e));
   }
 
   // Postflight: write the per-turn orchestrator_metrics row. The writer
@@ -118,14 +129,23 @@ export async function handleStop(
   // orchestrator_metrics_daily and prune raw rows older than 30d. Cheap
   // when the day hasn't changed (one string compare); the actual rollup
   // and prune fire at most once per day per running MCP.
+  //
+  // K49: only COMMIT state.lastRollupDay after the rollup+prune actually
+  // resolves (in .then), and leave it unchanged on failure so the next turn
+  // retries — the prior code advanced it synchronously before the promise
+  // settled, so a transient rollup/prune failure permanently skipped the day.
+  // _rollupInFlightDay prevents the concurrent re-fire in the gap between
+  // launch and commit; it's cleared in finally so a failed run isn't wedged.
   if (store.isAvailable()) {
     const today = todayUtc();
-    if (state.lastRollupDay !== today) {
+    if (state.lastRollupDay !== today && _rollupInFlightDay !== today) {
+      _rollupInFlightDay = today;
       const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
       rollupDailyMetrics(store, yesterday)
         .then(() => pruneRawMetrics(store, 30))
-        .catch(e => swallow.warn("stop:dailyRollup", e));
-      state.lastRollupDay = today;
+        .then(() => { state.lastRollupDay = today; })
+        .catch(e => swallow.warn("stop:dailyRollup", e))
+        .finally(() => { _rollupInFlightDay = null; });
     }
   }
 

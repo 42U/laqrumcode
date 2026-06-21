@@ -116,12 +116,17 @@ describe("commitKnowledge — memory kind", () => {
       sessionId: "session:s1",
     });
     expect(result.id).toBe("memory:m1");
+    // K51: commitMemory now passes a 7th positional arg to createMemory —
+    // the persisted embedding target (data.embeddingText), undefined here
+    // since this call omits embeddingText. Asserting it keeps the test honest
+    // about the real call shape rather than swallowing extra args.
     expect(state.store.createMemory).toHaveBeenCalledWith(
       "user prefers verbose logging",
       expect.any(Array),
       7,
       "preference",
       "session:s1",
+      undefined,
       undefined,
     );
   });
@@ -164,8 +169,10 @@ describe("commitKnowledge — memory kind", () => {
       precomputedVec: vec,
     });
     expect(state.embeddings.embed).not.toHaveBeenCalled();
+    // K51: 7th positional arg is the persisted embedding target
+    // (data.embeddingText), undefined here since this call omits it.
     expect(state.store.createMemory).toHaveBeenCalledWith(
-      "precomputed case", vec, 5, "test", undefined, undefined,
+      "precomputed case", vec, 5, "test", undefined, undefined, undefined,
     );
   });
 });

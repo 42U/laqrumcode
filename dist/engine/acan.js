@@ -351,7 +351,9 @@ async function fetchTrainingData(store) {
     return samples;
 }
 // ── Background training ──
-function trainInBackground(samples, weightsPath, warmStart, config, releaseLock) {
+// Exported as a test seam (K34): lets the regression test capture the Worker
+// payload + transferList without standing up a real DB / training cycle.
+export function trainInBackground(samples, weightsPath, warmStart, config, releaseLock) {
     const cfg = { ...DEFAULT_TRAINING_CONFIG, ...config };
     const workerCode = `
     import { parentPort, workerData } from "node:worker_threads";
@@ -386,8 +388,44 @@ function trainInBackground(samples, weightsPath, warmStart, config, releaseLock)
     }
     parentPort.postMessage({ weights: { W_q, W_k, W_final, bias, version: 1, trainedAt: Date.now(), trainedOnSamples: n }, trainLoss: lastTrainLoss, valLoss: bestValLoss, actualEpochs, finalLr: lr, config: cfg });
   `;
+    // K34: the embedding floats dominate the payload — MAX_TRAINING_SAMPLES
+    // (15000) samples x 2 embeddings x EMBED_DIM (1024) doubles. Passing them as
+    // plain number[] in workerData structured-clones the whole lot into the
+    // worker (a second full copy on top of the JS arrays already materialized in
+    // the parent — the ~245MB + ~490MB peak). Instead, pack each embedding into
+    // its own Float32Array and TRANSFER the backing ArrayBuffers via
+    // transferList: the buffers are MOVED into the worker (zero-copy), not
+    // duplicated. Float32Array is a drop-in for the worker's dot()/projectVec()
+    // (index access + .length only).
+    //
+    // Each sample gets a FRESH Float32Array so every buffer is unique —
+    // embeddingMap reuses the same memory_embedding array instance across
+    // outcomes that hit the same memory_id, and transferring one ArrayBuffer
+    // twice throws "already detached". The single Float32Array copy here
+    // replaces the structured-clone copy that would otherwise happen, so this is
+    // still a net reduction (and kills the double-copy peak in the worker).
+    //
+    // NB: transfer DETACHES the parent's buffers. `samples` must not be read
+    // after this point — callers (checkACANReadiness) spawn-and-forget, so OK.
+    const transferList = [];
+    const packedSamples = samples.map(s => {
+        const qe = Float32Array.from(s.query_embedding);
+        const me = Float32Array.from(s.memory_embedding);
+        transferList.push(qe.buffer, me.buffer);
+        return {
+            query_embedding: qe,
+            memory_embedding: me,
+            retrieval_score: s.retrieval_score,
+            was_neighbor: s.was_neighbor,
+            utilization: s.utilization,
+            importance: s.importance,
+            access_count: s.access_count,
+            recency: s.recency,
+        };
+    });
     const worker = new Worker(new URL(`data:text/javascript,${encodeURIComponent(workerCode)}`), {
-        workerData: { samples, cfg, warmStart: warmStart ?? null, EMBED_DIM, ATTN_DIM, FEATURE_COUNT },
+        workerData: { samples: packedSamples, cfg, warmStart: warmStart ?? null, EMBED_DIM, ATTN_DIM, FEATURE_COUNT },
+        transferList,
     });
     worker.unref();
     worker.on("message", (msg) => {

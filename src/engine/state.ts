@@ -80,6 +80,31 @@ export class SessionState {
   // cold-path turn.text query would otherwise miss them. 0.7.48 fix.
   readonly _observedFilePaths = new Set<string>();
 
+  /** K48: hard cap on {@link _observedFilePaths}. The Set is fed by every
+   *  Read/Edit/Write (pre-tool-use) AND by path-extraction over Grep/Glob/
+   *  recall result text (post-tool-use) — a single multi-thousand-match Grep
+   *  can balloon it, and on a long-lived session it only ever grows. The
+   *  edit-gate ("has this path been investigated?") only needs RECENTLY
+   *  observed paths, so we keep the most-recent {@link OBSERVED_PATHS_CAP}
+   *  and evict oldest. JS Set preserves insertion order, so the first key is
+   *  the oldest. */
+  static readonly OBSERVED_PATHS_CAP = 2000;
+
+  /** Insert a path into {@link _observedFilePaths}, evicting oldest entries
+   *  (FIFO) once the cap is exceeded. Re-inserting an existing path does NOT
+   *  refresh its recency (Set semantics) — acceptable here since the gate only
+   *  cares about membership, and any path re-touched will be re-added on its
+   *  next Read anyway. */
+  observeFilePath(path: string): void {
+    const set = this._observedFilePaths;
+    set.add(path);
+    while (set.size > SessionState.OBSERVED_PATHS_CAP) {
+      const oldest = set.values().next().value;
+      if (oldest === undefined) break;
+      set.delete(oldest);
+    }
+  }
+
   // Post-push CI reminder: set by PostToolUse when a Bash call contains
   // "git push", consumed by Stop to inject a Tier-0 reminder telling the
   // agent to verify CI before declaring done. Structural gate — the agent
@@ -179,6 +204,20 @@ export class GlobalPluginState {
   schemaApplied = false;
   private sessions = new Map<string, SessionState>();
 
+  /** K1 backstop: hard cap on the in-memory sessions Map. The periodic reaper
+   *  ({@link reapStaleSessions}, armed from daemon/index.ts) handles the normal
+   *  case, but a deterministic leak (a code path that creates sessions faster
+   *  than SessionEnd removes them, or SessionEnd never firing) would otherwise
+   *  grow this Map without bound on a long-lived per-host daemon → OOM. When a
+   *  new session would exceed the cap we evict the OLDEST entry (Map preserves
+   *  insertion order) and fire onSessionRemoved so dependent module-scoped maps
+   *  GC too. Co-located Claude Code installs run a handful of sessions; 512 is
+   *  far above any legitimate steady state. Override via KONGCODE_MAX_SESSIONS. */
+  private readonly maxSessions =
+    Number(process.env.KONGCODE_MAX_SESSIONS) > 0
+      ? Number(process.env.KONGCODE_MAX_SESSIONS)
+      : 512;
+
   // Anomaly cooldown state (in-memory, resets on MCP restart). Per-flag
   // last-fired timestamps prevent spamming the model with the same alert
   // every turn while the underlying condition persists.
@@ -223,11 +262,31 @@ export class GlobalPluginState {
   getOrCreateSession(sessionKey: string, sessionId: string): SessionState {
     let session = this.sessions.get(sessionKey);
     if (!session) {
+      // K1 backstop: evict the oldest session(s) before inserting a new one if
+      // we're at the cap. Fires onSessionRemoved for each eviction so
+      // module-scoped session-keyed maps clear too (same contract as
+      // removeSession / reapStaleSessions). Guards against an unbounded Map on
+      // a long-lived daemon when normal removal lags or stalls.
+      while (this.sessions.size >= this.maxSessions) {
+        const oldestKey = this.sessions.keys().next().value;
+        if (oldestKey === undefined) break;
+        const evicted = this.sessions.get(oldestKey);
+        this.sessions.delete(oldestKey);
+        if (evicted) {
+          this.fireSessionRemovedCallbacks(evicted.sessionId, evicted.surrealSessionId);
+        }
+      }
       session = new SessionState(sessionId, sessionKey);
       session.midSessionCleanupThreshold = this.config.thresholds.midSessionCleanupThreshold;
       this.sessions.set(sessionKey, session);
     }
     return session;
+  }
+
+  /** Current number of live in-memory sessions. Exposed for the periodic
+   *  reaper's logging and for tests asserting the K1 size cap. */
+  get sessionCount(): number {
+    return this.sessions.size;
   }
 
   /** Get an existing session by key. */

@@ -147,6 +147,24 @@ async function serveStatic(res: ServerResponse, urlPath: string): Promise<void> 
 
 const NODE_DETAIL_TABLES = new Set(["concept", "memory", "core_memory"]);
 
+// K35: this read-only UI shares the daemon's local DB with the per-turn hot
+// path. `string::contains` over text/content is an unindexed full-table scan,
+// and the offset previously allowed deep pagination (START up to 1e7), which
+// makes SurrealDB walk+discard that many rows per request. Two guards:
+//   - MIN_SEARCH_LEN: ignore 1-char substring filters (scan-heavy, useless) —
+//     fall back to the unfiltered, created_at-indexed listing.
+//   - MAX_UI_OFFSET: cap START so a crafted ?offset= can't force a giant scan.
+// Both keep the existing { total, limit, offset, rows } response shape.
+const MIN_SEARCH_LEN = 2;
+const MAX_UI_OFFSET = 10000;
+
+/** Normalize a UI search term: lowercased, but blanked when below the min
+ *  length so the SQL takes the no-filter ($q = '') branch. */
+function uiSearchTerm(q: string): string {
+  const ql = q.trim().toLowerCase();
+  return ql.length >= MIN_SEARCH_LEN ? ql : "";
+}
+
 /** Strip the huge embedding vector before returning any row to the browser. */
 function lite<T extends Record<string, unknown>>(row: T): Omit<T, "embedding"> {
   const { embedding, ...rest } = row;
@@ -179,7 +197,7 @@ async function dashboard(state: GlobalPluginState): Promise<unknown> {
 }
 
 async function listMemories(state: GlobalPluginState, q: string, limit: number, offset: number): Promise<unknown> {
-  const ql = q.toLowerCase();
+  const ql = uiSearchTerm(q);
   const [countRes, rowRes] = await state.store.queryBatch<unknown>([
     `SELECT count() AS c FROM memory WHERE $q = '' OR string::contains(string::lowercase(text), $q) GROUP ALL`,
     `SELECT meta::id(id) AS id, text, category, importance, (status ?? 'active') AS status, access_count, created_at, source
@@ -191,7 +209,7 @@ async function listMemories(state: GlobalPluginState, q: string, limit: number, 
 }
 
 async function listConcepts(state: GlobalPluginState, q: string, limit: number, offset: number): Promise<unknown> {
-  const ql = q.toLowerCase();
+  const ql = uiSearchTerm(q);
   const [countRes, rowRes] = await state.store.queryBatch<unknown>([
     `SELECT count() AS c FROM concept WHERE $q = '' OR string::contains(string::lowercase(content), $q) GROUP ALL`,
     `SELECT meta::id(id) AS id, content, stability, confidence, access_count, created_at, source
@@ -334,10 +352,10 @@ async function handleApi(state: GlobalPluginState, url: URL, res: ServerResponse
   try {
     if (p === "/api/ui/dashboard") return sendJson(res, 200, await dashboard(state));
     if (p === "/api/ui/memories") {
-      return sendJson(res, 200, await listMemories(state, url.searchParams.get("q") ?? "", int("limit", 50, 200), int("offset", 0, 1e7)));
+      return sendJson(res, 200, await listMemories(state, url.searchParams.get("q") ?? "", int("limit", 50, 200), int("offset", 0, MAX_UI_OFFSET)));
     }
     if (p === "/api/ui/concepts") {
-      return sendJson(res, 200, await listConcepts(state, url.searchParams.get("q") ?? "", int("limit", 50, 200), int("offset", 0, 1e7)));
+      return sendJson(res, 200, await listConcepts(state, url.searchParams.get("q") ?? "", int("limit", 50, 200), int("offset", 0, MAX_UI_OFFSET)));
     }
     if (p === "/api/ui/graph") {
       const id = url.searchParams.get("id");
@@ -347,10 +365,10 @@ async function handleApi(state: GlobalPluginState, url: URL, res: ServerResponse
     if (p === "/api/ui/directives") return sendJson(res, 200, await listDirectives(state));
     if (p === "/api/ui/soul") return sendJson(res, 200, await soulView(state));
     if (p === "/api/ui/sessions") {
-      return sendJson(res, 200, await listSessions(state, int("limit", 50, 200), int("offset", 0, 1e7)));
+      return sendJson(res, 200, await listSessions(state, int("limit", 50, 200), int("offset", 0, MAX_UI_OFFSET)));
     }
     if (p === "/api/ui/retrieval-outcomes") {
-      return sendJson(res, 200, await listRetrievalOutcomes(state, int("limit", 50, 200), int("offset", 0, 1e7)));
+      return sendJson(res, 200, await listRetrievalOutcomes(state, int("limit", 50, 200), int("offset", 0, MAX_UI_OFFSET)));
     }
     if (p === "/api/ui/query") {
       return sendJson(res, 200, await querySandbox(state, url.searchParams.get("q") ?? "", int("limit", 8, 15)));

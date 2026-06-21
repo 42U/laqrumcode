@@ -11,6 +11,7 @@
  * a separate API call from the MCP server.
  */
 
+import { randomUUID } from "node:crypto";
 import type { GlobalPluginState, SessionState } from "../engine/state.js";
 import type { PriorExtractions, TurnData } from "../engine/daemon-types.js";
 import { validateExtraction } from "../engine/daemon-types.js";
@@ -468,26 +469,70 @@ async function buildWorkPayload(
       // v0.8.0: `graduated_at IS NONE` is the watermark. Without it, every
       // per-session causal_graduate item fetched the IDENTICAL global chain
       // aggregate and re-synthesized the same skills (the duplicate-skill
-      // explosion — memory:2gp8m8j597c46y6z5lpg). The commit handler stamps
-      // graduated_at on the chains it consumes, so subsequent items (and the
-      // backlog of per-session duplicates) see no eligible chains and
-      // self-complete empty. Mirrors soul_evolve's `created_at > $since`.
-      const groups = await store.queryFirst<{ chain_type: string; cnt: number; descriptions: string[] }>(
-        `SELECT chain_type, count() AS cnt, array::group(description) AS descriptions
+      // explosion — memory:2gp8m8j597c46y6z5lpg).
+      //
+      // K31: CLAIM the chains BEFORE synthesis, not after. The pre-K31 code
+      // stamped graduated_at only in the COMMIT handler, AFTER skills were
+      // created — so two causal_graduate items draining concurrently both
+      // fetched the same ungraduated chains, both ran an agent synthesis, and
+      // both created skills before either watermark landed (the watermark was a
+      // post-hoc no-op that closed the window only for LATER items). Fix:
+      // atomically stamp graduated_at = time::now() on the eligible-type
+      // ungraduated chains HERE and RETURN BEFORE to learn which rows THIS item
+      // actually won (rows whose graduated_at was NONE at stamp time). A
+      // concurrent item's identical per-row UPDATE wins only the rows we didn't
+      // flip, so it sees an empty won-set and self-completes. Skills are built
+      // ONLY from won chains.
+      //
+      // Two-step (eligibility GROUP BY, then claim) because the cnt>=3 bar is
+      // per chain_type: we first find which types clear it, then claim every
+      // ungraduated chain of those types and group the won rows in JS.
+      const groups = await store.queryFirst<{ chain_type: string; cnt: number }>(
+        `SELECT chain_type, count() AS cnt
          FROM causal_chain WHERE success = true AND confidence >= 0.7 AND graduated_at IS NONE
          GROUP BY chain_type`,
       );
-      const eligible = groups.filter(g => g.cnt >= 3);
-      if (eligible.length === 0) {
+      const eligibleTypes = groups.filter(g => g.cnt >= 3).map(g => g.chain_type);
+      if (eligibleTypes.length === 0) {
         // No chains to graduate — mark complete immediately
         await markTerminal(state, item.id, item.session_id, item.work_type, "completed");
         return { work_id: item.id, work_type: "causal_graduate", empty: true, message: "No causal chains ready for graduation. Already marked complete." };
       }
+      // Atomic claim: per-row `graduated_at IS NONE` guard + SET means a
+      // concurrent identical UPDATE can never re-win a row we just stamped.
+      // RETURN BEFORE yields the rows as they were pre-stamp (graduated_at NONE),
+      // i.e. exactly the set THIS item won.
+      const won = await store.queryFirst<{ chain_type: string; description?: string }>(
+        `UPDATE causal_chain SET graduated_at = time::now()
+           WHERE success = true AND confidence >= 0.7 AND graduated_at IS NONE
+             AND chain_type IN $types
+           RETURN BEFORE`,
+        { types: eligibleTypes },
+      );
+      if (won.length === 0) {
+        // A concurrent causal_graduate item claimed these chains first — nothing
+        // left for us. Self-complete empty (matches the no-eligible path).
+        await markTerminal(state, item.id, item.session_id, item.work_type, "completed");
+        return { work_id: item.id, work_type: "causal_graduate", empty: true, message: "Causal chains already claimed by a concurrent graduation. Already marked complete." };
+      }
+      // Re-group won rows by chain_type for the synthesis payload.
+      const byType = new Map<string, string[]>();
+      for (const row of won) {
+        if (!row?.chain_type) continue;
+        const arr = byType.get(row.chain_type) ?? [];
+        if (row.description) arr.push(row.description);
+        byType.set(row.chain_type, arr);
+      }
+      const groupsPayload = Array.from(byType.entries()).map(([chain_type, descriptions]) => ({
+        chain_type,
+        count: descriptions.length,
+        descriptions: descriptions.slice(0, 8),
+      }));
       return {
         work_id: item.id,
         work_type: "causal_graduate",
         instructions: `Synthesize reusable procedures from these recurring successful patterns. Generic — no specific file paths or variable names. Return one skill JSON per pattern group.`,
-        data: { groups: eligible.map(g => ({ chain_type: g.chain_type, count: g.cnt, descriptions: g.descriptions.slice(0, 8) })) },
+        data: { groups: groupsPayload },
         output_format: "Return JSON array of skills: [" + JSON.stringify(skillSchema) + ", ...]. Return [] if no clear patterns.",
       };
     }
@@ -582,12 +627,33 @@ export async function handleCommitWorkResults(
   // drainer re-claimed it (or it was already committed), the CAS matches no row
   // and we DISCARD the extraction rather than double-write knowledge / double-
   // apply a (non-idempotent) soul revision. RETURN BEFORE also yields the item.
+  //
+  // K41: make the CAS idempotent across ONE withRetry re-fire. queryFirst wraps
+  // this in withRetry, and a deadline'd write MAY have executed server-side
+  // before the response was lost — the naive `WHERE status="processing"` retry
+  // would then find the row already "committing" and DISCARD a valid extraction
+  // (own CAS succeeded but looked reclaimed). Stamp a caller-generated
+  // committing_token and widen the WHERE to also accept a row already in
+  // "committing" carrying THIS token. So:
+  //   - row in "processing"                         → we win (first attempt)
+  //   - row in "committing" with committing_token=ours → we win (our own retry)
+  //   - row in "committing" with a DIFFERENT token  → genuinely reclaimed by
+  //     another drainer (C1) → no match → discard
+  //   - row already completed / reverted+reclaimed  → no match → discard
+  // K15: re-stamp processing_started_at = time::now() so the 10-minute
+  // stale-recovery window RESTARTS when commit work begins — a long commit must
+  // not let stale-recovery revert this row out from under us mid-write.
+  const myToken = randomUUID();
   const claimed = await store.queryFirst<PendingWorkItem>(
-    `UPDATE ${workId} SET status = "committing" WHERE status = "processing" RETURN BEFORE`,
+    `UPDATE ${workId} SET status = "committing", committing_token = $tok, processing_started_at = time::now()
+       WHERE status = "processing" OR (status = "committing" AND committing_token = $tok)
+       RETURN BEFORE`,
+    { tok: myToken },
   );
   if (claimed.length === 0) {
-    // Row is not in "processing": already committed, reverted by stale-recovery
-    // and reclaimed, or unknown id. Discard to avoid a double-write.
+    // Row is not claimable by us: already committed, reverted by stale-recovery
+    // and reclaimed by another drainer (its token differs), or unknown id.
+    // Discard to avoid a double-write.
     return text(JSON.stringify({
       success: false,
       skipped: true,
@@ -597,6 +663,25 @@ export async function handleCommitWorkResults(
   const item = claimed[0];
 
   try {
+    // K15: re-assert ownership immediately before the non-idempotent writes in
+    // commitResults (soul revision via reviseSoul, skill creation, handoff/
+    // reflection promotion — none of which are safe to apply twice). The CAS
+    // above re-stamped processing_started_at so stale-recovery's 10-minute
+    // window restarted, but this is the defense-in-depth check: if anything DID
+    // flip this row out of "committing" with our token (a reclaim, a manual
+    // status change), abort BEFORE writing knowledge rather than double-apply.
+    const stillOwned = await store.queryFirst<{ id: string }>(
+      `SELECT id FROM ${workId} WHERE status = "committing" AND committing_token = $tok`,
+      { tok: myToken },
+    );
+    if (stillOwned.length === 0) {
+      log.warn(`[pending_work] commit ownership lost before write for ${item.work_type} (${workId}) — extraction discarded`);
+      return text(JSON.stringify({
+        success: false,
+        skipped: true,
+        message: `work item ${workId} was reclaimed after the commit CAS; extraction discarded to avoid a double-write`,
+      }));
+    }
     const outcome = await commitResults(item, results, state);
     // Mark completed. Uses markTerminal so a sibling completed row for the
     // same (session, work_type) doesn't collide on pw_session_worktype_status_unique;
@@ -833,31 +918,15 @@ async function commitResults(
         await createSkillRecord(parsed, item, state);
         created++;
       }
-      // v0.8.0: advance the graduation watermark. Stamp graduated_at on every
-      // ungraduated chain whose type cleared the cnt>=3 eligibility bar (same
-      // bar the fetch handler applies), so the next causal_graduate item finds
-      // no eligible chains and self-completes empty instead of re-synthesizing
-      // duplicate skills. Guarded on created>0: a no-op LLM return leaves
-      // chains ungraduated for a later retry. Sub-threshold types (cnt<3) stay
-      // ungraduated so their pattern can still accumulate toward a future skill.
-      if (created > 0) {
-        try {
-          const groups = await state.store.queryFirst<{ chain_type: string; cnt: number }>(
-            `SELECT chain_type, count() AS cnt FROM causal_chain
-             WHERE success = true AND confidence >= 0.7 AND graduated_at IS NONE
-             GROUP BY chain_type`,
-          );
-          const types = groups.filter(g => g.cnt >= 3).map(g => g.chain_type);
-          if (types.length > 0) {
-            await state.store.queryExec(
-              `UPDATE causal_chain SET graduated_at = time::now()
-               WHERE success = true AND confidence >= 0.7 AND graduated_at IS NONE
-                 AND chain_type IN $types`,
-              { types },
-            );
-          }
-        } catch (e) { swallow("pending-work:graduateWatermark", e); }
-      }
+      // K31: the graduation watermark is now stamped at FETCH time
+      // (buildWorkPayload claims the chains atomically BEFORE handing them to
+      // the agent), NOT here. The pre-K31 post-creation stamp opened a
+      // duplicate-skill window: two items fetched the same ungraduated chains
+      // and both reached this point before either watermark landed. Stamping at
+      // claim time closes that window; this handler now just persists the
+      // synthesized skills. An empty/no-op synthesis "consumes" the claim by
+      // design — the already-seen chains should not re-synthesize, and NEW
+      // chains of the same type re-trigger graduation once they re-cross cnt>=3.
       return { skills_created: created };
     }
 

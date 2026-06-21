@@ -9,6 +9,13 @@ import type { SurrealStore } from "./surreal.js";
 import type { EmbeddingService } from "./embeddings.js";
 import type { SessionState } from "./state.js";
 import type { ResourceProfile } from "./resource-tier.js";
+/** @internal test helper — reset breaker state between cases. */
+export declare function _resetRerankBreaker(): void;
+/** @internal test helper — inspect breaker state. */
+export declare function _rerankBreakerState(): {
+    consecutiveTimeouts: number;
+    open: boolean;
+};
 export declare function configureReranker(modelPath: string, profile?: ResourceProfile): void;
 export declare function initReranker(modelPath: string): Promise<void>;
 export declare function disposeReranker(): Promise<void>;

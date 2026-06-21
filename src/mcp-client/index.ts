@@ -307,6 +307,21 @@ async function main(): Promise<void> {
   process.on("SIGINT", async () => { await shutdown(); process.exit(0); });
   process.on("SIGHUP", async () => { await shutdown(); process.exit(0); });
 
+  // K50: this relay is the user-facing process Claude Code talks to over stdio.
+  // It has no top-level rejection net beyond main()'s catch, so a future
+  // floating promise (e.g. a fire-and-forget IPC call, a background reconnect)
+  // that rejects would print Node's default unhandledRejection warning and —
+  // depending on Node's policy — could terminate the relay, killing the user's
+  // MCP session mid-conversation. Mirror the daemon's handlers (daemon/index.ts):
+  // log and CONTINUE. We do NOT exit — an isolated background rejection must not
+  // take down the session; in-flight tool calls already reject via the IPC layer.
+  process.on("uncaughtException", (err) => {
+    log.error(`[mcp-client] uncaughtException — continuing: ${err.message}`, err);
+  });
+  process.on("unhandledRejection", (reason) => {
+    log.error(`[mcp-client] unhandledRejection — continuing:`, reason);
+  });
+
   // Connect stdio FIRST — Claude Code's handshake window is short. Daemon
   // ensure runs in the background after handshake completes.
   const transport = new StdioServerTransport();

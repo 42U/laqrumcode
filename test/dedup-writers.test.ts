@@ -524,8 +524,17 @@ describe("evaluateRetrieval — retrieval_outcome + turn_score dedup", () => {
     } as any);
   });
 
-  it("runs a SELECT pre-check for each retrieval_outcome and skips CREATE when row exists", async () => {
-    const queryFirst = vi.fn(async () => [{ id: "retrieval_outcome:existing" }]);
+  it("runs ONE batched SELECT for retrieval_outcome and skips the bulk INSERT when all rows exist", async () => {
+    // K23 (2026): the per-item SELECT+CREATE loop was replaced by ONE batched
+    // existence read (`memory_id IN $ids`) + ONE bulk INSERT. When the batched
+    // read reports every staged id already present, the INSERT is skipped.
+    const queryFirst = vi.fn(async (sql: string) => {
+      if (/FROM retrieval_outcome/.test(sql)) {
+        // Report both staged ids as already-existing.
+        return [{ memory_id: "memory:dup1" }, { memory_id: "memory:dup2" }];
+      }
+      return [{ id: "turn_score:existing" }]; // turn_score SELECT also hits
+    });
     const queryExec = vi.fn(async () => {});
     const store = {
       queryFirst,
@@ -547,29 +556,31 @@ describe("evaluateRetrieval — retrieval_outcome + turn_score dedup", () => {
     // Allow the fire-and-forget IIFE for turn_score to settle.
     await flushMicrotasks();
 
-    // queryFirst fired once per item (retrieval_outcome SELECT) plus once
-    // for the turn_score SELECT.
+    // K23: exactly ONE batched retrieval_outcome SELECT (not one-per-item),
+    // plus the single turn_score SELECT.
     const roSelects = queryFirst.mock.calls.filter(c =>
       /FROM retrieval_outcome/.test(String(c[0])),
     );
     const tsSelects = queryFirst.mock.calls.filter(c =>
       /FROM turn_score/.test(String(c[0])),
     );
-    expect(roSelects.length).toBe(2);
+    expect(roSelects.length).toBe(1);
+    expect(roSelects[0][0]).toMatch(/memory_id IN \$ids/);
     expect(tsSelects.length).toBe(1);
 
-    // CREATEs all skipped because every SELECT returned a hit.
-    const roCreates = queryExec.mock.calls.filter(c =>
-      /CREATE retrieval_outcome/.test(String(c[0])),
+    // No writes: bulk INSERT skipped (all rows existed); turn_score CREATE
+    // skipped (SELECT hit).
+    const roInserts = queryExec.mock.calls.filter(c =>
+      /INSERT INTO retrieval_outcome/.test(String(c[0])),
     );
     const tsCreates = queryExec.mock.calls.filter(c =>
       /CREATE turn_score/.test(String(c[0])),
     );
-    expect(roCreates.length).toBe(0);
+    expect(roInserts.length).toBe(0);
     expect(tsCreates.length).toBe(0);
   });
 
-  it("issues CREATE only when SELECT returns empty (no existing row)", async () => {
+  it("issues ONE bulk INSERT for all new rows when the batched SELECT returns empty", async () => {
     const queryFirst = vi.fn(async () => []);
     const queryExec = vi.fn(async () => {});
     const store = {
@@ -578,7 +589,10 @@ describe("evaluateRetrieval — retrieval_outcome + turn_score dedup", () => {
       updateUtilityCache: async () => {},
     };
 
-    stageRetrieval("session-e", [makeRetrievalItem({ id: "memory:fresh" })]);
+    stageRetrieval("session-e", [
+      makeRetrievalItem({ id: "memory:fresh1" }),
+      makeRetrievalItem({ id: "memory:fresh2", text: "SurrealDB query planner" }),
+    ]);
     await evaluateRetrieval(
       "session-e",
       "turn:fresh",
@@ -587,13 +601,21 @@ describe("evaluateRetrieval — retrieval_outcome + turn_score dedup", () => {
     );
     await flushMicrotasks();
 
+    // K23: ONE bulk INSERT carrying ALL new rows (not N CREATEs).
+    const roInserts = queryExec.mock.calls.filter(c =>
+      /INSERT INTO retrieval_outcome/.test(String(c[0])),
+    );
     const roCreates = queryExec.mock.calls.filter(c =>
       /CREATE retrieval_outcome/.test(String(c[0])),
     );
     const tsCreates = queryExec.mock.calls.filter(c =>
       /CREATE turn_score/.test(String(c[0])),
     );
-    expect(roCreates.length).toBe(1);
+    expect(roInserts.length).toBe(1);
+    expect(roCreates.length).toBe(0); // per-item CREATE path is gone
+    // The single INSERT carries both staged rows in its $rows array bind.
+    const rows = (roInserts[0][1] as any)?.rows as unknown[];
+    expect(rows).toHaveLength(2);
     expect(tsCreates.length).toBe(1);
   });
 

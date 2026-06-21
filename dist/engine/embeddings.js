@@ -103,7 +103,15 @@ export class EmbeddingService {
     l2Put(hash, vec) {
         if (!this.store?.isAvailable() || !this.modelVersion)
             return;
-        this.store.queryExec(`UPSERT embedding_cache SET text_hash = $hash, embedding = $vec, model_version = $mv WHERE text_hash = $hash`, { hash, vec, mv: this.modelVersion }).catch(e => swallow("embeddings:l2Put", e));
+        // K17-emb: also reset pruned_at/prune_reason. The idx_ec_text_hash UNIQUE
+        // index means this UPSERT lands on the EXISTING row for a re-cached text,
+        // and l2Get filters `pruned_at IS NONE`. Without clearing it, a row the
+        // maintenance purge soft-tagged (>30d stale) stays permanently invisible
+        // to l2Get even after we recompute and re-store its vector — every future
+        // embed of that text misses L2 and burns the compute path forever.
+        // created_at is intentionally left untouched so the row stays eligible for
+        // the next purge cycle on its original timestamp (re-arm owned by maintenance.ts).
+        this.store.queryExec(`UPSERT embedding_cache SET text_hash = $hash, embedding = $vec, model_version = $mv, pruned_at = NONE, prune_reason = NONE WHERE text_hash = $hash`, { hash, vec, mv: this.modelVersion }).catch(e => swallow("embeddings:l2Put", e));
     }
     /** B17 (T5, 2026-06-10): llama serializes embedding computation internally,
      *  so N concurrent embed() calls (embedBatch, parallel hook traffic) used to
@@ -116,6 +124,15 @@ export class EmbeddingService {
     embedQueue = [];
     queueDraining = false;
     queueDepthMax = 0;
+    /** K12 backpressure: hard cap on pending embed requests. llama serializes
+     *  compute (one item at a time), so an unbounded push lets a burst of hook
+     *  traffic / a wedged embedder grow the FIFO without limit — each entry
+     *  pins its text + two closures, so the queue is the leak surface on a
+     *  long-lived daemon. Past this depth embed() fast-fails with a retryable
+     *  error instead of enqueueing. Override via KONGCODE_EMBED_QUEUE_MAX. */
+    maxQueueDepth = Number(process.env.KONGCODE_EMBED_QUEUE_MAX) > 0
+        ? Number(process.env.KONGCODE_EMBED_QUEUE_MAX)
+        : 2048;
     async embed(text) {
         if (!this.ready || !this.ctx)
             throw new Error("Embeddings not initialized");
@@ -136,6 +153,13 @@ export class EmbeddingService {
             }
             this.cache.set(text, l2);
             return l2;
+        }
+        // K12 backpressure: refuse past the ceiling rather than growing the FIFO
+        // without bound. The caller gets a clear, retryable error; the alternative
+        // (unbounded push) turns a slow/wedged embedder into an OOM on a
+        // long-lived per-host daemon.
+        if (this.embedQueue.length >= this.maxQueueDepth) {
+            throw new Error(`Embedding queue full (${this.embedQueue.length}/${this.maxQueueDepth}) — embedder is underwater; retry shortly`);
         }
         return new Promise((resolve, reject) => {
             this.embedQueue.push({ text, hash, enqueuedAt: Date.now(), resolve, reject });

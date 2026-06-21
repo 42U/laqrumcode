@@ -64,7 +64,14 @@ describe("evaluateRetrieval", () => {
       // SELECT-then-CREATE dedup: writer checks the UNIQUE-index tuple before
       // inserting. Tests want the CREATE to fire, so queryFirst returns [].
       queryFirst: async () => [],
-      queryExec: async (_sql: string, params: any) => { created.push(params.data); },
+      // K23 (2026): retrieval_outcome rows are now written via one bulk
+      // `INSERT INTO retrieval_outcome $rows` (array bind) instead of N
+      // per-item `CREATE ... CONTENT $data`. turn_score still uses $data.
+      // Capture both shapes so these content assertions still hold.
+      queryExec: async (_sql: string, params: any) => {
+        if (Array.isArray(params?.rows)) created.push(...params.rows);
+        if (params?.data) created.push(params.data);
+      },
       updateUtilityCache: async () => {},
     };
 
@@ -95,7 +102,14 @@ describe("evaluateRetrieval", () => {
     const created: any[] = [];
     const mockStore = {
       queryFirst: async () => [],
-      queryExec: async (_sql: string, params: any) => { created.push(params.data); },
+      // K23 (2026): retrieval_outcome rows are now written via one bulk
+      // `INSERT INTO retrieval_outcome $rows` (array bind) instead of N
+      // per-item `CREATE ... CONTENT $data`. turn_score still uses $data.
+      // Capture both shapes so these content assertions still hold.
+      queryExec: async (_sql: string, params: any) => {
+        if (Array.isArray(params?.rows)) created.push(...params.rows);
+        if (params?.data) created.push(params.data);
+      },
       updateUtilityCache: async () => {},
     };
 
@@ -117,7 +131,14 @@ describe("evaluateRetrieval", () => {
     const created: any[] = [];
     const mockStore = {
       queryFirst: async () => [],
-      queryExec: async (_sql: string, params: any) => { created.push(params.data); },
+      // K23 (2026): retrieval_outcome rows are now written via one bulk
+      // `INSERT INTO retrieval_outcome $rows` (array bind) instead of N
+      // per-item `CREATE ... CONTENT $data`. turn_score still uses $data.
+      // Capture both shapes so these content assertions still hold.
+      queryExec: async (_sql: string, params: any) => {
+        if (Array.isArray(params?.rows)) created.push(...params.rows);
+        if (params?.data) created.push(params.data);
+      },
       updateUtilityCache: async () => {},
     };
 

@@ -33,6 +33,15 @@ export function classifyItem(item) {
     return "knowledge";
 }
 const _pendingRetrievalBySession = new Map();
+// K2: bound the cross-encoder work done per Stop evaluation. Each staged item
+// would otherwise get its own crossEncoderScorePairs call — unbounded CE
+// throughput on the turn-boundary hot path (CE cost is ~linear in tokens on
+// CPU). We CE-score only the top-K items by finalScore, under a cumulative
+// token budget (mirrors rerankResults' RERANK_TOTAL_TOKEN_BUDGET); the tail is
+// scored lexical-only. The top items dominate utilization signal anyway, so the
+// tail's CE rarely changed the stored row. All env-tunable.
+const EVAL_CE_TOP_K = Number(process.env.KONGCODE_EVAL_CE_TOP_K) || 10;
+const EVAL_CE_TOKEN_BUDGET = Number(process.env.KONGCODE_EVAL_CE_TOKEN_BUDGET) || 8192;
 /** Register a session-removal cleanup so removed sessions purge their entry.
  *  Call once at daemon boot with the GlobalPluginState — re-registration is
  *  safe (no-op via WeakSet guard). Modeled on core-memory.ts's pattern so a
@@ -171,82 +180,125 @@ async function evaluateRetrievalInner(sessionId, responseTurnId, responseText, s
     // matches the (query, passage) training distribution of bge-reranker-v2-m3.
     // Reversed from the naive (response, item) ordering which produced near-zero
     // scores due to the long anchor diluting relevance signal.
-    const itemTexts = items.map(it => it.text ?? "");
-    const ceScores = itemTexts.length > 0
-        ? await Promise.all(itemTexts.map(t => crossEncoderScorePairs(t, [responseText]).then(s => s?.[0] ?? null)))
-        : null;
+    //
+    // K2: bound CE work. Rank items by finalScore and CE-score only the top-K
+    // under a cumulative token budget; the tail is scored lexical-only (ceScore
+    // = null → computeSignals falls back to the lexical blend). Without this the
+    // Stop hot path issued one CE call per staged item, unbounded. ceByIndex is
+    // aligned to `items` so the per-item loop below reads it positionally.
+    const ceByIndex = new Array(items.length).fill(null);
+    const ceEligible = items
+        .map((_, idx) => idx)
+        .sort((a, b) => (items[b].finalScore ?? 0) - (items[a].finalScore ?? 0));
+    const ceTargets = [];
+    let ceTokenBudget = EVAL_CE_TOKEN_BUDGET;
+    for (const idx of ceEligible) {
+        if (ceTargets.length >= EVAL_CE_TOP_K)
+            break;
+        const approxTokens = Math.ceil((items[idx].text ?? "").length / 4);
+        // Always admit the first item; afterward stop once the budget would blow.
+        if (ceTargets.length > 0 && approxTokens > ceTokenBudget)
+            break;
+        ceTokenBudget -= approxTokens;
+        ceTargets.push(idx);
+    }
+    await Promise.all(ceTargets.map(async (idx) => {
+        const text = items[idx].text ?? "";
+        if (!text)
+            return;
+        const s = await crossEncoderScorePairs(text, [responseText]);
+        ceByIndex[idx] = s?.[0] ?? null;
+    }));
+    // K23: build every row in memory, then do ONE batched existence read +
+    // ONE bulk insert — replacing the prior N serial SELECT + N serial CREATE
+    // round-trips (2N awaits per turn on the Stop path). memory_id is a TYPE
+    // string column, so all ids are already stringified for the IN bind.
+    const rows = [];
     for (let idx = 0; idx < items.length; idx++) {
         const item = items[idx];
         const idStr = String(item.id);
         const wasCited = citedIds.has(idStr);
-        const ceScore = ceScores?.[idx] ?? null;
+        const ceScore = ceByIndex[idx];
         const signals = computeSignals(item, responseLower, toolSuccess, wasCited, ceScore);
-        try {
-            const record = {
-                session_id: sessionId,
-                turn_id: responseTurnId,
-                memory_id: idStr,
-                memory_table: item.table,
-                retrieval_score: item.finalScore ?? 0,
-                utilization: signals.utilization,
-                context_tokens: signals.contextTokens,
-                was_neighbor: signals.wasNeighbor,
-                importance: ((item.importance ?? 5) / 10),
-                access_count: Math.min((item.accessCount ?? 0) / 50, 1),
-                recency: signals.recency,
-            };
-            if (signals.toolSuccess != null) {
-                record.tool_success = signals.toolSuccess;
+        const record = {
+            session_id: sessionId,
+            turn_id: responseTurnId,
+            memory_id: idStr,
+            memory_table: item.table,
+            retrieval_score: item.finalScore ?? 0,
+            utilization: signals.utilization,
+            context_tokens: signals.contextTokens,
+            was_neighbor: signals.wasNeighbor,
+            importance: ((item.importance ?? 5) / 10),
+            access_count: Math.min((item.accessCount ?? 0) / 50, 1),
+            recency: signals.recency,
+        };
+        if (signals.toolSuccess != null) {
+            record.tool_success = signals.toolSuccess;
+        }
+        if (ceScore != null) {
+            record.ce_utilization = ceScore;
+        }
+        if (queryEmbedding) {
+            record.query_embedding = queryEmbedding;
+        }
+        if (indexMap) {
+            if (wasCited) {
+                record.cited = true;
+                record.citation_method = "index";
             }
-            if (ceScore != null) {
-                record.ce_utilization = ceScore;
+            else if (signals.utilization >= 0.5) {
+                record.cited = true;
+                record.citation_method = "lexical";
             }
-            if (queryEmbedding) {
-                record.query_embedding = queryEmbedding;
-            }
-            if (indexMap) {
-                if (wasCited) {
-                    record.cited = true;
-                    record.citation_method = "index";
-                }
-                else if (signals.utilization >= 0.5) {
-                    record.cited = true;
-                    record.citation_method = "lexical";
-                }
-                else {
-                    record.cited = false;
-                    record.citation_method = "none";
-                }
-            }
-            // Pre-check on (session_id, turn_id, memory_id) — the UNIQUE index
-            // tuple — and skip if a row already exists. Re-evaluating the same turn
-            // (rare but possible on retry) or a concurrent loop hit must not insert
-            // a duplicate. The UNIQUE index is the hard backstop.
-            const existing = await store.queryFirst(`SELECT id FROM retrieval_outcome
-           WHERE session_id = $sid AND turn_id = $tid AND memory_id = $mid
-           LIMIT 1`, { sid: sessionId, tid: responseTurnId, mid: idStr });
-            if (existing.length === 0) {
-                await store.queryExec(`CREATE retrieval_outcome CONTENT $data`, { data: record });
-            }
-            // W2-03 (2026-06-10): guaranteed-inclusion recent turns carry synthetic
-            // ids ("guaranteed:<timestamp>", graph-context.ts) with no utility row —
-            // updateUtilityCache's record-id assertion rejected them on every turn
-            // ("Invalid record ID format: guaranteed:…" daemon.log spam). Only
-            // record-shaped ids have a cache row to update.
-            if (/^[a-z_][a-z0-9_]*:[a-zA-Z0-9_]+$/i.test(idStr)) {
-                store.updateUtilityCache(idStr, signals.utilization)
-                    .catch(e => swallow.warn("retrieval-quality:utilityCache", e));
+            else {
+                record.cited = false;
+                record.citation_method = "none";
             }
         }
-        catch (e) {
-            swallow.warn("retrieval-quality:outcome", e);
+        rows.push(record);
+        // W2-03 (2026-06-10): guaranteed-inclusion recent turns carry synthetic
+        // ids ("guaranteed:<timestamp>", graph-context.ts) with no utility row —
+        // updateUtilityCache's record-id assertion rejected them on every turn
+        // ("Invalid record ID format: guaranteed:…" daemon.log spam). Only
+        // record-shaped ids have a cache row to update.
+        if (/^[a-z_][a-z0-9_]*:[a-zA-Z0-9_]+$/i.test(idStr)) {
+            store.updateUtilityCache(idStr, signals.utilization)
+                .catch(e => swallow.warn("retrieval-quality:utilityCache", e));
         }
+    }
+    try {
+        // ONE batched read on (session_id, turn_id, memory_id IN $ids) — the
+        // composite covered by the retoutc_unique index. Re-evaluating the same
+        // turn (rare retry) or a concurrent loop must not double-insert; the UNIQUE
+        // index is the hard backstop, this skips the rows it would reject.
+        const ids = rows.map((r) => r.memory_id);
+        const existing = await store.queryFirst(`SELECT memory_id FROM retrieval_outcome
+         WHERE session_id = $sid AND turn_id = $tid AND memory_id IN $ids`, { sid: sessionId, tid: responseTurnId, ids });
+        const existingIds = new Set(existing.map((e) => String(e.memory_id)));
+        const toInsert = rows.filter((r) => !existingIds.has(r.memory_id));
+        if (toInsert.length > 0) {
+            // Bulk INSERT in a single round-trip. INSERT (not CREATE) accepts an
+            // array of records, so N rows = 1 statement. ON DUPLICATE KEY UPDATE
+            // memory_id = memory_id makes a residual race (a concurrent evaluator
+            // inserting the same (session,turn,memory) tuple between our read and
+            // this write) a no-op on the existing row instead of throwing — verified
+            // on SurrealDB 3.0.1 that a single in-batch collision otherwise aborts
+            // the WHOLE INSERT, which would drop every other row's outcome.
+            await store.queryExec(`INSERT INTO retrieval_outcome $rows ON DUPLICATE KEY UPDATE memory_id = memory_id`, { rows: toInsert });
+        }
+    }
+    catch (e) {
+        swallow.warn("retrieval-quality:outcome", e);
     }
     // Per-turn context utilization: MAX of knowledge items' CE scores.
     // Only knowledge items contribute — behavioral (rules/preferences) and
     // context (monologue/turns) shape behavior without appearing in text.
+    // K2: ceByIndex only carries the top-K items' CE scores (the tail is null).
+    // contextUtil is the MAX over knowledge items, and the top-K-by-finalScore
+    // contains the highest-scoring knowledge items, so the MAX is preserved.
     const knowledgeCeScores = items
-        .map((item, idx) => ({ purpose: classifyItem(item), ce: ceScores?.[idx] ?? null }))
+        .map((item, idx) => ({ purpose: classifyItem(item), ce: ceByIndex[idx] }))
         .filter(x => x.purpose === "knowledge" && x.ce !== null)
         .map(x => x.ce);
     const contextUtil = knowledgeCeScores.length > 0
@@ -438,11 +490,15 @@ export async function getHistoricalUtilityBatch(ids, store) {
     if (ids.length === 0 || !store)
         return result;
     try {
+        // K22: memory_id is a TYPE string column. A RecordId Thing never == a
+        // same-text JS string in SurrealDB v3, so coerce every id to string
+        // before binding into `WHERE memory_id IN $ids` or the IN match is empty.
+        const stringIds = ids.map(String);
         const flat = await store.queryFirst(`SELECT memory_id,
         math::mean(IF llm_relevance != NONE THEN llm_relevance ELSE utilization END) AS avg
        FROM retrieval_outcome
        WHERE memory_id IN $ids AND (utilization > 0 OR llm_relevance != NONE)
-       GROUP BY memory_id`, { ids });
+       GROUP BY memory_id`, { ids: stringIds });
         for (const row of flat) {
             if (row.avg != null)
                 result.set(String(row.memory_id), row.avg);

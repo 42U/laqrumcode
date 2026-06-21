@@ -48,6 +48,15 @@ export async function assembleContextString(state, session, userPrompt) {
     const messages = [
         { role: "user", content: userPrompt },
     ];
+    // K6-ca: graphTransformContext has its OWN internal race-timeout that returns
+    // passthrough messages while graphTransformInner keeps running in the
+    // background (embeddings, DB queries, scoring). Nothing cancelled that
+    // post-deadline work, so a slow inner pipeline kept burning CPU/IO after the
+    // caller already moved on — and on every user prompt this compounds on a
+    // long-lived daemon. Drive an AbortController whose signal the inner pipeline
+    // honors, and abort it as soon as graphTransformContext resolves (real result
+    // OR post-timeout passthrough) or throws, cancelling any lingering inner work.
+    const transformAbort = new AbortController();
     try {
         const result = await graphTransformContext({
             messages,
@@ -55,6 +64,7 @@ export async function assembleContextString(state, session, userPrompt) {
             store,
             embeddings,
             contextWindow: 200_000,
+            signal: transformAbort.signal,
         });
         const parts = [];
         // System prompt section (pillars + tier 0 core directives)
@@ -201,6 +211,12 @@ export async function assembleContextString(state, session, userPrompt) {
         swallow.warn("assembleContext:transform", e);
         return undefined;
     }
+    finally {
+        // K6-ca: cancel any inner pipeline work still running after
+        // graphTransformContext's own race resolved (its internal timeout returns
+        // passthrough while graphTransformInner continues in the background).
+        transformAbort.abort();
+    }
 }
 /**
  * Ingest a user or assistant message into the graph database.
@@ -237,8 +253,29 @@ export async function ingestTurn(state, session, role, text) {
     try {
         let embedding = null;
         if (embeddings.isAvailable()) {
-            const INGEST_EMBED_CHAR_LIMIT = 22_282;
-            embedding = await embeddings.embed(text.slice(0, INGEST_EMBED_CHAR_LIMIT));
+            // K43: BGE-M3 has an 8192-token context window; text longer than it
+            // throws "Input is longer than the context size" and the embed fails.
+            // The 22,282-char slice exceeded that window for dense text, so a long
+            // turn either failed to embed or (pre-K5) aborted the whole upsert. Match
+            // the maintenance turn/memory backfill's documented safe target of 6000
+            // chars (surreal.ts: "safely below ~7800 tokens worst case for English")
+            // so the live-ingest cohort and the backfill cohort embed the SAME prefix
+            // — otherwise an un-embedded long turn would heal to a different vector
+            // than the one it would have gotten live.
+            const INGEST_EMBED_CHAR_LIMIT = 6_000;
+            // K5: wrap ONLY the embed. Previously a transient embed failure (model
+            // not yet warm, OOM, an over-window text that still slips through) threw
+            // out to the outer catch BEFORE upsertTurn ran, so the turn row was never
+            // written and the conversation turn was lost forever. Degrade to a null
+            // embedding instead: upsertTurn stores an un-embedded row and the
+            // maintenance turn-backfill (WHERE embedding IS NONE) heals it later.
+            try {
+                embedding = await embeddings.embed(text.slice(0, INGEST_EMBED_CHAR_LIMIT));
+            }
+            catch (e) {
+                swallow("ingest:embed", e);
+                embedding = null;
+            }
         }
         // Stash user embedding for reuse in context retrieval
         if (role === "user" && embedding) {

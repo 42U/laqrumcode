@@ -37,13 +37,13 @@ const SLASH_PATH_RE = /[/~][^\s'"`<>{}()\[\],]+/g;
 const EXT_PATH_RE =
   /[\w./~-]+\.(?:ts|tsx|js|jsx|mjs|cjs|py|rb|go|rs|java|kt|swift|c|cc|cpp|h|hpp|cs|php|md|markdown|json|jsonc|yaml|yml|toml|sql|sh|bash|html|css|scss|sass|xml|env|surql|gradle|tf|tfvars)\b/g;
 
-function extractPathsFromText(text: string, into: Set<string>): void {
+function extractPathsFromText(text: string, observe: (path: string) => void): void {
   for (const m of text.match(SLASH_PATH_RE) ?? []) {
     const cleaned = m.replace(/[.,:;!?]+$/, "");
-    if (cleaned.length > 1) into.add(cleaned);
+    if (cleaned.length > 1) observe(cleaned);
   }
   for (const m of text.match(EXT_PATH_RE) ?? []) {
-    into.add(m);
+    observe(m);
   }
 }
 
@@ -70,8 +70,19 @@ export async function handlePostToolUse(
     // Make recall / Grep / Glob results clear the edit-gate. Without this,
     // the deny message and the active-profile Tier-0 directive both told
     // the agent "recall it to clear the gate" — and the gate ignored it.
+    // K48: cap the scanned slice. The two regex scans are O(n) over the WHOLE
+    // tool result; a multi-MB Grep/recall payload runs the global regex across
+    // every byte on this hot path. The edit-gate only needs recently-surfaced
+    // paths, so the first 64KB is plenty — anything past that is over-scan that
+    // costs CPU on every PostToolUse for no gate benefit.
     if (isPathObservingTool(toolName)) {
-      extractPathsFromText(toolResultText, session._observedFilePaths);
+      const scanText = toolResultText.length > 64 * 1024
+        ? toolResultText.slice(0, 64 * 1024)
+        : toolResultText;
+      // Route every extracted path through observeFilePath so the Set stays
+      // bounded (K48) — extraction over a big Grep payload can yield thousands
+      // of matches, and on a long-lived session it only grows otherwise.
+      extractPathsFromText(scanText, (p) => session.observeFilePath(p));
     }
   }
 

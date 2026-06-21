@@ -29,12 +29,18 @@ describe("evaluateRetrieval — [#N] citation parsing", () => {
   function setup() {
     const created: any[] = [];
     const queryExec = vi.fn().mockImplementation(async (sql: string, params: any) => {
-      if (sql.startsWith("CREATE retrieval_outcome")) {
+      // K23 (2026): retrieval_outcome rows are written via one bulk
+      // `INSERT INTO retrieval_outcome $rows` (array bind), not per-item
+      // `CREATE ... CONTENT $data`. Capture the array form.
+      if (/INSERT INTO retrieval_outcome/i.test(sql) && Array.isArray(params?.rows)) {
+        created.push(...params.rows);
+      } else if (sql.startsWith("CREATE retrieval_outcome")) {
         created.push(params.data);
       }
     });
-    // SELECT-then-CREATE dedup: writer pre-checks the UNIQUE-index tuple via
-    // queryFirst before issuing CREATE. Returning [] lets the CREATE fire.
+    // Batched dedup: writer pre-checks the UNIQUE-index tuples via one
+    // queryFirst (memory_id IN $ids) before the bulk INSERT. Returning []
+    // lets the INSERT fire.
     const queryFirst = vi.fn().mockResolvedValue([]);
     const updateUtilityCache = vi.fn().mockResolvedValue(undefined);
     const store = { queryFirst, queryExec, updateUtilityCache } as any;

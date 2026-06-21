@@ -91,6 +91,12 @@ describe("soul_generate field sanitization", () => {
     const { handleCommitWorkResults } = await import("../src/tools/pending-work.js");
     store.queryFirst.mockImplementation(async (sql: string) => {
       if (sql.includes("UPDATE pending_work:test1") && sql.includes("RETURN BEFORE")) return [item];
+      // K15 commit-ownership re-assert: handleCommitWorkResults now re-checks
+      // ownership (SELECT id ... WHERE status = "committing" AND committing_token)
+      // immediately before the non-idempotent commitResults writes. An empty
+      // result aborts the commit ("ownership lost") before the soul_generate
+      // case runs — so the mock must report this row as still owned.
+      if (sql.includes('status = "committing"') && sql.includes("committing_token")) return [{ id: "pending_work:test1" }];
       if (sql.includes("FROM soul:kongbrain") && !sql.includes("SELECT *")) return [];
       if (sql.includes("SELECT * FROM soul:kongbrain")) return [];
       if (sql.includes("graduation_event")) return [];
@@ -149,6 +155,9 @@ describe("soul_generate field sanitization", () => {
     const { handleCommitWorkResults } = await import("../src/tools/pending-work.js");
     store.queryFirst.mockImplementation(async (sql: string) => {
       if (sql.includes("UPDATE pending_work:test2") && sql.includes("RETURN BEFORE")) return [item];
+      // K15 commit-ownership re-assert (see test1) — report this row as owned
+      // so the commit reaches the soul_generate sanitization path.
+      if (sql.includes('status = "committing"') && sql.includes("committing_token")) return [{ id: "pending_work:test2" }];
       if (sql.includes("FROM soul:kongbrain")) return [];
       if (sql.includes("graduation_event")) return [];
       if (sql.includes("count")) return [{ count: 500 }];

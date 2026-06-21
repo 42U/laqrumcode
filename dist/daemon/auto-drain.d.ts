@@ -107,8 +107,11 @@ declare function releaseLock(fd: number, lockPath: string): void;
  *  valid identity even before the drainer child has been forked. */
 declare function writeDaemonInterimMarker(fd: number): void;
 /** Rewrite the lock fd with the child PID once spawn() succeeds. The fd is
- *  truncated first so an observer never sees a partial JSON document. */
-declare function writeChildMarker(fd: number, childPid: number): void;
+ *  truncated first so an observer never sees a partial JSON document. Returns
+ *  the `startedAt` it stamped so the caller can record the FULL lock identity
+ *  (pid + startedAt) and later verify, at release time, that the lock still
+ *  records OUR child — not a sibling drainer that stole it (K10b). */
+declare function writeChildMarker(fd: number, childPid: number): number;
 declare function spendingFilePath(cacheDir: string): string;
 /** Legacy spending file kept around so existing installs migrate gracefully
  *  (any pre-existing count is treated as authoritative for the recorded

@@ -23,7 +23,7 @@
  *   KONGCODE_CLAUDE_BIN            → explicit path to claude binary
  */
 import { spawn } from "node:child_process";
-import { existsSync, openSync, closeSync, writeSync, readFileSync, unlinkSync, statSync, appendFileSync, mkdirSync, ftruncateSync, renameSync, writeFileSync, constants as fsConstants } from "node:fs";
+import { existsSync, openSync, closeSync, writeSync, readFileSync, unlinkSync, statSync, appendFileSync, mkdirSync, ftruncateSync, renameSync, writeFileSync, futimesSync, constants as fsConstants } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { join, resolve, dirname } from "node:path";
@@ -195,6 +195,17 @@ function isPidAlive(pid) {
  *  identity is unconditionally stolen. Drains run seconds to a few minutes;
  *  20m is well beyond any plausible legit drain. */
 const DRAIN_LOCK_STALE_AGE_MS = 20 * 60 * 1000;
+/** K10a: how often a LIVE drain refreshes its lock file's mtime while the
+ *  child runs. The stale-age steal (DRAIN_LOCK_STALE_AGE_MS) used to fire on
+ *  any lock older than 20min EVEN WHEN the holder PID was alive and looked
+ *  like a drainer — because the mtime was stamped once by writeChildMarker at
+ *  spawn and never advanced. A genuinely long extraction (large backlog on a
+ *  slow CPU tier) would then have its lock stolen mid-run by a sibling spawn →
+ *  two concurrent drainers double-processing pending_work. Heartbeating the
+ *  mtime keeps a live drain's lock "fresh" so only a truly crashed child (whose
+ *  mtime stops advancing) goes stale. Comfortably under DRAIN_LOCK_STALE_AGE_MS
+ *  so several missed beats still leave the lock fresh. */
+const DRAIN_LOCK_HEARTBEAT_MS = 5 * 60 * 1000;
 // H4: the in-flight drain's lock-release closure, exposed to shutdown so a
 // daemon idle-reap during a child's (long) extraction releases auto-drain.pid
 // instead of leaking it. null when no drain is running.
@@ -369,13 +380,17 @@ function writeDaemonInterimMarker(fd) {
     catch { }
 }
 /** Rewrite the lock fd with the child PID once spawn() succeeds. The fd is
- *  truncated first so an observer never sees a partial JSON document. */
+ *  truncated first so an observer never sees a partial JSON document. Returns
+ *  the `startedAt` it stamped so the caller can record the FULL lock identity
+ *  (pid + startedAt) and later verify, at release time, that the lock still
+ *  records OUR child — not a sibling drainer that stole it (K10b). */
 function writeChildMarker(fd, childPid) {
+    const startedAt = Date.now();
     const marker = {
         marker: "kongcode-auto-drain",
         pid: childPid,
         daemonPid: process.pid,
-        startedAt: Date.now(),
+        startedAt,
     };
     try {
         ftruncateSync(fd, 0);
@@ -385,6 +400,7 @@ function writeChildMarker(fd, childPid) {
         writeSync(fd, JSON.stringify(marker), 0);
     }
     catch { }
+    return startedAt;
 }
 function spendingFilePath(cacheDir) {
     // Append-only deltas log (one JSON line per increment). The old
@@ -703,8 +719,23 @@ async function spawnHeadlessDrainer(state, opts, reason) {
         // exit. The previous code closed the fd immediately, demoting the
         // lock to a regular file and letting the next spawn race in even
         // though the child was still running.
-        writeChildMarker(lockFd, child.pid);
+        const ourStartedAt = writeChildMarker(lockFd, child.pid);
+        const ourChildPid = child.pid;
         child.unref();
+        // K10a: heartbeat the lock mtime while THIS child runs so a long-but-alive
+        // drain isn't seen "stale" (>20min) and stolen by a sibling spawn. Touches
+        // the held fd directly (futimesSync) — no reopen, no race with a stealer's
+        // unlink (a stolen+recreated lock is a different inode; futimes on our fd
+        // just touches the now-unlinked file harmlessly). Unref'd so it never keeps
+        // the daemon alive; cleared in releaseOnce when the child finishes.
+        let lockHeartbeat = setInterval(() => {
+            try {
+                const now = Date.now() / 1000;
+                futimesSync(lockFd, now, now);
+            }
+            catch { /* fd closed / lock stolen — releaseOnce will clear this */ }
+        }, DRAIN_LOCK_HEARTBEAT_MS);
+        lockHeartbeat.unref?.();
         // Bump the daily counter once the spawn succeeds (we have a pid). Done
         // BEFORE awaiting the exit so a long-running extractor doesn't get a
         // free-pass on its sibling spawn that might land mid-flight. The
@@ -723,12 +754,25 @@ async function spawnHeadlessDrainer(state, opts, reason) {
                 return;
             released = true;
             activeDrainRelease = null; // H4: this drain is no longer the shutdown hook
-            // Verify the lock still records our daemon's identity before unlinking
-            // — protects against a fresh drainer that stole the lock (e.g. after a
-            // very long-running child triggered the stale-age branch).
+            // K10a: stop heartbeating the lock mtime — the child is done.
+            if (lockHeartbeat) {
+                clearInterval(lockHeartbeat);
+                lockHeartbeat = null;
+            }
+            // K10b: verify the lock still records OUR child's FULL identity before
+            // unlinking. The old check matched only `daemonPid === process.pid`, but
+            // a SIBLING drain from THIS SAME daemon (spawned after this lock was
+            // stolen via the stale-age branch) writes a marker with the same
+            // daemonPid — so the loose check would unlink the sibling's LIVE lock
+            // when this (already-superseded) child finally exits, freeing the lock
+            // out from under a running drainer. Matching pid AND startedAt pins it to
+            // exactly the marker this child wrote.
             try {
                 const marker = readLockMarker(lockPath);
-                const ours = marker !== null && marker.daemonPid === process.pid;
+                const ours = marker !== null &&
+                    marker.daemonPid === process.pid &&
+                    marker.pid === ourChildPid &&
+                    marker.startedAt === ourStartedAt;
                 try {
                     closeSync(lockFd);
                 }
@@ -790,6 +834,17 @@ async function spawnHeadlessDrainer(state, opts, reason) {
         return { spawned: true };
     }
     catch (e) {
+        // K47: spawn() threw before the success path closed the parent's log fd
+        // (the closeSync at the top of the try only runs AFTER spawn returns). On
+        // this path the fd would leak — and on a long-lived daemon every failed
+        // spawn (e.g. ENOENT/EMFILE bursts, or the failure-storm window before the
+        // backoff engages) leaks one fd until the process eventually hits EMFILE.
+        if (drainLogFd >= 0) {
+            try {
+                closeSync(drainLogFd);
+            }
+            catch { /* best-effort */ }
+        }
         releaseLock(lockFd, lockPath);
         log.error("[auto-drain] spawn failed:", e);
         return { spawned: false, reason: e.message };

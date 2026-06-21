@@ -40,6 +40,21 @@ export declare class SessionState {
     readonly _editGateChecked: Set<string>;
     _editGateLastActivity: number;
     readonly _observedFilePaths: Set<string>;
+    /** K48: hard cap on {@link _observedFilePaths}. The Set is fed by every
+     *  Read/Edit/Write (pre-tool-use) AND by path-extraction over Grep/Glob/
+     *  recall result text (post-tool-use) — a single multi-thousand-match Grep
+     *  can balloon it, and on a long-lived session it only ever grows. The
+     *  edit-gate ("has this path been investigated?") only needs RECENTLY
+     *  observed paths, so we keep the most-recent {@link OBSERVED_PATHS_CAP}
+     *  and evict oldest. JS Set preserves insertion order, so the first key is
+     *  the oldest. */
+    static readonly OBSERVED_PATHS_CAP = 2000;
+    /** Insert a path into {@link _observedFilePaths}, evicting oldest entries
+     *  (FIFO) once the cap is exceeded. Re-inserting an existing path does NOT
+     *  refresh its recency (Set semantics) — acceptable here since the gate only
+     *  cares about membership, and any path re-touched will be re-added on its
+     *  next Read anyway. */
+    observeFilePath(path: string): void;
     _pushDetected: boolean;
     /** Query vector from this turn's context retrieval — used to detect redundant recall calls. */
     lastQueryVec: number[] | null;
@@ -113,6 +128,16 @@ export declare class GlobalPluginState {
     workspaceDir?: string;
     schemaApplied: boolean;
     private sessions;
+    /** K1 backstop: hard cap on the in-memory sessions Map. The periodic reaper
+     *  ({@link reapStaleSessions}, armed from daemon/index.ts) handles the normal
+     *  case, but a deterministic leak (a code path that creates sessions faster
+     *  than SessionEnd removes them, or SessionEnd never firing) would otherwise
+     *  grow this Map without bound on a long-lived per-host daemon → OOM. When a
+     *  new session would exceed the cap we evict the OLDEST entry (Map preserves
+     *  insertion order) and fire onSessionRemoved so dependent module-scoped maps
+     *  GC too. Co-located Claude Code installs run a handful of sessions; 512 is
+     *  far above any legitimate steady state. Override via KONGCODE_MAX_SESSIONS. */
+    private readonly maxSessions;
     readonly observabilityCooldown: import("./observability.js").CooldownState;
     lastRollupDay: string;
     /**
@@ -136,6 +161,9 @@ export declare class GlobalPluginState {
     constructor(config: MemoryConfig, store: SurrealStore, embeddings: EmbeddingService);
     /** Get or create a SessionState for the given session key. */
     getOrCreateSession(sessionKey: string, sessionId: string): SessionState;
+    /** Current number of live in-memory sessions. Exposed for the periodic
+     *  reaper's logging and for tests asserting the K1 size cap. */
+    get sessionCount(): number;
     /** Get an existing session by key. */
     getSession(sessionKey: string): SessionState | undefined;
     /**

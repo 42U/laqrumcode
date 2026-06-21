@@ -108,6 +108,16 @@ export class DaemonServer {
    *  that a stuck phantom doesn't keep the daemon alive for many minutes
    *  past the last real disconnect. */
   private static readonly PRUNE_INTERVAL_MS = 60_000;
+  /** K12 backpressure: global ceiling on concurrently-executing RPCs. Past
+   *  this, NON-meta calls (tool.* / hook.*) are rejected with a retryable busy
+   *  error instead of piling onto the store/embedder — which on a single-host
+   *  daemon would deepen the embed FIFO and worsen, not absorb, the overload.
+   *  meta.* (handshake/health/shutdown/supersede) is always exempt so
+   *  lifecycle never wedges under load. Override via KONGCODE_DAEMON_MAX_INFLIGHT. */
+  private readonly maxInFlight =
+    Number(process.env.KONGCODE_DAEMON_MAX_INFLIGHT) > 0
+      ? Number(process.env.KONGCODE_DAEMON_MAX_INFLIGHT)
+      : 256;
 
   constructor(private readonly opts: DaemonServerOpts) {}
 
@@ -262,24 +272,85 @@ export class DaemonServer {
     return pruned;
   }
 
+  /** Max time close() waits for in-flight RPCs to settle before forcibly
+   *  ending sockets. Kept under daemon/index.ts's 8s shutdown watchdog so the
+   *  drain finishes (or is abandoned) before the watchdog hard-exits. Override
+   *  via KONGCODE_DAEMON_DRAIN_TIMEOUT_MS (tests use a small value). */
+  private drainTimeoutMs(): number {
+    const env = Number(process.env.KONGCODE_DAEMON_DRAIN_TIMEOUT_MS);
+    return Number.isFinite(env) && env >= 0 ? env : 5_000;
+  }
+
   /** Drain in-flight requests, close listeners, close client sockets, exit.
    *  Caller (daemon main) is responsible for closing SurrealStore and
-   *  saving any pending state before this is called. */
+   *  saving any pending state before this is called.
+   *
+   *  K11: order matters. The old code ended client sockets and cleared the
+   *  client map IMMEDIATELY, then closed the listeners — so a handler still
+   *  awaiting the store mid-RPC had its response socket torn out from under it
+   *  (client saw a truncated/closed connection, not a result), and the caller
+   *  then disposed the store/embeddings while that handler was still using
+   *  them. Correct sequence: (1) stop accepting NEW connections by closing the
+   *  listeners, (2) await rpcsInFlight===0 with a bounded timeout, (3) reply
+   *  with a JSON-RPC error to anything still pending at timeout, THEN (4) end
+   *  client sockets. Store/embeddings stay alive (the caller disposes them
+   *  AFTER close() resolves) until in-flight handlers finish. */
   async close(): Promise<void> {
     this.disarmIdleTimer();
     this.stopPruneTimer();
+
+    // (1) Stop accepting NEW connections first. Existing sockets stay open so
+    // in-flight handlers can still write their responses. Server.close()
+    // resolves its callback only once all existing connections have ended, so
+    // we kick it off here (capturing the resolution promise) but drive the
+    // actual socket teardown ourselves after the drain — otherwise close()
+    // would block on connections we haven't ended yet.
+    const udsClosed = this.udsServer
+      ? new Promise<void>((resolve) => this.udsServer!.close(() => resolve()))
+      : Promise.resolve();
+    const tcpClosed = this.tcpServer
+      ? new Promise<void>((resolve) => this.tcpServer!.close(() => resolve()))
+      : Promise.resolve();
+
+    // (2) Drain: wait for in-flight RPCs to finish, bounded so a wedged
+    // handler can't hang shutdown past the watchdog.
+    await this.awaitInFlightDrain(this.drainTimeoutMs());
+
+    // (3) Anything still pending at the deadline: send a JSON-RPC error so the
+    // client gets a definitive failure instead of a silently-dropped request.
+    if (this.rpcsInFlight > 0) {
+      this.opts.log.warn(`[daemon] close: ${this.rpcsInFlight} RPC(s) still in-flight at drain deadline — sending shutdown errors`);
+      for (const sock of this.clients.keys()) {
+        this.sendResponse(sock, {
+          jsonrpc: "2.0",
+          id: null,
+          error: { code: IpcErrorCode.DAEMON_RESTARTING, message: "daemon shutting down — retry after reconnect" },
+        });
+      }
+    }
+
+    // (4) Now end client sockets — this lets the listener close() callbacks
+    // above resolve once the sockets finish closing.
     for (const sock of this.clients.keys()) {
       try { sock.end(); } catch {}
     }
     this.clients.clear();
-    if (this.udsServer) {
-      await new Promise<void>((resolve) => this.udsServer!.close(() => resolve()));
-      if (this.opts.socketPath && existsSync(this.opts.socketPath)) {
-        try { unlinkSync(this.opts.socketPath); } catch {}
-      }
+    await udsClosed;
+    if (this.udsServer && this.opts.socketPath && existsSync(this.opts.socketPath)) {
+      try { unlinkSync(this.opts.socketPath); } catch {}
     }
-    if (this.tcpServer) {
-      await new Promise<void>((resolve) => this.tcpServer!.close(() => resolve()));
+    await tcpClosed;
+  }
+
+  /** Poll until rpcsInFlight hits 0 or the timeout elapses. Short poll
+   *  interval keeps shutdown snappy when handlers finish quickly; the bound
+   *  guarantees we never wait forever on a wedged handler. */
+  private async awaitInFlightDrain(timeoutMs: number): Promise<void> {
+    if (this.rpcsInFlight <= 0) return;
+    const deadline = Date.now() + timeoutMs;
+    const POLL_MS = 25;
+    while (this.rpcsInFlight > 0 && Date.now() < deadline) {
+      await new Promise<void>((resolve) => setTimeout(resolve, POLL_MS));
     }
   }
 
@@ -493,6 +564,23 @@ export class DaemonServer {
         error: {
           code: IpcErrorCode.HANDLER_ERROR,
           message: `Method registered in protocol but no handler bound: ${req.method}`,
+        },
+      });
+      return;
+    }
+    // K12 backpressure: reject non-meta calls past the global in-flight
+    // ceiling with a retryable busy error. meta.* is exempt — a client must
+    // always be able to handshake/health-check/shut down the daemon even when
+    // it's saturated with tool/hook work. The client treats DAEMON_RESTARTING
+    // as a backoff-and-retry signal (same family it already retries on).
+    if (this.rpcsInFlight >= this.maxInFlight && !req.method.startsWith("meta.")) {
+      this.opts.log.warn(`[daemon] in-flight ceiling hit (${this.rpcsInFlight}/${this.maxInFlight}) — rejecting ${req.method} as busy`);
+      this.sendResponse(sock, {
+        jsonrpc: "2.0",
+        id: req.id,
+        error: {
+          code: IpcErrorCode.DAEMON_RESTARTING,
+          message: `daemon busy (${this.rpcsInFlight} in-flight) — retry shortly`,
         },
       });
       return;

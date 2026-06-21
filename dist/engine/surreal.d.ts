@@ -49,6 +49,17 @@ export interface ConceptProvenance {
     source_kind?: "daemon" | "skill" | "user" | "gem" | "synthesis";
 }
 declare function assertRecordId(id: string): void;
+/** K21 — read-time mean for memory_utility_cache rows. The race-free writer
+ *  stores commutative accumulators (util_sum, retrieval_count) instead of a
+ *  materialized running average; the mean is util_sum/retrieval_count. Legacy
+ *  rows written before K21 carry a materialized avg_utilization and util_sum
+ *  IS NONE — fall back to that. Returns null when neither is derivable.
+ *  Exported for unit tests (test/fix-k21-utility-cache-race.test.ts). */
+export declare function utilityMean(row: {
+    util_sum?: number | null;
+    retrieval_count?: number | null;
+    avg_utilization?: number | null;
+}): number | null;
 /** Whitelist of valid SurrealDB edge table names — prevents SQL injection via edge interpolation. */
 declare const VALID_EDGES: Set<string>;
 declare function assertValidEdge(edge: string): void;
@@ -82,6 +93,16 @@ export declare class SurrealStore {
     private shutdownFlag;
     private initialized;
     constructor(config: SurrealConfig);
+    /** K32: shared connect timeout for BOTH the first connect (initialize) and
+     *  every reconnect (ensureConnected). A non-settling WS handshake at boot used
+     *  to hang initialize() forever — the daemon sat in "connecting" and never
+     *  entered degraded mode, while only the reconnect path had a guard. */
+    private static readonly CONNECT_TIMEOUT_MS;
+    /** K32: one connect path, deadlined. Builds a fresh Surreal handshake and
+     *  races it against CONNECT_TIMEOUT_MS via raceWithDeadline (which clears the
+     *  timer on every exit path, so a fast connect leaks no pending Timeout that
+     *  would keep the process alive). Used by initialize() and ensureConnected(). */
+    private connectWithTimeout;
     /** Connect and run schema. Returns true if a new connection was made, false if already initialized. */
     initialize(): Promise<boolean>;
     markShutdown(): void;
@@ -296,7 +317,7 @@ export declare class SurrealStore {
         id: string;
         existed: boolean;
     }>;
-    createMemory(text: string, embedding: number[] | null, importance: number, category?: string, sessionId?: string, projectId?: string): Promise<string>;
+    createMemory(text: string, embedding: number[] | null, importance: number, category?: string, sessionId?: string, projectId?: string, embeddingTarget?: string): Promise<string>;
     createMonologue(sessionId: string, category: string, content: string, embedding: number[] | null): Promise<string>;
     getAllCoreMemory(tier?: number): Promise<CoreMemoryEntry[]>;
     createCoreMemory(text: string, category: string, priority: number, tier: number, sessionId?: string): Promise<string>;
@@ -385,6 +406,19 @@ export declare class SurrealStore {
      * stays bounded instead of growing forever.
      */
     purgeOldRetrievalOutcomes(): Promise<number>;
+    /**
+     * Hard-delete old turn_score rows beyond the retention window.
+     *
+     * turn_score is per-turn scoring TELEMETRY (one composite per turn), NOT
+     * knowledge — it is absent from the D4 no-DELETE-content-tables lint's
+     * CONTENT_TABLES list, exactly like retrieval_outcome. It was the one
+     * telemetry table with no retention (K29): on a long-lived per-host daemon
+     * it grows ~1 row/turn forever, and observability.ts / soul.ts range-scan it
+     * by created_at. Mirror purgeOldRetrievalOutcomes: keep the most-recent
+     * RETAIN rows and hard-delete the rest so the table stays bounded. Uses
+     * ts_created_idx (K8) for the ORDER BY and the DELETE predicate.
+     */
+    purgeOldTurnScores(): Promise<number>;
     archiveOldTurns(): Promise<number>;
     consolidateMemories(embedFn: (text: string) => Promise<number[]>): Promise<number>;
     getSessionRetrievedMemories(sessionId: string): Promise<{
@@ -410,7 +444,22 @@ export declare class SurrealStore {
     isAvailable(): boolean;
     private _reflectionSessions;
     clearReflectionCache(): void;
-    getReflectionSessionIds(): Promise<Set<string>>;
+    /** Returns the subset of session ids that have at least one reflection.
+     *
+     *  K18: the per-turn caller (graph-context.ts reflectionBoost) only ever
+     *  checks `.has(sessionId)` for the sessionIds present in the CURRENT result
+     *  set. The old form `SELECT session_id FROM reflection GROUP BY session_id`
+     *  full-scanned the entire (forever-growing) reflection table into an
+     *  unbounded Set on every turn. When called WITH the result-set ids we run a
+     *  targeted `WHERE session_id IN $ids` (served by reflection_session_idx),
+     *  bounding the work to |ids| — not the table. The set returned is membership-
+     *  equivalent for those ids, so the caller's `.has()` checks are unchanged.
+     *
+     *  Back-compat: a no-arg call keeps the cached full-membership behaviour but
+     *  BOUNDS it with a LIMIT so a pathological reflection table can't blow up
+     *  the Set. The targeted path is NOT cached (the answer is id-set-specific).
+     *  Param is OPTIONAL so the build stays valid regardless of caller-edit order. */
+    getReflectionSessionIds(sessionIds?: string[]): Promise<Set<string>>;
     private static readonly FIB_DAYS;
     advanceSurfaceFade(memoryId: string): Promise<void>;
     resolveSurfaceMemory(memoryId: string, outcome: "engaged" | "dismissed"): Promise<void>;

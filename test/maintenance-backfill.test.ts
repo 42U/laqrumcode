@@ -39,6 +39,11 @@ describe("backfillSessionTurnCounts (via runBootstrapMaintenance)", () => {
         garbageCollectConcepts: async () => {},
         purgeStalePendingWork: async () => {},
         purgeOldRetrievalOutcomes: async () => 0,
+        // K29: runBootstrapMaintenance now also calls purgeOldTurnScores in
+        // its Group-1 Promise.all (maintenance.ts). Mock it like the sibling
+        // purge methods so the fire-and-forget chain doesn't reject on a
+        // missing function (same pattern as purgeOldRetrievalOutcomes).
+        purgeOldTurnScores: async () => 0,
       } as any,
       embeddings: { embed: async () => [] } as any,
       config: {
@@ -89,6 +94,11 @@ describe("backfillSessionTurnCounts (via runBootstrapMaintenance)", () => {
         garbageCollectConcepts: async () => {},
         purgeStalePendingWork: async () => {},
         purgeOldRetrievalOutcomes: async () => 0,
+        // K29: runBootstrapMaintenance now also calls purgeOldTurnScores in
+        // its Group-1 Promise.all (maintenance.ts). Mock it like the sibling
+        // purge methods so the fire-and-forget chain doesn't reject on a
+        // missing function (same pattern as purgeOldRetrievalOutcomes).
+        purgeOldTurnScores: async () => 0,
       } as any,
       embeddings: { embed: async () => [] } as any,
       config: { thresholds: { acanTrainingThreshold: 1 } } as any,
@@ -127,6 +137,11 @@ describe("backfillSessionTurnCounts (via runBootstrapMaintenance)", () => {
         garbageCollectConcepts: async () => {},
         purgeStalePendingWork: async () => {},
         purgeOldRetrievalOutcomes: async () => 0,
+        // K29: runBootstrapMaintenance now also calls purgeOldTurnScores in
+        // its Group-1 Promise.all (maintenance.ts). Mock it like the sibling
+        // purge methods so the fire-and-forget chain doesn't reject on a
+        // missing function (same pattern as purgeOldRetrievalOutcomes).
+        purgeOldTurnScores: async () => 0,
       } as any,
       embeddings: { embed: async () => [] } as any,
       config: { thresholds: { acanTrainingThreshold: 1 } } as any,

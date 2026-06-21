@@ -84,6 +84,12 @@ DEFINE FIELD IF NOT EXISTS source ON concept TYPE option<string>;
 DEFINE FIELD IF NOT EXISTS created_at ON concept TYPE datetime DEFAULT time::now();
 DEFINE FIELD IF NOT EXISTS last_accessed ON concept TYPE option<datetime>;
 DEFINE INDEX IF NOT EXISTS concept_vec_idx ON concept FIELDS embedding HNSW DIMENSION 1024 DIST COSINE;
+-- tags index (K4): tagBoostedConcepts filters `tags CONTAINSANY $tags` then
+-- scores the survivors by cosine. Without this index the CONTAINSANY predicate
+-- is a full concept-table scan AND cosine runs over every row the WHERE admits;
+-- with it the array-membership filter is index-served so cosine runs only over
+-- the bounded tag-matching candidate set. Non-UNIQUE → no predeploy dedup.
+DEFINE INDEX IF NOT EXISTS concept_tags_idx ON concept FIELDS tags;
 
 -- ============================================================
 -- Conversation turns (the workhorse table)
@@ -184,6 +190,13 @@ DEFINE FIELD IF NOT EXISTS superseded_by ON memory TYPE option<record<memory>>;
 -- Set to true at every site that truncates before embedding so queries can
 -- audit which rows have known-partial vectors.
 DEFINE FIELD IF NOT EXISTS embedding_target_truncated ON memory TYPE option<bool>;
+-- K51: the text actually fed to embed() at create time, when it differs from
+-- `text` (commitMemory embeds `embeddingText ?? text` — record-finding.ts passes
+-- the bare finding without the [CATEGORY] prefix + Rationale tail). Persisted so
+-- backfillMemoryEmbeddings can heal an un-embedded row with the SAME short target
+-- the create path would have used, preserving short-query match quality through
+-- the heal path. NONE means "embed text" (the common case).
+DEFINE FIELD IF NOT EXISTS embedding_target ON memory TYPE option<string>;
 DEFINE INDEX IF NOT EXISTS memory_vec_idx ON memory FIELDS embedding HNSW DIMENSION 1024 DIST COSINE;
 DEFINE INDEX IF NOT EXISTS memory_category_idx ON memory FIELDS category;
 -- Status is filtered on every vectorSearch (line 417), getSessionRetrievedMemories
@@ -191,6 +204,10 @@ DEFINE INDEX IF NOT EXISTS memory_category_idx ON memory FIELDS category;
 -- index those queries do a full memory scan. Compound (status, category) so
 -- the (status, category="handoff") lookup at getLatestHandoff also benefits.
 DEFINE INDEX IF NOT EXISTS memory_status_idx ON memory FIELDS status;
+-- importance index (K33/K30): the memory GC scan and importance-ordered
+-- retrieval/eviction paths sort and filter memory by `importance`. Without it
+-- those were unindexed full scans/sorts over a forever-growing table.
+DEFINE INDEX IF NOT EXISTS memory_importance_idx ON memory FIELDS importance;
 -- retrieval_outcome.memory_table is filtered in archiveOldTurns' NOT IN
 -- subquery (surreal.ts:1554, "WHERE memory_table = 'turn'") and in
 -- getSessionRetrievedMemories (surreal.ts:1774). Without this, the
@@ -324,6 +341,12 @@ DEFINE FIELD IF NOT EXISTS composite ON turn_score TYPE option<float>;
 DEFINE FIELD IF NOT EXISTS created_at ON turn_score TYPE datetime DEFAULT time::now();
 DEFINE INDEX IF NOT EXISTS ts_session_idx ON turn_score FIELDS session_id;
 DEFINE INDEX IF NOT EXISTS ts_turn_idx ON turn_score FIELDS turn_id;
+-- created_at index: purgeOldTurnScores (maintenance.ts → surreal.ts) sorts by
+-- created_at to find the retention cutoff and DELETEs older rows by created_at;
+-- observability.ts:139 + soul.ts:218 also range-scan turn_score by created_at.
+-- Without it both were unindexed full scans over a forever-growing telemetry
+-- table. Mirrors ro_created_idx on retrieval_outcome.
+DEFINE INDEX IF NOT EXISTS ts_created_idx ON turn_score FIELDS created_at;
 
 -- ============================================================
 -- ISMAR-GENT: Orchestrator Metrics
@@ -346,11 +369,21 @@ DEFINE FIELD IF NOT EXISTS steering_candidates ON orchestrator_metrics TYPE int 
 DEFINE FIELD IF NOT EXISTS fast_path ON orchestrator_metrics TYPE bool DEFAULT false;
 DEFINE FIELD IF NOT EXISTS created_at ON orchestrator_metrics TYPE datetime DEFAULT time::now();
 DEFINE INDEX IF NOT EXISTS om_session_idx ON orchestrator_metrics FIELDS session_id;
+-- created_at index: pruneRawMetrics (observability.ts) finds the 30d soft-tag
+-- cutoff by created_at and the daily rollup pass range-scans raw rows by
+-- created_at. Without it both were unindexed full scans over a long-lived,
+-- per-turn-growing telemetry table. Mirrors ro_created_idx on retrieval_outcome.
+DEFINE INDEX IF NOT EXISTS om_created_idx ON orchestrator_metrics FIELDS created_at;
 
 -- ============================================================
 -- ISMAR-GENT: Daily Rollup of Orchestrator Metrics (0.5.0+)
 -- One row per day. Populated by maintenance pass; query for trend reports.
--- Retention: orchestrator_metrics raw rows pruned after 30d; daily kept forever.
+-- Retention: raw orchestrator_metrics rows older than 30d are SOFT-TAGGED via
+-- pruned_at + prune_reason and LEFT IN PLACE — NEVER hard-deleted (Tier-0
+-- "nothing should be deleted"; pruneRawMetrics in observability.ts, v0.7.96,
+-- core_memory:hoj8fvmbt7d14mskciba). The orchestrator_metrics_daily rollups
+-- are kept forever. (The pre-v0.7.96 comment here said "pruned after 30d",
+-- which read as a hard DELETE and no longer matched the soft-tag writer.)
 -- ============================================================
 DEFINE TABLE IF NOT EXISTS orchestrator_metrics_daily SCHEMALESS;
 DEFINE FIELD IF NOT EXISTS day ON orchestrator_metrics_daily TYPE string; -- YYYY-MM-DD
@@ -394,8 +427,27 @@ DEFINE TABLE IF NOT EXISTS memory_utility_cache SCHEMALESS;
 -- also scored and cached). The name "memory_id" is historical — the cache
 -- is keyed by any retrieved-record id, not just memory rows.
 DEFINE FIELD IF NOT EXISTS memory_id ON memory_utility_cache TYPE option<record<memory> | record<concept> | record<turn>>;
-DEFINE FIELD IF NOT EXISTS avg_utilization ON memory_utility_cache TYPE float;
+-- K21: avg_utilization relaxed to option<float>. The race-free writer no longer
+-- materializes it (it would require a non-atomic read-compute-write); the mean
+-- is computed at read time from util_sum/retrieval_count. Legacy rows that still
+-- carry a materialized avg_utilization (and util_sum IS NONE) remain valid and
+-- readers fall back to it. OVERWRITE so installs whose field was created as the
+-- required `float` relax on daemon restart (a SCHEMALESS row that omits the
+-- field would otherwise trip the non-option coercion on a RETURN AFTER write).
+DEFINE FIELD OVERWRITE avg_utilization ON memory_utility_cache TYPE option<float>;
 DEFINE FIELD IF NOT EXISTS retrieval_count ON memory_utility_cache TYPE int;
+-- K21: util_sum is the commutative accumulator behind avg_utilization. The
+-- pre-K21 writer did a non-atomic read-compute-write of the running average
+-- (`avg_utilization = (avg_utilization * count + $util)/(count+1)`) under a
+-- fire-and-forget UPSERT — two concurrent retrieval-quality writebacks for the
+-- same row both read the old mean and the second clobbered the first's update.
+-- Now the writer only does commutative `util_sum += $util` / `retrieval_count
+-- += 1` (order-independent, no lost update) against a DETERMINISTIC record id,
+-- and the mean is computed at read time as util_sum/retrieval_count (mirrors
+-- bumpAccessCounts' side-table-delta pattern). option<float> so legacy rows
+-- written before this field existed coerce cleanly; readers fall back to the
+-- materialized avg_utilization when util_sum IS NONE.
+DEFINE FIELD IF NOT EXISTS util_sum ON memory_utility_cache TYPE option<float>;
 DEFINE FIELD IF NOT EXISTS last_updated ON memory_utility_cache TYPE datetime DEFAULT time::now();
 DEFINE INDEX IF NOT EXISTS muc_mid_idx ON memory_utility_cache FIELDS memory_id UNIQUE;
 
@@ -490,6 +542,11 @@ DEFINE FIELD IF NOT EXISTS archive_reason ON reflection TYPE option<string>;
 DEFINE FIELD IF NOT EXISTS superseded_by ON reflection TYPE option<record<reflection>>;
 DEFINE FIELD IF NOT EXISTS embedding_target_truncated ON reflection TYPE option<bool>;
 DEFINE INDEX IF NOT EXISTS reflection_vec_idx ON reflection FIELDS embedding HNSW DIMENSION 1024 DIST COSINE;
+-- session_id index: K18 targeted-membership and the soul/evolve "reflections
+-- since soul.updated_at" range scans filter reflection by session_id. Without
+-- it those were full table scans over a forever-growing table. session_id
+-- carries the kc_session_id UUID string (see the field comment above).
+DEFINE INDEX IF NOT EXISTS reflection_session_idx ON reflection FIELDS session_id;
 
 DEFINE TABLE IF NOT EXISTS reflects_on TYPE RELATION IN reflection OUT session;
 
@@ -594,6 +651,11 @@ DEFINE FIELD IF NOT EXISTS last_accessed ON monologue TYPE option<datetime>;
 DEFINE INDEX IF NOT EXISTS monologue_session ON monologue FIELDS session_id;
 DEFINE INDEX IF NOT EXISTS monologue_category ON monologue FIELDS category;
 DEFINE INDEX IF NOT EXISTS monologue_vec_idx ON monologue FIELDS embedding HNSW DIMENSION 1024 DIST COSINE;
+-- timestamp index (K33): the soul_generate/soul_evolve fetch paths and the
+-- hasNewSoulExperience probe (pending-work.ts) sort/filter monologue by
+-- `timestamp` (ORDER BY timestamp DESC, WHERE timestamp > $since). Without it
+-- those were unindexed full scans/sorts over a forever-growing table.
+DEFINE INDEX IF NOT EXISTS monologue_timestamp_idx ON monologue FIELDS timestamp;
 
 -- Fibonacci resurfacing: proactive memory that fades over time
 -- Memories flagged as surfaceable get a next_surface_at timestamp.
@@ -680,11 +742,27 @@ DEFINE FIELD IF NOT EXISTS payload ON pending_work TYPE option<object>;
 -- has been run on every install for two consecutive release cycles, at which
 -- point the legacy status-normalize pass becomes redundant.
 DEFINE FIELD OVERWRITE status ON pending_work TYPE string
-  ASSERT $value IN ['pending', 'processing', 'completed', 'failed']
+  ASSERT $value IN ['pending', 'processing', 'committing', 'completed', 'failed']
   DEFAULT 'pending';
 DEFINE FIELD IF NOT EXISTS priority ON pending_work TYPE int DEFAULT 5;
 DEFINE FIELD IF NOT EXISTS created_at ON pending_work TYPE datetime DEFAULT time::now();
 DEFINE FIELD IF NOT EXISTS completed_at ON pending_work TYPE option<datetime>;
+-- K15: processing_started_at is stamped when a row is CLAIMED (status flips to
+-- "processing") and RE-STAMPED at the commit CAS (→ "committing") so the
+-- 10-minute stale-recovery window restarts when commit work begins — a long
+-- commit must not let stale-recovery revert a row another path is actively
+-- writing. SCHEMALESS already accepted this field at runtime; declared here so
+-- INFO FOR TABLE documents it and the (processing_started_at ?? created_at)
+-- stale predicate reads a typed column.
+DEFINE FIELD IF NOT EXISTS processing_started_at ON pending_work TYPE option<datetime>;
+-- K41: committing_token makes the processing→committing CAS in
+-- commit_work_results idempotent across a single withRetry re-fire. The CAS
+-- stamps a caller-generated token; a retry that lands the SAME token (its own
+-- CAS succeeded server-side but the response was lost) is treated as a WIN, not
+-- a discard, while a row carrying a DIFFERENT token (genuinely reclaimed by
+-- another drainer — the C1 case) is correctly discarded. option<string> so
+-- pre-K41 rows (token IS NONE) coerce cleanly under RETURN AFTER.
+DEFINE FIELD IF NOT EXISTS committing_token ON pending_work TYPE option<string>;
 -- v0.7.95 append-only: pending_work formerly DELETE'd dupes + 7d-stale rows;
 -- now soft-archived via active=false + archived_at + archive_reason. Readers
 -- (fetch_pending_work, status_breakdown) filter `(active = true OR active IS NONE)`.

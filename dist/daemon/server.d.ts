@@ -88,6 +88,13 @@ export declare class DaemonServer {
      *  that a stuck phantom doesn't keep the daemon alive for many minutes
      *  past the last real disconnect. */
     private static readonly PRUNE_INTERVAL_MS;
+    /** K12 backpressure: global ceiling on concurrently-executing RPCs. Past
+     *  this, NON-meta calls (tool.* / hook.*) are rejected with a retryable busy
+     *  error instead of piling onto the store/embedder — which on a single-host
+     *  daemon would deepen the embed FIFO and worsen, not absorb, the overload.
+     *  meta.* (handshake/health/shutdown/supersede) is always exempt so
+     *  lifecycle never wedges under load. Override via KONGCODE_DAEMON_MAX_INFLIGHT. */
+    private readonly maxInFlight;
     constructor(opts: DaemonServerOpts);
     /** Register a handler for an IPC method. The dispatcher rejects calls to
      *  methods that aren't both in IPC_METHODS (compile-time) AND registered
@@ -122,10 +129,30 @@ export declare class DaemonServer {
      *  before checkSupersedeReady / armIdleTimer make lifecycle decisions.
      *  No new timer needed — runs lazily on read paths. */
     private pruneDeadClients;
+    /** Max time close() waits for in-flight RPCs to settle before forcibly
+     *  ending sockets. Kept under daemon/index.ts's 8s shutdown watchdog so the
+     *  drain finishes (or is abandoned) before the watchdog hard-exits. Override
+     *  via KONGCODE_DAEMON_DRAIN_TIMEOUT_MS (tests use a small value). */
+    private drainTimeoutMs;
     /** Drain in-flight requests, close listeners, close client sockets, exit.
      *  Caller (daemon main) is responsible for closing SurrealStore and
-     *  saving any pending state before this is called. */
+     *  saving any pending state before this is called.
+     *
+     *  K11: order matters. The old code ended client sockets and cleared the
+     *  client map IMMEDIATELY, then closed the listeners — so a handler still
+     *  awaiting the store mid-RPC had its response socket torn out from under it
+     *  (client saw a truncated/closed connection, not a result), and the caller
+     *  then disposed the store/embeddings while that handler was still using
+     *  them. Correct sequence: (1) stop accepting NEW connections by closing the
+     *  listeners, (2) await rpcsInFlight===0 with a bounded timeout, (3) reply
+     *  with a JSON-RPC error to anything still pending at timeout, THEN (4) end
+     *  client sockets. Store/embeddings stay alive (the caller disposes them
+     *  AFTER close() resolves) until in-flight handlers finish. */
     close(): Promise<void>;
+    /** Poll until rpcsInFlight hits 0 or the timeout elapses. Short poll
+     *  interval keeps shutdown snappy when handlers finish quickly; the bound
+     *  guarantees we never wait forever on a wedged handler. */
+    private awaitInFlightDrain;
     /** Stats surfaced via meta.health for ops visibility. */
     getStats(): {
         activeClients: number;

@@ -41,7 +41,11 @@ function detectPlatformKey() {
     return `${process.platform}-${arch}`;
 }
 async function downloadFile(url, destPath, expectedSha256) {
-    const res = await fetch(url, { redirect: "follow" });
+    // K39: bound the overall request so a CDN that accepts the connection but
+    // never responds can't hang bootstrap forever. Generous (120s) because this
+    // covers large model downloads (~600MB reranker) on a slow link — the
+    // per-chunk inactivity watchdog below is the tighter guard once bytes flow.
+    const res = await fetch(url, { redirect: "follow", signal: AbortSignal.timeout(120_000) });
     if (!res.ok) {
         throw new Error(`download failed: ${res.status} ${res.statusText} for ${url}`);
     }
@@ -53,16 +57,48 @@ async function downloadFile(url, destPath, expectedSha256) {
     const writer = createWriteStream(tmpPath);
     let bytes = 0;
     const hasher = expectedSha256 ? createHash("sha256") : null;
+    // K39: per-chunk inactivity watchdog. The overall AbortSignal.timeout above
+    // can't distinguish "slow but progressing" from "wedged"; a stalled transfer
+    // mid-stream (CDN hangs after sending headers + some bytes) would otherwise
+    // block the drain loop indefinitely. Reset the timer on every chunk; if no
+    // chunk arrives within INACTIVITY_MS, destroy the stream so the for-await
+    // rejects and the throw propagates out of downloadFile (same shape as a
+    // pre-existing network error) instead of hanging forever. The leftover
+    // .partial is harmless — a retry truncates+overwrites it via createWriteStream
+    // and rename only fires after a clean drain + hash check.
+    const INACTIVITY_MS = 30_000;
+    let stallTimer;
+    const body = res.body;
+    const armStallTimer = () => {
+        if (stallTimer)
+            clearTimeout(stallTimer);
+        stallTimer = setTimeout(() => {
+            const err = new Error(`download stalled: no data for ${INACTIVITY_MS}ms after ${bytes} bytes for ${url}`);
+            // Tear down the underlying stream so the for-await loop throws. Node's
+            // fetch body exposes destroy(); fall back to cancel() for a web stream.
+            if (typeof body.destroy === "function")
+                body.destroy(err);
+            else if (typeof body.cancel === "function")
+                body.cancel();
+        }, INACTIVITY_MS);
+    };
     // Node's fetch returns a web ReadableStream; iterate it as bytes.
     // ReadableStream is async-iterable in Node 18+; cast through unknown.
-    const body = res.body;
-    for await (const chunk of body) {
-        if (hasher)
-            hasher.update(chunk);
-        bytes += chunk.length;
-        if (!writer.write(chunk)) {
-            await new Promise((resolve) => writer.once("drain", () => resolve()));
+    try {
+        armStallTimer();
+        for await (const chunk of body) {
+            armStallTimer(); // progress — reset the inactivity deadline
+            if (hasher)
+                hasher.update(chunk);
+            bytes += chunk.length;
+            if (!writer.write(chunk)) {
+                await new Promise((resolve) => writer.once("drain", () => resolve()));
+            }
         }
+    }
+    finally {
+        if (stallTimer)
+            clearTimeout(stallTimer);
     }
     await new Promise((resolve, reject) => {
         writer.end((err) => (err ? reject(err) : resolve()));
@@ -794,7 +830,13 @@ async function waitForSurrealReady(port, timeoutMs = 15_000) {
     let lastErr = null;
     while (Date.now() < deadline) {
         try {
-            const res = await fetch(`http://127.0.0.1:${port}/health`);
+            // K38: bound each probe so a stalled connection (port open but server
+            // wedged mid-startup) fails fast instead of hanging this single fetch
+            // for the whole remaining deadline. The loop deadline governs total wait;
+            // matches the AbortSignal.timeout convention at the other fetch sites.
+            const res = await fetch(`http://127.0.0.1:${port}/health`, {
+                signal: AbortSignal.timeout(2_000),
+            });
             if (res.ok)
                 return;
         }

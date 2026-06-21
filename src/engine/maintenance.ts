@@ -111,6 +111,7 @@ export function runBootstrapMaintenance(state: GlobalPluginState): void {
     store.runMemoryMaintenance(),
     store.purgeStalePendingWork(),
     store.purgeOldRetrievalOutcomes(),
+    store.purgeOldTurnScores(),
     purgeStaleEmbedCache(state),
   ]).then(async () => {
     // Group 2: moderate cost — after cheap queries complete
@@ -130,6 +131,13 @@ export function runBootstrapMaintenance(state: GlobalPluginState): void {
     // the store dropped between boot and this timer.
     const backfillInterval = setInterval(() => {
       void runEmbeddingBackfills(state);
+      // K17-maint: re-arm the embedding_cache prune on the same 6h cadence. Boot
+      // Group 1 runs it once; without this re-arm a long-lived daemon (the
+      // common local-first case — one host, never restarts for weeks) would let
+      // embedding_cache grow unbounded between the boot run and the next restart.
+      // purgeStaleEmbedCache self-guards on store availability and now loops to
+      // full drain, so arming it unconditionally here is safe.
+      void purgeStaleEmbedCache(state);
     }, 6 * 3_600_000);
     backfillInterval.unref?.();
 
@@ -206,13 +214,17 @@ async function backfillTurnEmbeddings(state: GlobalPluginState): Promise<void> {
 
 /** 0.7.118: plain unembedded `memory` rows had no backfill either —
  *  consolidateMemories embeds only what it consolidates. Active = not
- *  archived; target = text. */
+ *  archived. K51: embed `embedding_target ?? text` — when the create path
+ *  embedded a shorter form (record-finding.ts strips the [CATEGORY] prefix +
+ *  Rationale tail for better short-query match), heal with that same target so
+ *  the un-embedded row matches what it would have had if the embedder was up.
+ *  embedding_target IS NONE → fall back to text (the common case). */
 async function backfillMemoryEmbeddings(state: GlobalPluginState): Promise<void> {
   if (!state.store.isAvailable()) return;
   if (!state.embeddings.isAvailable()) return;
   try {
-    const rows = await state.store.queryFirst<{ id: string; text: string }>(
-      `SELECT id, text FROM memory
+    const rows = await state.store.queryFirst<{ id: string; text: string; embedding_target?: string }>(
+      `SELECT id, text, embedding_target FROM memory
         WHERE (embedding IS NONE OR array::len(embedding) = 0)
           AND (status IS NONE OR status != "archived")
           AND text IS NOT NONE
@@ -223,7 +235,7 @@ async function backfillMemoryEmbeddings(state: GlobalPluginState): Promise<void>
     log.info(`[maintenance] backfilling memory embeddings: ${rows.length} row(s)`);
     for (const row of rows) {
       if (!row?.id || !row?.text) continue;
-      let target = row.text;
+      let target = row.embedding_target ?? row.text;
       if (target.length > 6000) target = target.slice(0, 6000);
       try {
         const vec = await state.embeddings.embed(target);
@@ -478,41 +490,48 @@ async function backfillArtifactEmbeddings(state: GlobalPluginState): Promise<voi
 
 /** Embedding backfill for concept rows where embedding IS NONE OR len=0.
  *
- *  Same shape as backfillArtifactEmbeddings. Embed target matches
- *  commit.ts:456 (just `name`) so backfilled vectors agree with the
- *  hot-path. */
+ *  Same shape as backfillArtifactEmbeddings. Embed target = `content`, the
+ *  column the hot-path writer actually populates (surreal.ts upsertConcept
+ *  CREATE writes `{ content, ... }`; commitConcept passes the concept text as
+ *  that `content` arg). So backfilled vectors agree with the hot-path. */
 async function backfillConceptEmbeddings(state: GlobalPluginState): Promise<void> {
   if (!state.store.isAvailable()) return;
   if (!state.embeddings.isAvailable()) return;
   try {
     const rows = await state.store.queryFirst<{
       id: string;
-      name: string;
+      content?: string;
+      name?: string;
     }>(
-      // Hardening (2026-05-18): explicitly require name to be set. The loop
-      // below `continue`s on missing name anyway, but filtering at SELECT
-      // makes the contract visible. Rows that legitimately need healing but
-      // lack name (e.g. legacy pre-migration writers — see the 2026-05-15
-      // iKong session that left 4 such rows; healed via custom script + this
-      // session's investigation) must be addressed by setting name first.
-      `SELECT id, name FROM concept
+      // K16 — key off `content`, NOT the dead `name` column. The writer
+      // populates `content` (the legacy `name` column was renamed to `content`
+      // pre-0.7.x; see schema.surql concept-table recovery migration). The old
+      // `name`-gated SELECT matched ~zero rows on content-only concepts, so
+      // un-embedded concept rows were never healed — a silent backfill-coverage
+      // hole. We now require `content` to be set; the legacy `name` arm is kept
+      // as a fallback (OR) so any pre-migration row that still carries only
+      // `name` is also selected and healed via the COALESCE embed target below.
+      `SELECT id, content, name FROM concept
         WHERE (embedding IS NONE OR array::len(embedding) = 0)
-          AND name IS NOT NONE
-          AND name != ""
+          AND (
+            (content IS NOT NONE AND content != "")
+            OR (name IS NOT NONE AND name != "")
+          )
         LIMIT 50`,
     );
     if (!rows.length) return;
     log.info(`[maintenance] backfilling concept embeddings: ${rows.length} row(s)`);
     let ok = 0;
     for (const row of rows) {
-      if (!row?.id || !row?.name) continue;
-      // Concept embed target = name (matches commit.ts:456 hot-path). Names
-      // are typically short, but guard with the same 6000-char truncation
-      // as artifact for defense-in-depth against pathological gem-derived
-      // concept names.
-      let target = row.name;
+      if (!row?.id) continue;
+      // Embed target = content (hot-path column), falling back to legacy name.
+      let target = row.content && row.content !== "" ? row.content : (row.name ?? "");
+      if (!target) continue;
+      // Content is typically short, but guard with the same 6000-char
+      // truncation as artifact for defense-in-depth against pathological
+      // gem-derived concept text.
       if (target.length > 6000) {
-        log.warn(`[maintenance] backfillConceptEmbeddings: truncating name len=${target.length} → 6000`);
+        log.warn(`[maintenance] backfillConceptEmbeddings: truncating content len=${target.length} → 6000`);
         target = target.slice(0, 6000);
       }
       try {
@@ -525,7 +544,7 @@ async function backfillConceptEmbeddings(state: GlobalPluginState): Promise<void
         );
         ok++;
       } catch (e) {
-        swallow.warn(`maintenance:backfillConceptEmbeddings:${row.name}`, e);
+        swallow.warn(`maintenance:backfillConceptEmbeddings:${String(row.id)}`, e);
       }
     }
     log.info(`[maintenance] concept embedding backfill: ${ok}/${rows.length} embedded`);
@@ -674,30 +693,49 @@ async function backfillTurnArchiveEmbeddings(state: GlobalPluginState): Promise<
   }
 }
 
+/** embedding_cache retention. embedding_cache is TELEMETRY (not a content
+ *  table), so hard-delete IS allowed — but per the tag-don't-delete directive
+ *  the writer at embeddings.ts l2Get filters `pruned_at IS NONE`, so we soft-tag
+ *  here instead and let lane D's l2Put reset the tag if a hash is re-cached.
+ *
+ *  K17-maint: drains to a TARGET retention rather than tagging one 500-row batch
+ *  per boot. Pre-fix this ran once at boot and capped at a single 500-row batch,
+ *  so on a host that accrued >500 stale rows between restarts the cache grew
+ *  without bound (and a long-lived daemon that never restarts never re-ran it at
+ *  all). Now: (1) loop batches until no stale rows remain (bounded by
+ *  MAX_BATCHES so a clock skew / mis-set pruned_at can't spin forever), and
+ *  (2) the caller arms it on the same 6h interval as runEmbeddingBackfills so a
+ *  daemon that stays up for weeks keeps draining. */
 async function purgeStaleEmbedCache(state: GlobalPluginState): Promise<void> {
   if (!state.store.isAvailable()) return;
+  // Per-batch cap kept at 500 (each batch is one bounded transaction); the loop
+  // is what lets it fully drain. MAX_BATCHES * BATCH = 100k rows/run ceiling —
+  // far above any realistic single-host stale backlog, and the loop exits early
+  // the moment a batch tags < BATCH rows (the common steady-state path).
+  const BATCH = 500;
+  const MAX_BATCHES = 200;
   try {
-    // v0.7.96 tag-don't-delete (core_memory:hoj8fvmbt7d14mskciba): was DELETE
-    // on rows >30d, now soft-tag via pruned_at + prune_reason. l2Get filters
-    // `pruned_at IS NONE` so stale cache entries are inert but recallable.
-    // Schema fields added at schema.surql for embedding_cache.
-    // GH #17: SurrealDB rejects `LIMIT` on UPDATE ("Unexpected token 'LIMIT'"),
-    // so the old single-UPDATE form threw on every run and this prune was a
-    // silent no-op (embedding_cache grew unbounded). Use the proven LET+FOR
-    // pattern (mirrors purgeStalePendingWork) — LIMIT is valid on the SELECT, so
-    // the 500-row batch cap is preserved. Soft-tag via pruned_at; l2Get filters
-    // `pruned_at IS NONE`.
-    await state.store.queryMulti(
-      `LET $stale = (SELECT id FROM embedding_cache
-         WHERE created_at < time::now() - 30d
-           AND pruned_at IS NONE
-         LIMIT 500);
-       FOR $row IN $stale {
-         UPDATE $row.id SET
-           pruned_at = time::now(),
-           prune_reason = "stale_30d";
-       };`,
-    );
+    for (let i = 0; i < MAX_BATCHES; i++) {
+      // GH #17: SurrealDB rejects `LIMIT` on UPDATE ("Unexpected token 'LIMIT'"),
+      // so the prune uses the proven LET+FOR pattern (mirrors
+      // purgeStalePendingWork) — LIMIT is valid on the SELECT. RETURN the count
+      // tagged this batch so the loop knows when the backlog is drained.
+      const res = await state.store.queryMulti<{ n: number }>(
+        `LET $stale = (SELECT id FROM embedding_cache
+           WHERE created_at < time::now() - 30d
+             AND pruned_at IS NONE
+           LIMIT $batch);
+         FOR $row IN $stale {
+           UPDATE $row.id SET
+             pruned_at = time::now(),
+             prune_reason = "stale_30d";
+         };
+         RETURN { n: array::len($stale) };`,
+        { batch: BATCH },
+      );
+      const n = Number(res?.n ?? 0);
+      if (n < BATCH) break; // last (partial) batch — backlog drained
+    }
   } catch (e) {
     swallow.warn("maintenance:purgeEmbedCache", e);
   }

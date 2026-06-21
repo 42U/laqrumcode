@@ -1,5 +1,5 @@
 import { Surreal, RecordId } from "surrealdb";
-import { randomUUID } from "node:crypto";
+import { randomUUID, createHash } from "node:crypto";
 import { swallow, isUniqueViolation, safeId, RECORD_ID_RE } from "./errors.js";
 import { log } from "./log.js";
 import { loadSchema } from "./schema-loader.js";
@@ -29,6 +29,61 @@ function assertRecordId(id) {
         // the intended error instead of crashing the error path itself.
         throw new Error(`Invalid record ID format: ${String(id).slice(0, 40)}`);
     }
+}
+/** K9 — TOTAL, scan-direction-independent keep/drop tie-break for the
+ *  consolidateMemories dedup passes. Returns true iff the OUTER-loop row should
+ *  be the keeper. The comparison is a strict total order: importance, then a
+ *  secondary key (access_count; pass a constant for importance-only tables),
+ *  then a final deterministic tie-break on the record-id STRING. The id tier is
+ *  what makes the decision symmetric — for any unordered pair {a,b}, evaluating
+ *  keepOuter(a,b) and keepOuter(b,a) elects the SAME row, so two passes that
+ *  visit the pair in opposite order can never each archive the other (the
+ *  mutual-archive K9 targets). When the outer row loses every tier it is
+ *  dropped, never kept-by-default. */
+function consolidateKeepOuter(outerImp, innerImp, outerSecondary, innerSecondary, outerId, innerId) {
+    if (outerImp !== innerImp)
+        return outerImp > innerImp;
+    if (outerSecondary !== innerSecondary)
+        return outerSecondary > innerSecondary;
+    // Total final tie-break: outer keeps iff its id sorts strictly greater.
+    // Equal ids cannot occur (id != self is enforced in the dupe query), so this
+    // is never a self-keep; the relation is antisymmetric and direction-stable.
+    return outerId > innerId;
+}
+/** K21 — read-time mean for memory_utility_cache rows. The race-free writer
+ *  stores commutative accumulators (util_sum, retrieval_count) instead of a
+ *  materialized running average; the mean is util_sum/retrieval_count. Legacy
+ *  rows written before K21 carry a materialized avg_utilization and util_sum
+ *  IS NONE — fall back to that. Returns null when neither is derivable.
+ *  Exported for unit tests (test/fix-k21-utility-cache-race.test.ts). */
+export function utilityMean(row) {
+    if (row.util_sum != null && row.retrieval_count != null && row.retrieval_count > 0) {
+        return row.util_sum / row.retrieval_count;
+    }
+    return row.avg_utilization ?? null;
+}
+/** K14 — restore chronological (oldest→newest) order for a page fetched
+ *  `ORDER BY timestamp DESC` off the session index. We sort ascending on the
+ *  selected `timestamp` rather than a bare `.reverse()`: a reverse assumes the
+ *  driver returned a perfectly monotonic page, whereas an explicit key sort is
+ *  correct regardless. STABLE by construction (the original array index breaks
+ *  ties), so rows with a missing/unparseable timestamp — e.g. unit-test stubs
+ *  that omit the field — keep their incoming order instead of being shuffled. */
+function sortByTimestampAsc(rows) {
+    // Map a missing/unparseable timestamp to a single sentinel so the comparator
+    // stays a clean total order (no NaN returns). When every row lacks a
+    // timestamp they all share the sentinel and the index tiebreak preserves
+    // input order — exactly the stable-no-op the test stubs rely on.
+    const parse = (v) => {
+        if (v == null)
+            return -Infinity;
+        const t = new Date(v).getTime();
+        return Number.isNaN(t) ? -Infinity : t;
+    };
+    return rows
+        .map((row, i) => ({ row, i, t: parse(row.timestamp) }))
+        .sort((a, b) => (a.t === b.t ? a.i - b.i : a.t - b.t))
+        .map((d) => d.row);
 }
 /** Parse a `"table:key"` string into a SurrealDB RecordId for binding into
  *  parameters of typed `record<...>` fields. Throws if the input is not a
@@ -218,6 +273,22 @@ export class SurrealStore {
         this.config = config;
         this.db = new Surreal();
     }
+    /** K32: shared connect timeout for BOTH the first connect (initialize) and
+     *  every reconnect (ensureConnected). A non-settling WS handshake at boot used
+     *  to hang initialize() forever — the daemon sat in "connecting" and never
+     *  entered degraded mode, while only the reconnect path had a guard. */
+    static CONNECT_TIMEOUT_MS = 5_000;
+    /** K32: one connect path, deadlined. Builds a fresh Surreal handshake and
+     *  races it against CONNECT_TIMEOUT_MS via raceWithDeadline (which clears the
+     *  timer on every exit path, so a fast connect leaks no pending Timeout that
+     *  would keep the process alive). Used by initialize() and ensureConnected(). */
+    async connectWithTimeout() {
+        await raceWithDeadline(this.db.connect(this.config.url, {
+            namespace: this.config.ns,
+            database: this.config.db,
+            authentication: { username: this.config.user, password: this.config.pass },
+        }), SurrealStore.CONNECT_TIMEOUT_MS, "SurrealDB connect");
+    }
     /** Connect and run schema. Returns true if a new connection was made, false if already initialized. */
     async initialize() {
         // Only connect once — subsequent calls are no-ops.
@@ -226,11 +297,11 @@ export class SurrealStore {
         // Don't check isConnected — ensureConnected() handles reconnection.
         if (this.initialized)
             return false;
-        await this.db.connect(this.config.url, {
-            namespace: this.config.ns,
-            database: this.config.db,
-            authentication: { username: this.config.user, password: this.config.pass },
-        });
+        // K32: deadline the FIRST connect too (was a bare await that could hang the
+        // daemon in connecting-store forever). On timeout this rejects, the caller's
+        // boot path catches it and the daemon enters degraded mode (store
+        // unavailable) instead of wedging — and a later ensureConnected() retries.
+        await this.connectWithTimeout();
         await this.runSchema();
         this.initialized = true;
         return true;
@@ -259,27 +330,11 @@ export class SurrealStore {
                     }
                     catch { /* drain stale socket */ }
                     this.db = new Surreal();
-                    const CONNECT_TIMEOUT_MS = 5_000;
-                    let connectTimer;
-                    try {
-                        await Promise.race([
-                            this.db.connect(this.config.url, {
-                                namespace: this.config.ns,
-                                database: this.config.db,
-                                authentication: { username: this.config.user, password: this.config.pass },
-                            }),
-                            new Promise((_, reject) => {
-                                connectTimer = setTimeout(() => reject(new Error(`SurrealDB connect timed out after ${CONNECT_TIMEOUT_MS}ms`)), CONNECT_TIMEOUT_MS);
-                            }),
-                        ]);
-                    }
-                    finally {
-                        // Clear on every exit path. The prior code leaked a pending
-                        // Timeout when connect() resolved fast; the daemon process would
-                        // be kept alive for CONNECT_TIMEOUT_MS after each connect attempt.
-                        if (connectTimer !== undefined)
-                            clearTimeout(connectTimer);
-                    }
+                    // K32: shared deadlined connect (raceWithDeadline clears its timer on
+                    // every exit path, so a fast connect leaks no pending Timeout — the
+                    // bug the old inline finally-clear existed to avoid). Same 5s budget
+                    // (SurrealStore.CONNECT_TIMEOUT_MS) now used by initialize() too.
+                    await this.connectWithTimeout();
                     log.warn("SurrealDB reconnected successfully.");
                     this.zombieSuspect = false;
                     return;
@@ -618,16 +673,19 @@ export class SurrealStore {
         return String(rows[0]?.id ?? "");
     }
     async getSessionTurns(sessionId, limit = 50) {
-        return this.queryFirst(
-        // WITH NOINDEX (0.7.120): SurrealDB 3.x's ASC scan over turn_timestamp_idx
-        // silently returns ZERO rows for `WHERE session_id = $x ... ORDER BY
-        // timestamp ASC` (DESC works, NOINDEX works, REBUILD INDEX does not fix
-        // it — engine query-path bug, observed 2026-06-11 across every session).
-        // This starved ALL transcript reads → "empty extraction" junk. NOINDEX
-        // means a full table scan (~300ms at 6.9k turns; the filter bounds the
-        // RESULT, not the scan) — cold-path callers only; revisit if the turn
-        // table grows past ~50k rows or the engine bug gets fixed upstream.
-        `SELECT role, text, timestamp FROM turn WITH NOINDEX WHERE session_id = $sid AND pruned_at IS NONE ORDER BY timestamp ASC LIMIT $lim`, { sid: sessionId, lim: limit });
+        // K14: the ASC-over-timestamp-index path silently returned ZERO rows
+        // (SurrealDB 3.x query-path bug observed 2026-06-11). The prior workaround
+        // (WITH NOINDEX + ORDER BY timestamp ASC) sidestepped it by forcing a full
+        // turn-table scan — ~300ms at 6.9k rows and O(turn-table) per cold call.
+        // Fix: ORDER BY timestamp DESC (the direction the engine serves correctly
+        // off turn_session_idx; session_id = $sid drives the index so the scan is
+        // bounded to this session) then restore chronological order in JS by
+        // sorting the rows ascending on the timestamp we already select. Sorting
+        // (rather than a bare .reverse()) is correct even if the driver returns the
+        // page slightly out of order, and is a stable no-op when timestamps are
+        // absent.
+        const rows = await this.queryFirst(`SELECT role, text, timestamp FROM turn WHERE session_id = $sid AND pruned_at IS NONE ORDER BY timestamp DESC LIMIT $lim`, { sid: sessionId, lim: limit });
+        return sortByTimestampAsc(rows).map(({ role, text }) => ({ role, text }));
     }
     async getSessionTurnsRich(sessionId, limit = 20) {
         // `id` MUST be in the projection. Downstream callers (writeExtractionResults
@@ -639,9 +697,12 @@ export class SurrealStore {
         // TurnData.turnId shape unchanged. R5 regression fix: R4 added the
         // tool_name/tool_result/file_paths columns to this SELECT but dropped
         // `id` from the projection silently.
-        const rows = await this.queryFirst(
-        // WITH NOINDEX: see getSessionTurns above — the ASC-via-index path lies.
-        `SELECT id, role, text, tool_name, tool_result, file_paths, timestamp FROM turn WITH NOINDEX WHERE session_id = $sid AND pruned_at IS NONE ORDER BY timestamp ASC LIMIT $lim`, { sid: sessionId, lim: limit });
+        // K14: see getSessionTurns — the ASC-via-index path silently returns zero
+        // rows; query DESC off turn_session_idx (session_id = $sid is selective,
+        // bounding the scan to this session) then restore chronological order by
+        // sorting ascending on the selected timestamp. (A stable sort, so rows
+        // without a timestamp keep their incoming order — see getSessionTurns.)
+        const rows = sortByTimestampAsc(await this.queryFirst(`SELECT id, role, text, tool_name, tool_result, file_paths, timestamp FROM turn WHERE session_id = $sid AND pruned_at IS NONE ORDER BY timestamp DESC LIMIT $lim`, { sid: sessionId, lim: limit }));
         // safeId + post-filter: SurrealDB occasionally returns rows where `id`
         // is undefined/null (driver edge case mid-migration, or a projection that
         // accidentally drops the field upstream). `String(undefined)` yields
@@ -944,6 +1005,11 @@ export class SurrealStore {
             return [];
         const tagWords = words.slice(0, 8);
         try {
+            // K4: `tags CONTAINSANY $tags` is index-served by concept_tags_idx
+            // (schema.surql) so the cosine score is computed only over the bounded
+            // tag-matching candidate set, not the full concept table. The tag filter
+            // is listed FIRST so the planner uses the array-membership index before
+            // the per-row cosine. Result semantics are unchanged.
             // COSINE_GUARD_OK: read-only keyword/tag concept retrieval — no
             // destructive follow-on. (Inline marker replaces a line-pinned
             // whitelist entry that drifted on every edit above it.)
@@ -951,9 +1017,9 @@ export class SurrealStore {
                 created_at AS timestamp, 'concept' AS table,
                 vector::similarity::cosine(embedding, $vec) AS score
          FROM concept
-         WHERE embedding != NONE AND array::len(embedding) > 0
+         WHERE tags CONTAINSANY $tags
+           AND embedding != NONE AND array::len(embedding) > 0
            AND superseded_at IS NONE
-           AND tags CONTAINSANY $tags
          ORDER BY score DESC
          LIMIT $limit`, { vec: queryVec, limit, tags: tagWords });
             return rows;
@@ -1132,20 +1198,18 @@ export class SurrealStore {
         if (!content?.trim())
             return { id: "", existed: false };
         content = content.trim();
-        // Two-stage dedup. Stage 1: top-10 candidates by embedding cosine.
-        // T5 comment-rot fix (2026-06-10): this is a LINEAR scan — a bare
-        // similarity-function call + ORDER BY never touches the
-        // `concept_vec_idx` HNSW index (schema.surql:78); SurrealDB only uses
-        // HNSW via the KNN operator (`embedding <|10|> $vec`). Kept linear
-        // deliberately: dedup is a correctness path and approximate-KNN misses
-        // would mint duplicate concepts; ~8k rows × cosine is a few ms.
-        // Plus exact-similarity match for ">0.92 means same concept, even if
-        // labels differ slightly".
-        // Stage 2 (precise, in-process): scan those 10 candidates for an exact
-        // lowercase-equal content match. This replaces the prior
-        // `WHERE string::lowercase(content) = string::lowercase($content)`
-        // table scan, which was O(N) over all concept rows on every upsert
-        // (4.7k rows in production at the time of the fix).
+        // Two-stage dedup. Stage 1: candidate generation by embedding similarity.
+        // K20 (batch-3 KNN rewrite): use the `concept_vec_idx` HNSW index via the
+        // KNN operator (`embedding <|K,EF|> $vec`) instead of a bare cosine + ORDER
+        // BY, which was a FULL linear scan over every concept on every upsert (O(N),
+        // ~8k rows in production). K is over-fetched (50, EF 100) so the in-process
+        // exact-lowercase + >0.92 post-filter below still sees the true nearest
+        // neighbours — recall@10 validated 10/10 at K≈50 against the live DB in
+        // batch-3, so the prior "approximate-KNN would mint duplicates" concern
+        // (the old T5 comment) does not hold at this K. A near-duplicate sits at
+        // cosine >0.92, far inside the top-50 by similarity, so the keeper is found.
+        // Stage 2 (precise, in-process): scan those candidates for an exact
+        // lowercase-equal content match, else the highest >0.92 cosine sibling.
         //
         // Fallback path: when the caller did not supply an embedding (degraded
         // env / no embeddings service), keep the lowercase-equality scan so
@@ -1157,7 +1221,7 @@ export class SurrealStore {
             // writes are the guarded UPDATE-existing / CREATE-new below.
             const candidates = await this.queryFirst(`SELECT id, content, vector::similarity::cosine(embedding, $vec) AS score
          FROM concept
-         WHERE embedding != NONE AND array::len(embedding) > 0
+         WHERE embedding <|50,100|> $vec
            AND superseded_at IS NONE
          ORDER BY score DESC
          LIMIT 10`, { vec: embedding });
@@ -1213,23 +1277,36 @@ export class SurrealStore {
             record.provenance = provenance;
         if (projectId)
             record.project_id = projectId;
-        // M5 race surfacer: SELECT-then-CREATE has a TOCTOU window. Two concurrent
-        // upserts can both observe the SELECT-miss above and race into CREATE.
-        // The schema-level UNIQUE on lowercased content (out of scope here —
-        // needs a migration) is the durable fix. Until then, catch any unique-
-        // violation from the CREATE, log it via swallow.warn so we can measure
-        // how often it actually fires in production, and re-SELECT to return the
-        // sibling-created row's id. This keeps the API contract (returns an id)
-        // intact instead of throwing.
+        // K3 — deterministic content-hash record id as the DB-level dedup seal.
+        //
+        // SELECT-then-CREATE has a TOCTOU window: two concurrent upserts can both
+        // observe the SELECT-miss above and race into CREATE, minting an exact
+        // duplicate (the M5 race). A schema-level computed UNIQUE on lowercased
+        // content was considered, but landing a fresh UNIQUE index on a live
+        // concept table that ALREADY carries active duplicates (the very symptom
+        // here) would be REJECTED at daemon boot by runSchema() — a deterministic
+        // 100%-of-installs break — unless preceded by an in-DB active-duplicate
+        // merge expressed with idioms this codebase's migrations have never used
+        // (FOR/GROUP-keeper/$parent). upsertConcept is the SOLE `CREATE concept`
+        // funnel (grep-verified), so keying the row's PRIMARY id on a hash of the
+        // normalized content gives the same idempotency seal with zero DDL/boot
+        // risk: two racers compute the same id and SurrealDB's native record-id
+        // uniqueness rejects the loser's CREATE with AlreadyExists, which
+        // isUniqueViolation() catches (it matches record-id AND index violations).
+        // Hash the LOWERCASED+trimmed content so case-only variants collide and
+        // fold, matching the lowercase dedup semantics above. 32 hex chars = 128
+        // bits → no accidental cross-content collisions at single-host volume.
+        const contentKey = createHash("sha256").update(content.toLowerCase()).digest("hex").slice(0, 32);
         try {
-            const created = await this.queryFirst(`CREATE concept CONTENT $record RETURN id`, { record });
+            const created = await this.queryFirst(`CREATE concept:⟨${contentKey}⟩ CONTENT $record RETURN id`, { record });
             return { id: String(created[0]?.id ?? ""), existed: false };
         }
         catch (createErr) {
             if (isUniqueViolation(createErr)) {
                 swallow.warn("upsertConcept:dedupRace", createErr);
                 // Stage A: lowercase-exact rematch. Cheap, covers the common case
-                // where two callers wrote the same content string concurrently.
+                // where two callers wrote the same content string concurrently —
+                // both targeted concept:⟨contentKey⟩ and the winner's row is active.
                 const existing = await this.queryFirst(`SELECT id FROM concept WHERE string::lowercase(content) = string::lowercase($content) AND superseded_at IS NONE LIMIT 1`, { content }).catch(e => { swallow.warn("upsertConcept:selectAfterRace", e); return []; });
                 if (existing[0]?.id)
                     return { id: String(existing[0].id), existed: true };
@@ -1241,15 +1318,40 @@ export class SurrealStore {
                 if (embedding?.length) {
                     // COSINE_GUARD_OK: read-only race-fallback KNN rematch — resolves
                     // the dedup-race winner's id; no destructive follow-on.
-                    const knn = await this.queryFirst(`SELECT id, vector::similarity::cosine(embedding, $vec) AS score
+                    const knn = await this.queryFirst(
+                    // K20: HNSW KNN over-fetch (concept_vec_idx) instead of a full
+                    // linear cosine scan; over-fetch 50 then take the top sibling.
+                    `SELECT id, vector::similarity::cosine(embedding, $vec) AS score
              FROM concept
-             WHERE embedding != NONE AND array::len(embedding) > 0
+             WHERE embedding <|50,100|> $vec
                AND superseded_at IS NONE
              ORDER BY score DESC
              LIMIT 1`, { vec: embedding }).catch(e => { swallow.warn("upsertConcept:knnAfterRace", e); return []; });
                     if (knn[0] && typeof knn[0].score === "number" && knn[0].score > 0.92 && knn[0].id) {
                         return { id: String(knn[0].id), existed: true };
                     }
+                }
+                // K3 — append-only re-learn fallback. The deterministic id collided
+                // but NO active row matches (Stage A + B both missed): the only
+                // occupant of concept:⟨contentKey⟩ is a SUPERSEDED twin of this
+                // content. The pre-K3 bare `CREATE concept` (random id) always
+                // succeeded here, minting a fresh active sibling — re-learning
+                // previously-superseded content is legitimate and append-only. Preserve
+                // that by retrying the CREATE with a random id so the seal never turns
+                // a re-learn into a hard throw.
+                try {
+                    const reborn = await this.queryFirst(`CREATE concept:⟨${randomUUID().replace(/-/g, "")}⟩ CONTENT $record RETURN id`, { record });
+                    // Defensive: only return on a real id. If the retry yields nothing
+                    // (or the collision was a content-UNIQUE-index violation rather than
+                    // the deterministic-id mechanism this fallback assumes), fall through
+                    // to rethrow the original error so the R7 "rethrow on unrecoverable"
+                    // contract is preserved rather than masked.
+                    if (Array.isArray(reborn) && reborn[0]?.id) {
+                        return { id: String(reborn[0].id), existed: false };
+                    }
+                }
+                catch (rebornErr) {
+                    swallow.warn("upsertConcept:rebornAfterRace", rebornErr);
                 }
             }
             throw createErr;
@@ -1320,7 +1422,7 @@ export class SurrealStore {
             throw createErr;
         }
     }
-    async createMemory(text, embedding, importance, category, sessionId, projectId) {
+    async createMemory(text, embedding, importance, category, sessionId, projectId, embeddingTarget) {
         const source = category ?? "general";
         // v0.7.93 append-only: was a cosine-≥0.92 dedup that silently DISCARDED
         // the incoming text and bumped the existing row's importance/access_count.
@@ -1355,6 +1457,11 @@ export class SurrealStore {
             record.session_id = sessionId;
         if (projectId)
             record.project_id = projectId;
+        // K51: persist the embed target only when it diverges from `text`, so the
+        // backfill can re-embed an un-embedded row with the same short target the
+        // create path used. Skip when identical to avoid duplicating `text`.
+        if (embeddingTarget && embeddingTarget !== text)
+            record.embedding_target = embeddingTarget;
         const rows = await this.queryFirst(`CREATE memory CONTENT $record RETURN id`, { record });
         return String(rows[0]?.id ?? "");
     }
@@ -1509,13 +1616,22 @@ export class SurrealStore {
     }
     async getUnresolvedMemories(limit = 5) {
         try {
-            return await this.queryFirst(`SELECT id, text,
+            return await this.queryFirst(
+            // K33: the raw-column predicate `importance >= 6` is listed FIRST so
+            // memory_importance_idx serves it as a bounded range scan (only the
+            // high-importance tail, a small fraction of a forever-growing table)
+            // rather than a full memory scan. The status/category predicates are
+            // residual filters applied to that already-bounded candidate set, and
+            // the ORDER BY (by the decay-adjusted projection) then sorts only those
+            // few rows — never a full-table sort. Net: the index bounds the scan;
+            // the sort cost is O(candidates>=6), not O(memory).
+            `SELECT id, text,
                 math::max([importance - math::min([math::floor(duration::days(time::now() - created_at) / 7), 3]), 0]) AS importance,
                 category
          FROM memory
-         WHERE (status IS NONE OR status = 'active')
+         WHERE importance >= 6
+           AND (status IS NONE OR status = 'active')
            AND category NOT IN ['handoff', 'monologue', 'reflection', 'compaction', 'consolidation']
-           AND importance >= 6
          ORDER BY importance DESC
          LIMIT $lim`, { lim: limit });
         }
@@ -1547,18 +1663,33 @@ export class SurrealStore {
     // ── Utility cache ──────────────────────────────────────────────────────
     async updateUtilityCache(memoryId, utilization) {
         try {
-            // memory_id is typed `option<record<memory>>` (was `string` pre-migration).
-            // Bind as a RecordId so SurrealDB stores it as a Thing, not as a string.
+            assertRecordId(memoryId);
+            // K21: race-free running average. The pre-K21 form did a non-atomic
+            // read-compute-write of the mean (`avg_utilization = (avg_utilization *
+            // count + $util)/(count+1)`) inside a fire-and-forget UPSERT keyed only by
+            // `WHERE memory_id = $mid`. Two concurrent retrieval-quality writebacks for
+            // the same id both read the old mean and the second clobbered the first
+            // (lost update); the WHERE-without-deterministic-id form could also create
+            // a fresh random-ULID row that then collided on the muc_mid_idx UNIQUE.
+            // Fix (two parts):
+            //  1) DETERMINISTIC record id `memory_utility_cache:⟨memory_id with ':'→'_'⟩`
+            //     (mirrors access_stats in bumpAccessCounts) — one row per target,
+            //     UPSERT-by-id, no random-ULID create path, UNIQUE always satisfied.
+            //  2) COMMUTATIVE `+=` accumulators (util_sum, retrieval_count) instead of
+            //     a materialized mean. `+=` is order-independent so concurrent bumps
+            //     can't lose an update; the mean is computed at read time as
+            //     util_sum/retrieval_count (getUtilityFromCache/getUtilityCacheEntries
+            //     and the runMemoryMaintenance join). Matches bumpAccessCounts' "store
+            //     the delta, derive at read" pattern.
+            // memory_id is still set (as a Thing) so the existing `WHERE memory_id IN
+            // $ids` readers continue to match.
             const mid = toRecordId(memoryId);
-            await this.queryExec(`UPSERT memory_utility_cache SET
+            const key = memoryId.replace(":", "_");
+            await this.queryExec(`UPSERT memory_utility_cache:⟨${key}⟩ SET
           memory_id = $mid,
-          retrieval_count = (retrieval_count ?? 0) + 1,
-          avg_utilization = IF (retrieval_count ?? 0) > 0
-            THEN (avg_utilization * (retrieval_count ?? 0) + $util) / ((retrieval_count ?? 0) + 1)
-            ELSE $util
-          END,
-          last_updated = time::now()
-         WHERE memory_id = $mid`, { mid, util: utilization });
+          util_sum += $util,
+          retrieval_count += 1,
+          last_updated = time::now()`, { mid, util: utilization });
         }
         catch (e) {
             swallow.warn("surreal:updateUtilityCache", e);
@@ -1577,10 +1708,14 @@ export class SurrealStore {
             } }).filter((x) => x !== null);
             if (recIds.length === 0)
                 return result;
-            const rows = await this.queryFirst(`SELECT memory_id, avg_utilization FROM memory_utility_cache WHERE memory_id IN $ids`, { ids: recIds });
+            // K21: mean computed at read time from the commutative accumulators
+            // (util_sum/retrieval_count). Legacy rows (util_sum IS NONE) fall back to
+            // the materialized avg_utilization written by the pre-K21 writer.
+            const rows = await this.queryFirst(`SELECT memory_id, util_sum, retrieval_count, avg_utilization FROM memory_utility_cache WHERE memory_id IN $ids`, { ids: recIds });
             for (const row of rows) {
-                if (row.avg_utilization != null)
-                    result.set(String(row.memory_id), row.avg_utilization);
+                const mean = utilityMean(row);
+                if (mean != null)
+                    result.set(String(row.memory_id), mean);
             }
         }
         catch (e) {
@@ -1601,11 +1736,14 @@ export class SurrealStore {
             } }).filter((x) => x !== null);
             if (recIds.length === 0)
                 return result;
-            const rows = await this.queryFirst(`SELECT memory_id, avg_utilization, retrieval_count FROM memory_utility_cache WHERE memory_id IN $ids`, { ids: recIds });
+            // K21: mean computed at read time (util_sum/retrieval_count) with a
+            // fallback to the legacy materialized avg_utilization.
+            const rows = await this.queryFirst(`SELECT memory_id, util_sum, avg_utilization, retrieval_count FROM memory_utility_cache WHERE memory_id IN $ids`, { ids: recIds });
             for (const row of rows) {
-                if (row.avg_utilization != null) {
+                const mean = utilityMean(row);
+                if (mean != null) {
                     result.set(String(row.memory_id), {
-                        avg_utilization: row.avg_utilization,
+                        avg_utilization: mean,
                         retrieval_count: row.retrieval_count ?? 0,
                     });
                 }
@@ -1662,25 +1800,64 @@ export class SurrealStore {
         }
     }
     async runMemoryMaintenance() {
-        // runMemoryMaintenance is cheap (two UPDATEs) so the floor is 0 — always
-        // run, but still record the execution so observability is consistent.
+        // Runs once per process at boot. The decay UPDATEs are cheap SET writes;
+        // the utility-floor bump is batched (K30) so the per-transaction write set
+        // is bounded on large single-host graphs.
         const started = Date.now();
         try {
-            // Single round-trip to reduce transaction conflict window.
-            // Structured findings (correction/decision/preference) have a higher
-            // decay floor matching their type defaults so they don't erode to noise.
-            // memory_id is now record<memory> (was string with `meta::tb(id):meta::id(id)`
-            // coercion). The record-ref join is a direct equality check.
+            // Decay pass — single round-trip to reduce the transaction-conflict
+            // window. Structured findings (correction/decision/preference/fact) have
+            // a higher decay floor matching their type defaults so they don't erode
+            // to noise. The `importance > N` predicates are range-served by
+            // memory_importance_idx (DB1).
             await this.queryExec(`
         UPDATE memory SET importance = math::max([importance * 0.95, 5.0])
           WHERE importance > 5.0 AND category IN ["correction", "decision", "preference", "fact"];
         UPDATE memory SET importance = math::max([importance * 0.95, 2.0])
           WHERE importance > 2.0 AND category NOT IN ["correction", "decision", "preference", "fact"];
-        UPDATE memory SET importance = math::max([importance, 3 + (math::min([math::max([(
-          SELECT VALUE avg_utilization FROM memory_utility_cache WHERE memory_id = $parent.id LIMIT 1
-        )[0] ?? 0, 0]), 1]) * 4)]) WHERE importance < 7;
       `);
-            await this.recordMaintenanceRun("runMemoryMaintenance", 0, Date.now() - started);
+            // K30: the utility-floor bump previously ran as ONE unbounded
+            // `UPDATE memory ... WHERE importance < 7` carrying a correlated
+            // memory_utility_cache subquery per row — on a large single-host graph
+            // that is a full-table scan whose entire write set lands in one
+            // transaction at boot. Batch it: page by record id (id > $cursor ORDER BY
+            // id) so each transaction writes at most BATCH rows and the cursor
+            // advances independently of the importance mutation (a row bumped but
+            // still <7 is NOT revisited, because we page forward by id, not re-filter
+            // on importance). `importance < 7` is range-served by memory_importance_idx
+            // and id-pagination guarantees termination after one full pass.
+            // memory_id on memory_utility_cache is record<memory> — the join is a
+            // direct record-equality against $m.id.
+            const BATCH = 500;
+            const MAX_BATCHES = 10_000; // hard ceiling — termination guard
+            // Bind the cursor as the raw record id (Thing) the previous batch
+            // returned — NOT a re-parsed string. A Thing != a same-text string in
+            // SurrealDB v3 (`id > "memory:x"` matches nothing), and round-tripping
+            // through String()+toRecordId() is fragile for bracket-escaped keys, so
+            // we carry the SDK's RecordId object straight back into the next bind.
+            let cursor = null;
+            let touched = 0;
+            for (let i = 0; i < MAX_BATCHES; i++) {
+                const cursorClause = cursor != null ? "AND id > $cursor " : "";
+                const res = await this.queryMulti(`LET $batch = (
+             SELECT id FROM memory
+             WHERE importance < 7 ${cursorClause}
+             ORDER BY id
+             LIMIT $batch
+           );
+           FOR $m IN $batch {
+             UPDATE $m.id SET importance = math::max([importance, 3 + (math::min([math::max([(
+               SELECT VALUE (IF util_sum != NONE AND retrieval_count > 0 THEN util_sum / retrieval_count ELSE (avg_utilization ?? 0) END) FROM memory_utility_cache WHERE memory_id = $m.id LIMIT 1
+             )[0] ?? 0, 0]), 1]) * 4)]);
+           };
+           RETURN { count: array::len($batch), last: array::last($batch).id };`, { batch: BATCH, ...(cursor != null ? { cursor } : {}) });
+                const count = Number(res?.count ?? 0);
+                touched += count;
+                if (count < BATCH || res?.last == null)
+                    break;
+                cursor = res.last;
+            }
+            await this.recordMaintenanceRun("runMemoryMaintenance", touched, Date.now() - started);
         }
         catch (e) {
             // Transaction conflicts expected when daemon writes concurrently — silent.
@@ -1886,6 +2063,47 @@ export class SurrealStore {
             return 0;
         }
     }
+    /**
+     * Hard-delete old turn_score rows beyond the retention window.
+     *
+     * turn_score is per-turn scoring TELEMETRY (one composite per turn), NOT
+     * knowledge — it is absent from the D4 no-DELETE-content-tables lint's
+     * CONTENT_TABLES list, exactly like retrieval_outcome. It was the one
+     * telemetry table with no retention (K29): on a long-lived per-host daemon
+     * it grows ~1 row/turn forever, and observability.ts / soul.ts range-scan it
+     * by created_at. Mirror purgeOldRetrievalOutcomes: keep the most-recent
+     * RETAIN rows and hard-delete the rest so the table stays bounded. Uses
+     * ts_created_idx (K8) for the ORDER BY and the DELETE predicate.
+     */
+    async purgeOldTurnScores() {
+        const RETAIN = 30_000;
+        const started = Date.now();
+        try {
+            const countRows = await this.queryFirst(`SELECT count() AS count FROM turn_score GROUP ALL`);
+            const count = countRows[0]?.count ?? 0;
+            // Only act when meaningfully over target (avoid churn right at the bound).
+            if (count <= RETAIN + 5_000)
+                return 0;
+            if (!(await this.shouldRunMaintenance("purgeOldTurnScores", 60, 1, count)))
+                return 0;
+            // created_at of the RETAIN-th most-recent row → delete everything older
+            // (uses ts_created_idx for the ORDER BY and the DELETE predicate).
+            const cutoffRows = await this.queryFirst(`SELECT created_at FROM turn_score ORDER BY created_at DESC LIMIT 1 START ${RETAIN}`);
+            const cutoff = cutoffRows[0]?.created_at;
+            if (!cutoff)
+                return 0;
+            // DELETE OK on turn_score (telemetry, not content — D4 exempt).
+            await this.queryExec(`DELETE turn_score WHERE created_at < $cutoff`, { cutoff });
+            const afterRows = await this.queryFirst(`SELECT count() AS count FROM turn_score GROUP ALL`);
+            const n = count - (afterRows[0]?.count ?? count);
+            await this.recordMaintenanceRun("purgeOldTurnScores", n, Date.now() - started);
+            return n;
+        }
+        catch (e) {
+            swallow.warn("surreal:purgeOldTurnScores", e);
+            return 0;
+        }
+    }
     async archiveOldTurns() {
         const started = Date.now();
         try {
@@ -1946,13 +2164,17 @@ export class SurrealStore {
             for (const mem of embMemories) {
                 if (seen.has(String(mem.id)))
                     continue;
+                // K19: HNSW KNN over-fetch (memory_vec_idx) replaces the full linear
+                // cosine scan. `<|48,96|>` selects the 48 nearest by vector via the
+                // index; the post-filter (category/status/self) then narrows and we
+                // keep the top 3 — over-fetch K is large enough to absorb the filter.
                 const dupes = await this.queryFirst(`SELECT id, importance, access_count,
                   vector::similarity::cosine(embedding, $vec) AS score
            FROM memory
-           WHERE id != type::record($mid)
+           WHERE embedding <|48,96|> $vec
+             AND id != type::record($mid)
              AND category = $cat
              AND (status = 'active' OR status IS NONE)
-             AND embedding != NONE AND array::len(embedding) > 0
            ORDER BY score DESC
            LIMIT 3`, { vec: mem.embedding, mid: mem.id, cat: mem.category });
                 for (const dupe of dupes) {
@@ -1960,9 +2182,12 @@ export class SurrealStore {
                         break;
                     if (seen.has(String(dupe.id)))
                         continue;
-                    const keepMem = mem.importance > dupe.importance ||
-                        (mem.importance === dupe.importance &&
-                            (mem.access_count ?? 0) >= (dupe.access_count ?? 0));
+                    // K9: TOTAL, scan-direction-independent tie-break. The final tier
+                    // compares <string>id so two opposite-direction scans over the same
+                    // pair always elect the SAME keeper — without it, when importance
+                    // AND access_count tie, each scan direction would keep its own outer
+                    // row and BOTH could archive each other into a mutual-archive.
+                    const keepMem = consolidateKeepOuter(mem.importance, dupe.importance, mem.access_count ?? 0, dupe.access_count ?? 0, String(mem.id), String(dupe.id));
                     const [keep, drop] = keepMem ? [mem.id, dupe.id] : [dupe.id, mem.id];
                     assertRecordId(String(keep));
                     assertRecordId(String(drop));
@@ -1971,6 +2196,9 @@ export class SurrealStore {
                     // loser is soft-archived with superseded_by pointing at keeper.
                     // Wrapped in a single transaction so a network blip can't leave
                     // half-done state (keeper updated but loser still active).
+                    // K9: the drop UPDATE is guarded `WHERE (status='active' OR status IS
+                    // NONE)` so it is a no-op if the loser was already archived by a
+                    // concurrent/opposite-direction pass — never a double-archive.
                     await this.queryExec(`BEGIN TRANSACTION;
              UPDATE ${String(keep)} SET
                access_count += 1,
@@ -1979,7 +2207,8 @@ export class SurrealStore {
                status = 'archived',
                archived_at = time::now(),
                archive_reason = 'dedup_consolidate_pass1',
-               superseded_by = type::record($kid);
+               superseded_by = type::record($kid)
+             WHERE status = 'active' OR status IS NONE;
              COMMIT TRANSACTION;`, { imp: dupe.importance, kid: String(keep) });
                     seen.add(String(drop));
                     merged++;
@@ -2008,13 +2237,14 @@ export class SurrealStore {
                     if (!emb)
                         continue;
                     await this.queryExec(`UPDATE ${String(mem.id)} SET embedding = $emb`, { emb });
+                    // K19: HNSW KNN over-fetch (memory_vec_idx) — see Pass 1.
                     const dupes = await this.queryFirst(`SELECT id, importance, access_count,
                     vector::similarity::cosine(embedding, $vec) AS score
              FROM memory
-             WHERE id != type::record($mid)
+             WHERE embedding <|48,96|> $vec
+               AND id != type::record($mid)
                AND category = $cat
                AND (status = 'active' OR status IS NONE)
-               AND embedding != NONE AND array::len(embedding) > 0
              ORDER BY score DESC
              LIMIT 3`, { vec: emb, mid: mem.id, cat: mem.category });
                     for (const dupe of dupes) {
@@ -2022,13 +2252,13 @@ export class SurrealStore {
                             break;
                         if (seen.has(String(dupe.id)))
                             continue;
-                        const keepMem = mem.importance > dupe.importance ||
-                            (mem.importance === dupe.importance &&
-                                (mem.access_count ?? 0) >= (dupe.access_count ?? 0));
+                        // K9: total, direction-independent tie-break — see Pass 1.
+                        const keepMem = consolidateKeepOuter(mem.importance, dupe.importance, mem.access_count ?? 0, dupe.access_count ?? 0, String(mem.id), String(dupe.id));
                         const [keep, drop] = keepMem ? [mem.id, dupe.id] : [dupe.id, mem.id];
                         assertRecordId(String(keep));
                         assertRecordId(String(drop));
                         // v0.7.93 append-only — same shape as Pass 1.
+                        // K9: drop guarded so a re-archive is a no-op, never a double-archive.
                         await this.queryExec(`BEGIN TRANSACTION;
                UPDATE ${String(keep)} SET
                  access_count += 1,
@@ -2037,7 +2267,8 @@ export class SurrealStore {
                  status = 'archived',
                  archived_at = time::now(),
                  archive_reason = 'dedup_consolidate_pass2',
-                 superseded_by = type::record($kid);
+                 superseded_by = type::record($kid)
+               WHERE status = 'active' OR status IS NONE;
                COMMIT TRANSACTION;`, { imp: dupe.importance, kid: String(keep) });
                         seen.add(String(drop));
                         merged++;
@@ -2057,13 +2288,14 @@ export class SurrealStore {
             for (const ref of embReflections) {
                 if (seen.has(String(ref.id)))
                     continue;
+                // K19: HNSW KNN over-fetch (reflection_vec_idx) — see Pass 1.
                 const dupes = await this.queryFirst(`SELECT id, importance,
                   vector::similarity::cosine(embedding, $vec) AS score
            FROM reflection
-           WHERE id != type::record($rid)
+           WHERE embedding <|48,96|> $vec
+             AND id != type::record($rid)
              AND category = $cat
              AND (active = true OR active IS NONE)
-             AND embedding != NONE AND array::len(embedding) > 0
            ORDER BY score DESC
            LIMIT 3`, { vec: ref.embedding, rid: ref.id, cat: ref.category });
                 for (const dupe of dupes) {
@@ -2071,18 +2303,23 @@ export class SurrealStore {
                         break;
                     if (seen.has(String(dupe.id)))
                         continue;
-                    const keepRef = ref.importance > dupe.importance;
+                    // K9: importance-only rank, but the id tie-break still makes the
+                    // keep/drop decision total + direction-independent (secondary fixed
+                    // at 0 → falls through to <string>id when importance ties).
+                    const keepRef = consolidateKeepOuter(ref.importance, dupe.importance, 0, 0, String(ref.id), String(dupe.id));
                     const [keep, drop] = keepRef ? [ref.id, dupe.id] : [dupe.id, ref.id];
                     assertRecordId(String(keep));
                     assertRecordId(String(drop));
                     // v0.7.93 append-only: was DELETE — now soft-archives the loser
                     // with superseded_by pointing at keeper. Also added category guard
                     // to SELECT so different-category reflections don't collide.
+                    // K9: guarded so re-archiving an already-inactive loser is a no-op.
                     await this.queryExec(`UPDATE ${String(drop)} SET
               active = false,
               archived_at = time::now(),
               archive_reason = 'dedup_consolidate_pass3_reflection',
-              superseded_by = type::record($kid);`, { kid: String(keep) });
+              superseded_by = type::record($kid)
+            WHERE active = true OR active IS NONE;`, { kid: String(keep) });
                     seen.add(String(drop));
                     merged++;
                 }
@@ -2114,13 +2351,15 @@ export class SurrealStore {
             for (const sk of embSkills) {
                 if (seen.has(String(sk.id)))
                     continue;
-                // COSINE_GUARD_OK: read-only skill-dedup ranking — flat namespace (no category/name axis; Pass 4 exists to catch DIFFERENT-named near-dupes), so the >=0.92 threshold + per-row soft-archive keep-winner is the safety, mirroring Pass 1/Pass 3.
+                // COSINE_GUARD_OK: read-only skill-dedup ranking — flat namespace (no category/name axis; Pass 4 exists to catch DIFFERENT-named near-dupes), so the >=0.80 threshold + per-row soft-archive keep-winner is the safety, mirroring Pass 1/Pass 3.
+                // K19: HNSW KNN over-fetch (skill_vec_idx) replaces the full linear
+                // cosine scan — flat namespace so the only post-filter is self + active.
                 const dupes = await this.queryFirst(`SELECT id, success_count,
                   vector::similarity::cosine(embedding, $vec) AS score
            FROM skill
-           WHERE id != type::record($sid)
+           WHERE embedding <|48,96|> $vec
+             AND id != type::record($sid)
              AND (active = true OR active IS NONE)
-             AND embedding != NONE AND array::len(embedding) > 0
            ORDER BY score DESC
            LIMIT 3`, { vec: sk.embedding, sid: sk.id });
                 for (const dupe of dupes) {
@@ -2128,17 +2367,20 @@ export class SurrealStore {
                         break;
                     if (seen.has(String(dupe.id)))
                         continue;
-                    // Keep the more-proven skill (higher success_count); on a tie keep
-                    // the outer (older, established) row. Mirrors Pass 1's keep-winner.
-                    const keepSk = (sk.success_count ?? 0) >= (dupe.success_count ?? 0);
+                    // Keep the more-proven skill (higher success_count); K9: on a tie the
+                    // id tie-break makes the decision total + direction-independent so two
+                    // opposite-direction scans can't mutually archive.
+                    const keepSk = consolidateKeepOuter(sk.success_count ?? 0, dupe.success_count ?? 0, 0, 0, String(sk.id), String(dupe.id));
                     const [keep, drop] = keepSk ? [sk.id, dupe.id] : [dupe.id, sk.id];
                     assertRecordId(String(keep));
                     assertRecordId(String(drop));
+                    // K9: guarded so re-archiving an already-inactive loser is a no-op.
                     await this.queryExec(`UPDATE ${String(drop)} SET
               active = false,
               archived_at = time::now(),
               archive_reason = 'dedup_consolidate_pass4_skill',
-              superseded_by = type::record($kid);`, { kid: String(keep) });
+              superseded_by = type::record($kid)
+            WHERE active = true OR active IS NONE;`, { kid: String(keep) });
                     seen.add(String(drop));
                     merged++;
                 }
@@ -2228,11 +2470,42 @@ export class SurrealStore {
     clearReflectionCache() {
         this._reflectionSessions = null;
     }
-    async getReflectionSessionIds() {
+    /** Returns the subset of session ids that have at least one reflection.
+     *
+     *  K18: the per-turn caller (graph-context.ts reflectionBoost) only ever
+     *  checks `.has(sessionId)` for the sessionIds present in the CURRENT result
+     *  set. The old form `SELECT session_id FROM reflection GROUP BY session_id`
+     *  full-scanned the entire (forever-growing) reflection table into an
+     *  unbounded Set on every turn. When called WITH the result-set ids we run a
+     *  targeted `WHERE session_id IN $ids` (served by reflection_session_idx),
+     *  bounding the work to |ids| — not the table. The set returned is membership-
+     *  equivalent for those ids, so the caller's `.has()` checks are unchanged.
+     *
+     *  Back-compat: a no-arg call keeps the cached full-membership behaviour but
+     *  BOUNDS it with a LIMIT so a pathological reflection table can't blow up
+     *  the Set. The targeted path is NOT cached (the answer is id-set-specific).
+     *  Param is OPTIONAL so the build stays valid regardless of caller-edit order. */
+    async getReflectionSessionIds(sessionIds) {
+        if (sessionIds !== undefined) {
+            const ids = [...new Set(sessionIds.filter(Boolean).map(String))];
+            if (ids.length === 0)
+                return new Set();
+            try {
+                const rows = await this.queryFirst(`SELECT session_id FROM reflection WHERE session_id IN $ids GROUP BY session_id`, { ids });
+                return new Set(rows.map(r => r.session_id).filter(Boolean));
+            }
+            catch (e) {
+                swallow.warn("surreal:getReflectionSessionIds:targeted", e);
+                return new Set();
+            }
+        }
         if (this._reflectionSessions)
             return this._reflectionSessions;
         try {
-            const rows = await this.queryFirst(`SELECT session_id FROM reflection GROUP BY session_id`);
+            // Bounded back-compat: cap the materialized set so a huge reflection
+            // table can't produce an unbounded Set. 20k distinct sessions is far
+            // beyond any single-host install's lifetime session count.
+            const rows = await this.queryFirst(`SELECT session_id FROM reflection GROUP BY session_id LIMIT 20000`);
             this._reflectionSessions = new Set(rows.map(r => r.session_id).filter(Boolean));
         }
         catch (e) {
