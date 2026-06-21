@@ -216,6 +216,25 @@ correction memory (the supersede tool) OR a newer concept, so the field is now
   `superseded_by` fields stay intentionally table-typed. The remaining
   `record<…>` fields were swept and verified consistent with their writers.
 
+### Hardened — Phase 2 (post deletion-policy): G3 graphExpand read-path liveness gate
+
+After the `GRAPH DELETION — QA-GATED` policy change, a deletion-lens enterprise review
+(adversarial, every proposed delete gated) **refused 10 of 11 deletion designs** for real
+blast-radius gaps — confirming bulk graph-deletion is unsafe and must roll out individually
+through the `graph-delete-qa` gate. But it surfaced one unambiguous **zero-deletion** bug:
+
+- **G3 — `graphExpand` had no read-path liveness filter** (`surreal.ts`), so a superseded/
+  archived/pruned (dead) node with an edge from a live seed **resurfaced as a live retrieval
+  neighbor** — dead knowledge re-entering context every turn. Added a NONE-tolerant
+  union-of-dead-markers `WHERE` to both the forward and reverse traversals, mirroring the
+  per-table predicates `vectorSearch` already uses. **Verified live**: the `WHERE`-on-graph-path
+  parses + executes, one seed narrowed 11 neighbors → 1 (10 dead nodes dropped); NONE-tolerant by
+  construction so no live node is over-filtered. `test/fix-g3-graphexpand-liveness.test.ts` guards
+  it. (Sibling tool paths what-is-missing / cluster-scan share the class — same-class follow-ups.)
+
+The actual GC deletes (orphaned-edge sweep, dedup-merge, tiered retention, junk purge, privacy
+erasure) remain a gated, incremental roadmap behind a future `gcHardDelete` keystone — not bulk.
+
 ## [0.7.130] — 2026-06-19
 
 ### Added — `update_skill` MCP tool

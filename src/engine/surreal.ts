@@ -1346,6 +1346,18 @@ export class SurrealStore {
     const reverseEdgeList = "reflects_on, skill_from_task, produced, derived_from, performed, owns";
     const FORWARD_LIMIT = 25;
     const REVERSE_LIMIT = 10;
+    // G3: read-path LIVENESS gate. graphExpand previously projected EVERY graph
+    // neighbor with no liveness filter, so a superseded/archived/pruned (dead)
+    // node with an edge from a live seed resurfaced as a live retrieval hit (a
+    // recall back-door — dead knowledge re-entering context). Filter the
+    // traversed destinations by a NONE-tolerant UNION of every dead-marker:
+    // a node TYPE lacking a marker field reads NONE and PASSES (so live
+    // turns/sessions/tasks/artifacts are unaffected); only a present-and-dead
+    // value filters. Mirrors the per-table live predicates vectorSearch already
+    // uses (concept superseded_at IS NONE; memory status='active'|NONE; turn
+    // pruned_at IS NONE; skill/reflection active=true|NONE; archived_at IS NONE).
+    const LIVENESS =
+      "WHERE superseded_at IS NONE AND pruned_at IS NONE AND archived_at IS NONE AND (active = true OR active IS NONE) AND (status IS NONE OR status = 'active')";
 
     // COSINE_GUARD_OK: read-only graph-expansion scoring — traversal only,
     // no destructive follow-on.
@@ -1364,8 +1376,8 @@ export class SurrealStore {
       // 2 stmts per seed (forward + reverse multi-edge) instead of 25
       const stmts: string[] = [];
       for (const id of frontier) {
-        stmts.push(`${selectFields} FROM ${id}->(${forwardEdgeList})->? LIMIT ${FORWARD_LIMIT}`);
-        stmts.push(`${selectFields} FROM ${id}<-(${reverseEdgeList})<-? LIMIT ${REVERSE_LIMIT}`);
+        stmts.push(`${selectFields} FROM ${id}->(${forwardEdgeList})->? ${LIVENESS} LIMIT ${FORWARD_LIMIT}`);
+        stmts.push(`${selectFields} FROM ${id}<-(${reverseEdgeList})<-? ${LIVENESS} LIMIT ${REVERSE_LIMIT}`);
       }
 
       // GraphExpand rows are heterogeneous (turn / concept / memory / artifact /
