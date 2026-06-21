@@ -160,6 +160,21 @@ test whose root cause is also fixed. Full suite green (1460+ tests).
   `test/fix-v1-open-ui-port-parity.test.ts` forbids re-introducing a literal. This
   closes the port-derivation-duplication class (R6→S6→T3→U1→V1).
 
+### Hardened — round 12: withRetry now retries transaction conflicts (K21 class)
+
+Verifying V1 surfaced an intermittently-failing real-DB test
+(`duplicate-row-fix` "two parallel claims") — root cause: `SurrealStore.withRetry`
+retried only connection-level faults (`isRetryableSurrealError`), NOT a
+**transaction write conflict**, which SurrealDB itself flags as "...can be
+retried". So under genuine multi-session concurrency a CAS
+(`claimSessionForCleanup`, `updateUtilityCache`, the commit CAS — the K21-noted
+gap) could surface a conflict *error* instead of cleanly losing. `withRetry` now
+retries transaction conflicts with **bounded backoff (≤3, ~135ms) and no
+reconnect** (the socket is healthy; the conflicted tx already rolled back, so
+re-running a CAS is safe). The previously-flaky test now passes 10/10;
+`test/fix-withretry-tx-conflict.test.ts` is a CI-safe unit guard (the real-DB
+test skips in CI). Full suite green (1463 tests).
+
 ## [0.7.130] — 2026-06-19
 
 ### Added — `update_skill` MCP tool

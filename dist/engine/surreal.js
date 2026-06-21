@@ -506,11 +506,39 @@ export class SurrealStore {
             return await fn();
         }
         catch (e) {
-            if (!isRetryableSurrealError(e))
-                throw e;
-            this.initialized = false;
-            await this.ensureConnected();
-            return await fn();
+            if (isRetryableSurrealError(e)) {
+                // Connection-level fault: force a reconnect (fresh Surreal), retry once.
+                this.initialized = false;
+                await this.ensureConnected();
+                return await fn();
+            }
+            // Transaction write conflict (SurrealDB: "...can be retried"). The
+            // connection is HEALTHY — a concurrent writer touched the same rows and
+            // the server rolled THIS tx back, so re-running is safe (not a
+            // double-apply). Back off briefly and retry a bounded number of times; on
+            // a CAS the loser then cleanly LOSES (re-reads the now-claimed row) rather
+            // than surfacing a conflict ERROR. Closes the K21 gap: under real
+            // multi-session load, concurrent claimSessionForCleanup /
+            // updateUtilityCache / commit-CAS writes could otherwise error out. NO
+            // reconnect here (the socket is fine) and bounded (≤3 ≈135ms) so a
+            // persistent conflict still surfaces instead of looping forever.
+            if (isTransactionConflict(e)) {
+                const BACKOFF_MS = [10, 35, 90];
+                let lastErr = e;
+                for (const ms of BACKOFF_MS) {
+                    await new Promise((r) => setTimeout(r, ms));
+                    try {
+                        return await fn();
+                    }
+                    catch (e2) {
+                        lastErr = e2;
+                        if (!isTransactionConflict(e2))
+                            throw e2;
+                    }
+                }
+                throw lastErr;
+            }
+            throw e;
         }
     }
     /** All SDK query round-trips route through here. The Promise.race deadline
