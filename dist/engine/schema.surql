@@ -959,7 +959,17 @@ DEFINE FIELD IF NOT EXISTS error ON subagent TYPE option<string>;
 DEFINE FIELD IF NOT EXISTS reason ON subagent TYPE option<string>;
 DEFINE FIELD IF NOT EXISTS kc_session_id ON session TYPE option<string>;
 DEFINE FIELD IF NOT EXISTS superseded_at ON concept TYPE option<datetime>;
-DEFINE FIELD IF NOT EXISTS superseded_by ON concept TYPE option<record<memory>>;
+-- superseded_by accepts ANY record: a concept is superseded EITHER by a
+-- correction memory (the supersede tool: memory→concept) OR by a newer concept
+-- (extraction dedup — commit.ts concept-supersede path, target.kind="concept",
+-- cid = the new concept id). The prior record<memory> REJECTED the concept-id
+-- case ("Couldn't coerce ... Expected record<memory> but found concept:...",
+-- swallowed at commit.ts :decay) so that back-pointer silently never set — the
+-- same schema-narrower-than-code class as K0 and the memory_id fix, found by the
+-- post-campaign schema-record-type sweep. OVERWRITE because IF NOT EXISTS no-ops
+-- a type change; widening can't invalidate an existing value. (The supersedes
+-- EDGE still enforces graph IN/OUT types, so integrity isn't lost.)
+DEFINE FIELD OVERWRITE superseded_by ON concept TYPE option<record>;
 -- v0.7.93 append-only: replaces DELETE in garbageCollectConcepts. Concepts
 -- already use superseded_at IS NONE as the active filter (vectorSearch line
 -- 441); archive_reason annotates why a concept was marked inactive.

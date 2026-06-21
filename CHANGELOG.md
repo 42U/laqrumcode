@@ -198,6 +198,24 @@ K0; invisible to CI (swallowed runtime error on the live hook path only).
   the K13 timeout-breaker + K40 all-dropped floor degrade gracefully under
   CPU-slow rerank.
 
+### Hardened — round 14: concept.superseded_by + close the polymorphic-record class
+
+The live artifact-coerce catch prompted a systematic sweep of EVERY `record<…>`
+schema field type vs. the code that writes it — which found a third instance of
+the same class. `concept.superseded_by` was typed `record<memory>`, but the
+extraction dedup path (`commit.ts`, `target.kind==="concept"`) supersedes a
+concept WITH a concept id → `Couldn't coerce ... found concept:...` (swallowed at
+`:decay`), so the back-pointer silently never set (the `supersedes` edge +
+`superseded_at` still landed). A concept is legitimately superseded by EITHER a
+correction memory (the supersede tool) OR a newer concept, so the field is now
+`option<record>` (OVERWRITE), verified live (`TYPE none | record`).
+
+- The class (K0 enum → `memory_id` → `concept.superseded_by`) is now closed and
+  guarded: `test/fix-schema-polymorphic-record-fields.test.ts` asserts the two
+  polymorphic fields stay open `record` and the three self-referential
+  `superseded_by` fields stay intentionally table-typed. The remaining
+  `record<…>` fields were swept and verified consistent with their writers.
+
 ## [0.7.130] — 2026-06-19
 
 ### Added — `update_skill` MCP tool
