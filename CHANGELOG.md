@@ -235,6 +235,29 @@ through the `graph-delete-qa` gate. But it surfaced one unambiguous **zero-delet
 The actual GC deletes (orphaned-edge sweep, dedup-merge, tiered retention, junk purge, privacy
 erasure) remain a gated, incremental roadmap behind a future `gcHardDelete` keystone — not bulk.
 
+### Hardened — Phase 2 Round 1: the `gcHardDelete` keystone (`src/engine/gc.ts`)
+
+Built the single audited content-DELETE choke point that every GC delete must flow through —
+deletes nothing itself; it is the gate. Five REAL primitives (no stubs):
+1. **snapshot** — in-process SELECT of target rows + all incident edges across all **26 relation
+   tables** → re-importable file under `~/.kongcode/cache/gc-backups/`; a write failure ABORTS.
+2. **genuinely-dead** — refuses to delete a correction (`category='correction'` / `[CORRECTION]`).
+3. **blast-radius** — co-deletes every incident edge + NULLs the **complete** scalar back-pointer
+   set (4× `superseded_by`, `resolved_by`, `causal_chain.trigger/outcome_memory`, and the
+   `memory_utility_cache`/`retrieval_outcome`/`compaction_checkpoint` `.memory_id` refs).
+4. **after-verify** — throws (never claims success) unless targets are gone, zero edge across the
+   26 tables references a deleted id, and zero scalar back-pointer dangles.
+5. **audit** — a `maintenance_runs` row per op. Record-ids are interpolated as validated Thing
+   tokens (`IN [id, …]`), never `IN $stringArray` (which this engine silently no-ops).
+- **D4 lint evolved, not loosened**: `CONTENT_TABLES` + the literal regex are unchanged; a content
+  DELETE is permitted ONLY inside `gc.ts` with a **same-line** `// GATED-GC:` marker, and a new
+  `DELETE ${expr}` dynamic-table detector forces the keystone's own deletes under the gate. Added
+  **D5** (the keystone body must retain its snapshot + after-verify). Adversarial review found +
+  fixed two gaps before commit: GAP-1 (5 missed back-pointers → would dangle, now reconciled +
+  after-verified) and GAP-2 (function-wide marker scope → tightened to same-line so no ad-hoc
+  DELETE inside `gc.ts` is auto-laundered). Full suite green (1483). A 2.3 GB master DB snapshot was
+  taken first as the disaster net.
+
 ## [0.7.130] — 2026-06-19
 
 ### Added — `update_skill` MCP tool
