@@ -43,12 +43,18 @@ import {
   stableHash32,
   resolveDaemonTokenPath,
   readDaemonToken,
+  PORT_OFFSET_BASE,
+  PORT_OFFSET_RANGE,
 } from "../src/mcp-client/daemon-spawn.js";
 import { IpcClient } from "../src/mcp-client/ipc-client.js";
 import { DEFAULT_DAEMON_TCP_PORT, PROTOCOL_VERSION } from "../src/shared/ipc-types.js";
 
 const SILENT_LOG = { info: () => {}, warn: () => {}, error: () => {} };
-const PORT_OFFSET_RANGE = 10000;
+// T3: PORT_OFFSET_BASE/PORT_OFFSET_RANGE are imported from daemon-spawn (single
+// source of truth). The window must sit ABOVE the SurrealDB port window
+// ([18765, 28764] = 18765 + uid%10000; fixed 18765 on win32) and BELOW the
+// 32768 ephemeral-port floor.
+const SURREAL_WINDOW_MAX = 28764;
 
 // ── Layer 1: per-user port derivation ─────────────────────────────────────
 
@@ -58,7 +64,7 @@ describe("S6: resolveTcpPort derives a PER-USER loopback port (no more flat 1876
     // deterministic composition the daemon and client both use. Distinct
     // discriminators must (for these fixed sample names) map to distinct ports.
     const portFor = (who: string) =>
-      DEFAULT_DAEMON_TCP_PORT + (stableHash32(who) % PORT_OFFSET_RANGE);
+      PORT_OFFSET_BASE + (stableHash32(who) % PORT_OFFSET_RANGE);
     const alice = portFor("user:alice");
     const bob = portFor("user:bob");
     const carol = portFor("user:carol");
@@ -68,14 +74,21 @@ describe("S6: resolveTcpPort derives a PER-USER loopback port (no more flat 1876
     // ...and none of them is the old flat default (that was the breach).
     // (At least one differing is enough to prove the offset is applied; in
     //  practice all three differ from the bare base.)
-    expect([alice, bob, carol].some((p) => p !== DEFAULT_DAEMON_TCP_PORT)).toBe(true);
+    expect([alice, bob, carol].some((p) => p !== PORT_OFFSET_BASE)).toBe(true);
   });
 
-  it("every derived port stays inside the documented [base, base+range) window", () => {
+  it("every derived port stays in the per-user window, DISJOINT from the SurrealDB port + ephemeral range (T3)", () => {
+    // T3 regression guard: the window must NOT overlap [18765, 28764] (managed
+    // SurrealDB; fixed 18765 on win32) and must stay below the 32768 ephemeral
+    // floor. The pre-T3 window [18764, 28763] overlapped 18765 → ~1/10000
+    // usernames collided and wedged the daemon on Windows.
+    expect(PORT_OFFSET_BASE).toBeGreaterThan(SURREAL_WINDOW_MAX);
+    expect(PORT_OFFSET_BASE + PORT_OFFSET_RANGE).toBeLessThanOrEqual(32768);
     for (const who of ["uid:0", "uid:1000", "user:Administrator", "user:SYSTEM", "user:zero"]) {
-      const p = DEFAULT_DAEMON_TCP_PORT + (stableHash32(who) % PORT_OFFSET_RANGE);
-      expect(p).toBeGreaterThanOrEqual(DEFAULT_DAEMON_TCP_PORT);
-      expect(p).toBeLessThan(DEFAULT_DAEMON_TCP_PORT + PORT_OFFSET_RANGE);
+      const p = PORT_OFFSET_BASE + (stableHash32(who) % PORT_OFFSET_RANGE);
+      expect(p).toBeGreaterThanOrEqual(PORT_OFFSET_BASE);
+      expect(p).toBeLessThan(PORT_OFFSET_BASE + PORT_OFFSET_RANGE);
+      expect(p).toBeGreaterThan(SURREAL_WINDOW_MAX); // never collides with SurrealDB
     }
   });
 
@@ -94,7 +107,7 @@ describe("S6: resolveTcpPort derives a PER-USER loopback port (no more flat 1876
     // a shared explicit port is honoured as-is on every account.
     expect(resolveTcpPort({ KONGCODE_DAEMON_PORT: "23456" })).toBe(23456);
     expect(resolveTcpPort({ KONGCODE_DAEMON_PORT: "23456" })).not.toBe(
-      DEFAULT_DAEMON_TCP_PORT + (stableHash32(osUserDiscriminator() ?? "") % PORT_OFFSET_RANGE),
+      PORT_OFFSET_BASE + (stableHash32(osUserDiscriminator() ?? "") % PORT_OFFSET_RANGE),
     );
   });
 
@@ -106,9 +119,9 @@ describe("S6: resolveTcpPort derives a PER-USER loopback port (no more flat 1876
       // safe choice; isolation then leans entirely on the handshake token.
       expect(got).toBe(DEFAULT_DAEMON_TCP_PORT);
     } else {
-      expect(got).toBe(DEFAULT_DAEMON_TCP_PORT + (stableHash32(who) % PORT_OFFSET_RANGE));
-      expect(got).toBeGreaterThanOrEqual(DEFAULT_DAEMON_TCP_PORT);
-      expect(got).toBeLessThan(DEFAULT_DAEMON_TCP_PORT + PORT_OFFSET_RANGE);
+      expect(got).toBe(PORT_OFFSET_BASE + (stableHash32(who) % PORT_OFFSET_RANGE));
+      expect(got).toBeGreaterThanOrEqual(PORT_OFFSET_BASE);
+      expect(got).toBeLessThan(PORT_OFFSET_BASE + PORT_OFFSET_RANGE);
     }
   });
 });

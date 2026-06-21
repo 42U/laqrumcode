@@ -110,6 +110,26 @@ full suite green (1451 tests).
   envelope (a pre-existing ambiguity); S5 — R8's graduation un-stamp missed the
   stale-recovery path → stale-recovery now un-stamps `won_chain_ids`.
 
+### Hardened — round 6/7 (convergence): regressions in the round-5 fixes
+
+A fourth review round found **4 more** (trend: 36 → 19 → 6 → 4), all regressions
+in the two most complex round-5 fixes (S1 schema-gate, S6 Windows transport),
+fixed by hand; full suite green (1451 tests).
+
+- **T1:** S1's `schemaApplied` gate could latch a *healthy* daemon to
+  `isAvailable()===false` permanently (a transient schema-reapply timeout behind
+  the reconnect early-return) — *worse* than the bug it fixed. Made `schemaApplied`
+  **monotonic** (the schema persists in the DB and is idempotent; reconnect only
+  re-applies when never-applied) and only clears the zombie flag when usable.
+- **T2:** S6 enforced the handshake token on *every* connection but the co-located
+  UDS client never sent it → self-lockout when `KONGCODE_DAEMON_PORT` is set on
+  Linux/macOS. Client now attaches its own 0600 token whenever readable.
+- **T3:** S6's per-user port window [18764, 28763] *overlapped* the managed-SurrealDB
+  port 18765 → ~1/10000 usernames wedged. Window moved to [28765, 32764], provably
+  disjoint from SurrealDB and below the ephemeral floor; the test now guards it.
+- **T4:** S3's pre-compact 64KB cap head-sliced (dropped the actively-edited recent
+  file from the FILES: resume summary) → tail-slice (recency-biased).
+
 ## [0.7.130] — 2026-06-19
 
 ### Added — `update_skill` MCP tool

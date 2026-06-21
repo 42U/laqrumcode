@@ -158,12 +158,13 @@ describe("S3(b): handlePreCompact bounds the path scan on a multi-MB transcript"
     const session = new SessionState("s3b-sess2", "s3b-sess2");
     session.surrealSessionId = "";
     const turns: RichTurn[] = [
-      // Real files in the first turns (well inside the 64KB head window).
-      { turnId: "turn:1", role: "assistant", text: "edited src/engine/state.ts and config.json", tool_name: "Edit" },
-      { turnId: "turn:2", role: "assistant", text: "ran scripts/run.py", tool_name: "Bash" },
-      // A large benign turn after them (pushes total past 64KB but the head
-      // window already captured the real paths).
-      { turnId: "turn:3", role: "user", text: "x".repeat(128 * 1024) },
+      // A large benign OLDER turn (pushes total past 64KB; T4's tail-slice
+      // correctly drops it — it's stale and path-free).
+      { turnId: "turn:1", role: "user", text: "x".repeat(128 * 1024) },
+      // Real files in the MOST RECENT turns (inside the 64KB tail window — T4
+      // makes the cap tail-biased so the actively-edited files survive).
+      { turnId: "turn:2", role: "assistant", text: "edited src/engine/state.ts and config.json", tool_name: "Edit" },
+      { turnId: "turn:3", role: "assistant", text: "ran scripts/run.py", tool_name: "Bash" },
     ];
     const state = makePreCompactState(session, turns);
 

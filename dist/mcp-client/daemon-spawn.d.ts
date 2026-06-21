@@ -45,6 +45,13 @@ export interface DaemonEndpoint {
  *  as a pure, testable function so the parity with the daemon is verifiable
  *  without spawning anything. */
 export declare function resolveTransport(env?: NodeJS.ProcessEnv, plat?: NodeJS.Platform): "uds" | "tcp";
+/** Width of the per-user TCP-port window. The daemon's loopback port is
+ *  DEFAULT_DAEMON_TCP_PORT + (hash(username) % PORT_OFFSET_RANGE), keeping it in
+ *  [18764, 18764+9999] — well clear of the ephemeral range and of the managed
+ *  SurrealDB window (18765 + uid%10000) that bootstrap.pickPort() uses. Same
+ *  modulus shape as pickPort so the two derivations are auditable side by side. */
+export declare const PORT_OFFSET_BASE = 28765;
+export declare const PORT_OFFSET_RANGE = 4000;
 /** The OS-user discriminator used to derive a per-user TCP port and token-file
  *  path. On POSIX the uid is the canonical, collision-free identity (mirrors
  *  bootstrap.pickPort()); on Windows there is no getuid(), so we fall back to

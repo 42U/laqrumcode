@@ -38,7 +38,15 @@ export function resolveTransport(env = process.env, plat = process.platform) {
  *  [18764, 18764+9999] — well clear of the ephemeral range and of the managed
  *  SurrealDB window (18765 + uid%10000) that bootstrap.pickPort() uses. Same
  *  modulus shape as pickPort so the two derivations are auditable side by side. */
-const PORT_OFFSET_RANGE = 10000;
+// T3: anchor the per-user offset window in [28765, 32764] — the gap ABOVE the
+// managed-SurrealDB window ([18765, 28764] = 18765 + uid%10000, fixed 18765 on
+// win32) and BELOW the 32768 ephemeral-port floor. The pre-T3 window
+// (DEFAULT_DAEMON_TCP_PORT 18764 + hash%10000 = [18764, 28763]) OVERLAPPED the
+// SurrealDB port, so ~1/10000 usernames deterministically collided with 18765
+// on Windows and wedged the daemon. The handshake token is the backstop for the
+// (now non-SurrealDB-overlapping) ~1/4000 cross-user hash collision.
+export const PORT_OFFSET_BASE = 28765;
+export const PORT_OFFSET_RANGE = 4000;
 /** The OS-user discriminator used to derive a per-user TCP port and token-file
  *  path. On POSIX the uid is the canonical, collision-free identity (mirrors
  *  bootstrap.pickPort()); on Windows there is no getuid(), so we fall back to
@@ -100,7 +108,7 @@ export function resolveTcpPort(env = process.env) {
     const who = osUserDiscriminator();
     if (who === null)
         return DEFAULT_DAEMON_TCP_PORT;
-    return DEFAULT_DAEMON_TCP_PORT + (stableHash32(who) % PORT_OFFSET_RANGE);
+    return PORT_OFFSET_BASE + (stableHash32(who) % PORT_OFFSET_RANGE);
 }
 /** Per-user handshake-token file path. Co-located with the daemon pid file in
  *  the user's own home (homedir()), which is per-account on every OS — so two

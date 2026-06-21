@@ -117,10 +117,13 @@ describe("R6: resolveTcpPort matches daemon/index.ts port logic", () => {
   // base + hash(osUserDiscriminator)%10000. The full per-user behavior is
   // covered in fix-s6-win-isolation.test.ts; here we just assert R6's parity
   // claim still holds under the corrected contract.
-  it("defaults into the per-user window based at DEFAULT_DAEMON_TCP_PORT", () => {
+  it("defaults into the per-user window, disjoint from the SurrealDB port (T3)", () => {
     const got = resolveTcpPort({});
-    expect(got).toBeGreaterThanOrEqual(DEFAULT_DAEMON_TCP_PORT);
-    expect(got).toBeLessThan(DEFAULT_DAEMON_TCP_PORT + 10000);
+    // who===null (degenerate sandbox) → flat DEFAULT; otherwise the T3 per-user
+    // window [28765, 32764] — ABOVE the SurrealDB window [18765, 28764], BELOW
+    // the 32768 ephemeral floor. Full coverage in fix-s6-win-isolation.test.ts.
+    const inWindow = got === DEFAULT_DAEMON_TCP_PORT || (got >= 28765 && got < 32765);
+    expect(inWindow).toBe(true);
   });
 
   it("honors a valid KONGCODE_DAEMON_PORT override (verbatim, no per-user offset)", () => {

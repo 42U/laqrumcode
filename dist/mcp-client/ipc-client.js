@@ -125,14 +125,15 @@ export class IpcClient {
         const params = {};
         if (clientInfo)
             params.clientInfo = clientInfo;
-        // S6: in TCP mode (socketPath === null) auto-attach the per-user handshake
-        // token so the non-owned index.ts call sites get isolation for free — no
-        // caller change needed. An explicit token arg (tests) always wins. UDS mode
-        // sends none (it is already filesystem-isolated at 0600). readDaemonToken
-        // returns null when the token file is absent/unreadable; we still send the
-        // (empty→omitted) param so a TCP daemon can reject us, which is the intended
-        // outcome when we can't read another user's 0600 token.
-        const token = handshakeToken ?? (this.opts.socketPath === null ? readDaemonToken() ?? undefined : undefined);
+        // S6/T2: auto-attach the per-user handshake token whenever it is readable,
+        // REGARDLESS of transport. A daemon that bound TCP mints + enforces the token
+        // on EVERY connection (it has no per-connection UDS/TCP discriminator), so a
+        // co-located UDS client (e.g. KONGCODE_DAEMON_PORT set on Linux, where the
+        // daemon binds UDS+TCP) MUST also send its own 0600 token or it locks ITSELF
+        // out — the T2 regression. Reading our own per-user token is safe + cheap; a
+        // UDS-only daemon that minted no token ignores the param, and a cross-user
+        // TCP attacker cannot read our 0600 file so is still rejected.
+        const token = handshakeToken ?? readDaemonToken() ?? undefined;
         if (token)
             params.handshake = token;
         const resp = await this.call("meta.handshake", params);

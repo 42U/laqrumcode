@@ -114,7 +114,8 @@ export declare class SurrealStore {
     /** Connect and run schema. Returns true if a new connection was made, false if already initialized. */
     initialize(): Promise<boolean>;
     /** S1: run runSchema() with a small bounded retry, owning the schemaApplied
-     *  flag. On success sets schemaApplied=true; on every failure sets it false;
+     *  flag. On success sets schemaApplied=true (MONOTONIC — T1: never reset to
+     *  false, since the schema is idempotent and persists in the DB once applied);
      *  rethrows the last error so callers (initialize / ensureConnected) can react.
      *  Kept separate from runSchema() so the reconnect path can re-arm the schema
      *  (and thus isAvailable()) without duplicating the retry logic. */

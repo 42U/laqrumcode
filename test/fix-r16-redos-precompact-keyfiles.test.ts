@@ -57,11 +57,14 @@ describe("R16: handlePreCompact survives a dot-bomb transcript turn", () => {
     const session = new SessionState("r16-sess", "r16-sess");
     session.surrealSessionId = ""; // skip the addSessionTokens DB branch
     const turns: RichTurn[] = [
-      // Legit work turns — these files MUST survive into the FILES: summary.
-      { turnId: "turn:1", role: "assistant", text: "edited src/engine/state.ts and config.json", tool_name: "Edit" },
-      { turnId: "turn:2", role: "assistant", text: "ran tests in scripts/run.py", tool_name: "Bash" },
       // Adversarial dot-bomb turn (e.g. a pasted blob) — the ReDoS trigger.
-      { turnId: "turn:3", role: "user", text: ".".repeat(64 * 1024) },
+      // OLDEST so T4's tail-slice still scans ~all of it (proving the extractor
+      // is non-backtracking) while the recent real-file turns below survive.
+      { turnId: "turn:1", role: "user", text: ".".repeat(64 * 1024) },
+      // Legit work turns — MOST RECENT, so they land in the 64KB tail window and
+      // MUST survive into the recency-biased FILES: summary.
+      { turnId: "turn:2", role: "assistant", text: "edited src/engine/state.ts and config.json", tool_name: "Edit" },
+      { turnId: "turn:3", role: "assistant", text: "ran tests in scripts/run.py", tool_name: "Bash" },
     ];
     const state = makeState(session, turns);
 

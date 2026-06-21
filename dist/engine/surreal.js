@@ -321,7 +321,8 @@ export class SurrealStore {
         return true;
     }
     /** S1: run runSchema() with a small bounded retry, owning the schemaApplied
-     *  flag. On success sets schemaApplied=true; on every failure sets it false;
+     *  flag. On success sets schemaApplied=true (MONOTONIC — T1: never reset to
+     *  false, since the schema is idempotent and persists in the DB once applied);
      *  rethrows the last error so callers (initialize / ensureConnected) can react.
      *  Kept separate from runSchema() so the reconnect path can re-arm the schema
      *  (and thus isAvailable()) without duplicating the retry logic. */
@@ -336,9 +337,13 @@ export class SurrealStore {
                 return;
             }
             catch (e) {
-                // Schema NOT applied — keep the store honestly degraded until a
-                // subsequent attempt succeeds.
-                this.schemaApplied = false;
+                // T1: schemaApplied is MONOTONIC (false->true only). Do NOT flip it back
+                // false on a failure: the schema lives in the DB server-side and is
+                // idempotent (IF NOT EXISTS / OVERWRITE), so once any apply succeeded the
+                // store is schema-ready for the DB's lifetime regardless of connection
+                // churn. Flipping it false on a transient re-apply timeout was the T1
+                // regression that latched a healthy store permanently unavailable. It
+                // starts false (field init) and only the success branch above sets true.
                 lastErr = e;
                 if (attempt < MAX_ATTEMPTS) {
                     log.warn(`[surreal] schema apply failed (attempt ${attempt}/${MAX_ATTEMPTS}); retrying: ${e.message}`);
@@ -380,22 +385,27 @@ export class SurrealStore {
                     // bug the old inline finally-clear existed to avoid). Same 5s budget
                     // (SurrealStore.CONNECT_TIMEOUT_MS) now used by initialize() too.
                     await this.connectWithTimeout();
-                    // S1: a reconnect builds a FRESH Surreal instance (line above), so the
-                    // schema context must be re-applied. Re-arm schemaApplied here so a
-                    // store that booted degraded (schema apply failed at init) self-heals
-                    // on the next reconnect, and a store whose connection dropped doesn't
-                    // silently keep reporting available without re-confirming its schema.
-                    // applySchemaWithRetry owns the flag: on failure it stays false (store
-                    // honestly unavailable) but we DON'T throw out of the reconnect — the
-                    // connection itself is healthy and a later attempt can still heal it.
-                    try {
-                        await this.applySchemaWithRetry();
-                    }
-                    catch (e) {
-                        log.error(`[surreal] reconnect succeeded but schema re-apply failed — store stays UNAVAILABLE until next heal: ${e.message}`);
+                    // S1/T1: only RE-APPLY the schema if it was NEVER successfully applied
+                    // (a store that booted degraded at init). The schema is persisted in
+                    // the DB server-side and is idempotent, so a healthy reconnect of an
+                    // already-schema'd store must NOT re-apply — re-applying and letting a
+                    // transient 60s-deadline timeout flip availability was the T1
+                    // regression that permanently wedged an otherwise-healthy daemon.
+                    if (!this.schemaApplied) {
+                        try {
+                            await this.applySchemaWithRetry();
+                        }
+                        catch (e) {
+                            log.error(`[surreal] reconnect schema re-apply failed — store stays degraded until next heal: ${e.message}`);
+                        }
                     }
                     log.warn("SurrealDB reconnected successfully.");
-                    this.zombieSuspect = false;
+                    // Clear the zombie flag only when the store is actually usable. If the
+                    // schema still hasn't applied (degraded init not yet healed), LEAVE
+                    // zombieSuspect set so the next ensureConnected re-enters past the
+                    // line-445 early-return and retries the re-apply (T1: don't latch).
+                    if (this.schemaApplied)
+                        this.zombieSuspect = false;
                     return;
                 }
                 catch (e) {

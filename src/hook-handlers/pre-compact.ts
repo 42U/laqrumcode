@@ -72,12 +72,17 @@ export async function handlePreCompact(
         // multi-MB join still does multi-MB of tokenizing work synchronously on
         // the shared daemon event loop right when the user is waiting for
         // compaction. The FILES: summary only needs recently-mentioned paths, so
-        // the first 64KB is plenty. (The pending/error regexes below stay on
-        // fullText: they are bounded-repetition `[^.\n]{0,N}` linear scans — not
-        // ReDoS — and recentErrors relies on `.slice(-3)` to keep the MOST RECENT
-        // errors, which a head-slice would drop.)
+        // the LAST 64KB is what matters. (The pending/error regexes below stay
+        // on fullText: they are bounded-repetition `[^.\n]{0,N}` linear scans —
+        // not ReDoS — and recentErrors relies on `.slice(-3)` to keep the MOST
+        // RECENT errors.)
+        // T4: TAIL-slice (most-recent turns), NOT head — the FILES: resume
+        // summary is recency-biased (the actively-edited file is in the LATEST
+        // turns); a head-slice dropped the current file on long sessions.
+        // extractExtPaths splits on whitespace/punctuation, so a clipped leading
+        // boundary token simply fails the anchored tester — no bad path emitted.
         const extScanText = fullText.length > 64 * 1024
-          ? fullText.slice(0, 64 * 1024)
+          ? fullText.slice(-64 * 1024)
           : fullText;
 
         // Pending work detection (claw-code pattern: compact.rs:235-254)
