@@ -50,6 +50,40 @@ added; all new indexes are non-UNIQUE / IF NOT EXISTS (boot-safe).
   rerank all-dropped floor; K47 drain-log fd closed on spawn failure; K50 relay
   process-level rejection handlers; K35 UI search bounded.
 
+### Hardened — round 2/3 (loop-until-dry): regressions in the round-1 fixes + missed defects
+
+A second adversarial review (regression audit of the fix commit + missed-issues
+sweep) found **19 more confirmed defects** — proof that one pass wasn't enough.
+Most were regressions the round-1 fixes themselves introduced; two were genuinely
+missed; three filings were refuted by *running the real SurrealDB binary*. All 19
+fixed; full suite green (1407 tests).
+
+- **Missed CRITICAL — Windows was entirely non-functional (R6):** the MCP client
+  spoke only Unix sockets (existsSync gate) while the daemon binds TCP on win32,
+  so memory was dead on 100% of Windows installs and `KONGCODE_DAEMON_TRANSPORT=tcp`
+  was a no-op. Client is now transport-aware (TCP on win32 / env opt-in, fixed port
+  18764), with a real meta.handshake readiness probe; dup-daemon protection preserved.
+- **Missed HIGH — ReDoS on the shared event loop (R4/R16):** the path-extraction
+  regexes (`[\w./~-]+\.ext`) had catastrophic backtracking (~6s stall per
+  PostToolUse/PreCompact on dot-heavy tool output). Replaced with one shared
+  tokenizing extractor; K48's length cap alone didn't bound backtracking.
+- **Regressions in round-1 fixes:** R1 K21's deterministic-id `muc` UPSERT collided
+  with the retained `muc_mid_idx UNIQUE` on legacy rows (froze utility writeback on
+  upgrade) → removed the now-redundant UNIQUE + migration folds legacy rows; R2 K13's
+  rerank breaker used a submit-time clock (tripped on queue depth) → single serial
+  FIFO with dequeue-time clock; R5/R14/R15 K39's download used a wall-clock abort that
+  killed healthy slow downloads + leaked/​hung on write errors → `stream.pipeline()`
+  rewrite (connect-phase timeout only); R7 K1's cap evicted FIFO not LRU → recency
+  bump; R8 K31 stranded the graduation backlog on a failed synthesis → bounded claim +
+  un-stamp recovery; R9 K15's ownership re-assert was TOCTOU → `markTerminal` gates the
+  terminal stamp on `committing_token` at write time; R10 K6 left staging/access-bump
+  unguarded on abort; R11 K3's hash id broke on all-digit prefixes → constant letter
+  prefix; R12 K16 healed concepts to a searchTerms-stripped vector → concept
+  `embedding_target`; R3 K2's detached eval wasn't drained on shutdown → daemon
+  pending-task registry awaited in gracefulCleanup.
+- **Coverage gaps (R19/R20/R22/R23):** added the real-behavior tests whose absence let
+  the round-1 fixes ship under-verified (the mocked-test-blindspot class that hid K0).
+
 ## [0.7.130] — 2026-06-19
 
 ### Added — `update_skill` MCP tool

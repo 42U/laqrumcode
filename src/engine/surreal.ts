@@ -1421,6 +1421,7 @@ export class SurrealStore {
     source?: string,
     provenance?: ConceptProvenance,
     projectId?: string,
+    embeddingTarget?: string,
   ): Promise<{ id: string; existed: boolean }> {
     if (!content?.trim()) return { id: "", existed: false };
     content = content.trim();
@@ -1502,6 +1503,18 @@ export class SurrealStore {
           { pid: projectId },
         );
       }
+      // R12/K16: WHERE-gated backfill of embedding_target onto a deduped row
+      // that predates this column (or was created content-only), so a later
+      // heal of an un-embedded row reproduces the daemon's richer target rather
+      // than diverging to content-only. Only when it diverges from content;
+      // WHERE-gated so a no-op writes no row version (same write-amp discipline
+      // as the embedding/project_id backfills above).
+      if (embeddingTarget && embeddingTarget !== content) {
+        await this.queryExec(
+          `UPDATE ${id} SET embedding_target = $et WHERE embedding_target IS NONE`,
+          { et: embeddingTarget },
+        );
+      }
       return { id, existed: true };
     }
     const emb = embedding?.length ? embedding : undefined;
@@ -1509,6 +1522,12 @@ export class SurrealStore {
     if (emb) record.embedding = emb;
     if (provenance) record.provenance = provenance;
     if (projectId) record.project_id = projectId;
+    // R12/K16: persist the embed target only when it diverges from `content`,
+    // so backfillConceptEmbeddings can re-embed an un-embedded row with the same
+    // richer target the create path used (`${content} ${searchTerms}` from the
+    // daemon). Skip when identical to content to avoid duplicating it. Mirrors
+    // createMemory's embedding_target handling (K51).
+    if (embeddingTarget && embeddingTarget !== content) record.embedding_target = embeddingTarget;
     // K3 — deterministic content-hash record id as the DB-level dedup seal.
     //
     // SELECT-then-CREATE has a TOCTOU window: two concurrent upserts can both
@@ -1526,9 +1545,24 @@ export class SurrealStore {
     // uniqueness rejects the loser's CREATE with AlreadyExists, which
     // isUniqueViolation() catches (it matches record-id AND index violations).
     // Hash the LOWERCASED+trimmed content so case-only variants collide and
-    // fold, matching the lowercase dedup semantics above. 32 hex chars = 128
-    // bits → no accidental cross-content collisions at single-host volume.
-    const contentKey = createHash("sha256").update(content.toLowerCase()).digest("hex").slice(0, 32);
+    // fold, matching the lowercase dedup semantics above.
+    //
+    // R11 (K3 refinement): PREFIX the hash with a constant non-digit letter
+    // ("c"). VERIFIED driver behavior (probed against surrealdb's RecordId): a
+    // RecordId whose KEY is an all-digit STRING stringifies WITH angle brackets
+    // — `concept:⟨000…⟩` — because a bare-digit key would round-trip as a NUMBER.
+    // That bracketed form fails this codebase's RECORD_ID_RE (⟨/⟩ are outside
+    // [a-zA-Z0-9_-]), so the existing-row re-upsert path's assertRecordId(String(
+    // id)) threw and edge-wiring dropped the row. (A digit-FIRST but mixed-alnum
+    // key like `0ab…` is NOT bracketed, so only an entirely-digit hash tail is
+    // pathological — ~1-in-10^31, but reachable across ~1M installs.) The "c"
+    // prefix guarantees a non-digit key on EVERY id, so the driver emits the
+    // bare `concept:c…` form that RECORD_ID_RE accepts on write and on the
+    // returned id. "c" is itself a hex char, so the 31-hex tail + "c" stays in
+    // [0-9a-f]+ and dedup semantics are unchanged (still a pure function of
+    // lowercased content). 31 hex + 1 letter = 32 chars = 124 bits of hash
+    // entropy → no accidental cross-content collisions at single-host volume.
+    const contentKey = "c" + createHash("sha256").update(content.toLowerCase()).digest("hex").slice(0, 31);
     try {
       const created = await this.queryFirst<{ id: string }>(
         `CREATE concept:⟨${contentKey}⟩ CONTENT $record RETURN id`,
@@ -1578,8 +1612,12 @@ export class SurrealStore {
         // that by retrying the CREATE with a random id so the seal never turns
         // a re-learn into a hard throw.
         try {
+          // R11 (K3): same constant non-digit "c" prefix as the deterministic
+          // key above. randomUUID() hex can also be all-digit, which the driver
+          // would bracket into an id that fails RECORD_ID_RE on the next
+          // re-upsert; the leading letter prevents that on the re-learn path too.
           const reborn = await this.queryFirst<{ id: string }>(
-            `CREATE concept:⟨${randomUUID().replace(/-/g, "")}⟩ CONTENT $record RETURN id`,
+            `CREATE concept:⟨c${randomUUID().replace(/-/g, "")}⟩ CONTENT $record RETURN id`,
             { record },
           );
           // Defensive: only return on a real id. If the retry yields nothing
@@ -2024,7 +2062,13 @@ export class SurrealStore {
       // Fix (two parts):
       //  1) DETERMINISTIC record id `memory_utility_cache:⟨memory_id with ':'→'_'⟩`
       //     (mirrors access_stats in bumpAccessCounts) — one row per target,
-      //     UPSERT-by-id, no random-ULID create path, UNIQUE always satisfied.
+      //     UPSERT-by-id, no random-ULID create path. R1: the muc_mid_idx UNIQUE
+      //     on memory_id is now REMOVED (schema.surql / migration) — the
+      //     record-id PK already enforces one-row-per-target (like access_stats,
+      //     which has no secondary index), and the retained UNIQUE was actively
+      //     harmful (a legacy random-id row owning the slot froze writeback). The
+      //     try/catch below is a belt-and-suspenders fallback for a daemon that
+      //     races ahead of the index drop.
       //  2) COMMUTATIVE `+=` accumulators (util_sum, retrieval_count) instead of
       //     a materialized mean. `+=` is order-independent so concurrent bumps
       //     can't lose an update; the mean is computed at read time as
@@ -2035,14 +2079,37 @@ export class SurrealStore {
       // $ids` readers continue to match.
       const mid = toRecordId(memoryId);
       const key = memoryId.replace(":", "_");
-      await this.queryExec(
-        `UPSERT memory_utility_cache:⟨${key}⟩ SET
-          memory_id = $mid,
-          util_sum += $util,
-          retrieval_count += 1,
-          last_updated = time::now()`,
-        { mid, util: utilization },
-      );
+      try {
+        await this.queryExec(
+          `UPSERT memory_utility_cache:⟨${key}⟩ SET
+            memory_id = $mid,
+            util_sum += $util,
+            retrieval_count += 1,
+            last_updated = time::now()`,
+          { mid, util: utilization },
+        );
+      } catch (upsertErr) {
+        // R1/K21 defensive fallback. The muc_mid_idx UNIQUE on memory_id is
+        // dropped by runSchema()/the migration, but a daemon running before that
+        // drop lands (stale dist/, or an upgrade in flight) can still collide:
+        // a legacy random-ULID row owns the `memory_id = $mid` slot, so the
+        // deterministic-id insert violates the UNIQUE and — without this catch —
+        // the write would be lost (the frozen-writeback regression). When that
+        // happens, accumulate into the row that already owns the slot (keyed by
+        // memory_id) so the bump is NOT silently dropped. Commutative `+=` keeps
+        // it order-independent; the migration later folds this legacy row into
+        // the deterministic id.
+        if (!isUniqueViolation(upsertErr)) throw upsertErr;
+        swallow.warn("surreal:updateUtilityCache:uniqueFallback", upsertErr);
+        await this.queryExec(
+          `UPDATE memory_utility_cache SET
+            util_sum += $util,
+            retrieval_count += 1,
+            last_updated = time::now()
+           WHERE memory_id = $mid`,
+          { mid, util: utilization },
+        );
+      }
     } catch (e) {
       swallow.warn("surreal:updateUtilityCache", e);
     }

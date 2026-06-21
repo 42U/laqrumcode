@@ -63,6 +63,18 @@ export interface BootstrapInput {
  *  unusual install layouts).
  */
 export declare function resolvePluginDir(): string;
+/**
+ * Per-host inactivity (in ms) the download watchdog tolerates with NO bytes
+ * before it tears the transfer down. Exported so the regression test can drive
+ * it without waiting the production interval.
+ */
+export declare const DOWNLOAD_INACTIVITY_MS = 30000;
+export declare function downloadFile(url: string, destPath: string, expectedSha256: string | null, opts?: {
+    inactivityMs?: number;
+    connectTimeoutMs?: number;
+}): Promise<{
+    sizeBytes: number;
+}>;
 export interface ManagedSurrealCred {
     user: string;
     pass: string;

@@ -52,12 +52,23 @@ const RERANK_ALL_DROPPED_KEEP = Number(process.env.KONGCODE_RERANK_ALL_DROPPED_K
 const RERANK_TIMEOUT_MS = Number(process.env.KONGCODE_RERANK_TIMEOUT_MS) || 10_000;
 const RERANK_MAX_CONSECUTIVE_TIMEOUTS = Number(process.env.KONGCODE_RERANK_MAX_TIMEOUTS) || 3;
 const RERANK_BREAKER_COOLDOWN_MS = Number(process.env.KONGCODE_RERANK_BREAKER_COOLDOWN_MS) || 60_000;
+// K12-style backpressure ceiling for the rerank FIFO. node-llama-cpp serializes
+// rankAll internally, so concurrent callers (rerankResults + the fanned-out
+// crossEncoderScorePairs on the Stop path + the skills reranker callback) all
+// queue here. Each pending entry pins two Token[][] closures, so an unbounded
+// push is the leak surface on a long-lived per-host daemon. Past this depth we
+// fast-fail with a retryable error instead of growing the queue. Env-tunable.
+const RERANK_QUEUE_MAX = Number(process.env.KONGCODE_RERANK_QUEUE_MAX) > 0
+    ? Number(process.env.KONGCODE_RERANK_QUEUE_MAX)
+    : 512;
 let _rerankConsecutiveTimeouts = 0;
 let _rerankBreakerOpenedAt = null;
+let _rerankQueue = [];
+let _rerankQueueDraining = false;
 /** True when the consecutive-timeout breaker is open and still inside its
  *  cooldown window — callers should skip the cross-encoder entirely and fall
- *  back. Re-closes (returns false) once the cooldown elapses so the next call
- *  acts as a half-open probe. */
+ *  back. Re-closes (returns false) once the cooldown elapses so the next
+ *  DEQUEUED item acts as the single half-open probe. */
 function rerankBreakerOpen() {
     if (_rerankConsecutiveTimeouts < RERANK_MAX_CONSECUTIVE_TIMEOUTS)
         return false;
@@ -65,53 +76,117 @@ function rerankBreakerOpen() {
         return false;
     return Date.now() - _rerankBreakerOpenedAt < RERANK_BREAKER_COOLDOWN_MS;
 }
-/** @internal test helper — reset breaker state between cases. */
+/** @internal test helper — reset breaker + queue state between cases. */
 export function _resetRerankBreaker() {
     _rerankConsecutiveTimeouts = 0;
     _rerankBreakerOpenedAt = null;
+    _rerankQueue = [];
+    _rerankQueueDraining = false;
 }
 /** @internal test helper — inspect breaker state. */
 export function _rerankBreakerState() {
-    return { consecutiveTimeouts: _rerankConsecutiveTimeouts, open: rerankBreakerOpen() };
+    return {
+        consecutiveTimeouts: _rerankConsecutiveTimeouts,
+        open: rerankBreakerOpen(),
+        queueDepth: _rerankQueue.length,
+    };
 }
-/** Run rankAll under a deadline + the consecutive-timeout breaker. Throws on
- *  timeout (so the caller's try/catch falls back); resets the breaker on any
- *  successful return. Returns null only when the breaker is already open (caller
- *  should fall back without computing). */
-async function rankAllWithDeadline(ctx, query, docs) {
-    if (rerankBreakerOpen())
-        return null;
+/** @internal test helper — inject a fake ranking context so the FIFO/breaker
+ *  path can be exercised without loading the 606MB bge-reranker model. Pass
+ *  null to clear. Used by the R2 queue-depth regression test. */
+export function _setRankingCtxForTest(ctx) {
+    _rankingCtx = ctx;
+}
+/** Drain the rerank FIFO one item at a time. Single-flight via the
+ *  _rerankQueueDraining guard (the only place compute is started), so two
+ *  concurrent enqueues can't both compute or both act as half-open probes. */
+async function drainRerankQueue() {
+    if (_rerankQueueDraining)
+        return;
+    _rerankQueueDraining = true;
+    try {
+        while (_rerankQueue.length > 0) {
+            const item = _rerankQueue.shift();
+            if (_rerankConsecutiveTimeouts >= RERANK_MAX_CONSECUTIVE_TIMEOUTS) {
+                if (_rerankBreakerOpenedAt == null)
+                    _rerankBreakerOpenedAt = Date.now();
+                if (Date.now() - _rerankBreakerOpenedAt < RERANK_BREAKER_COOLDOWN_MS) {
+                    // Open: signal "fall back" (null), no compute, no timeout burned.
+                    item.resolve(null);
+                    continue;
+                }
+                // Cooldown elapsed → HALF-OPEN: this single dequeued item is the lone
+                // probe. Serial dequeue means everything behind it waits; a failed
+                // probe re-opens the breaker so they fall back fast.
+            }
+            await computeRankAndSettle(item);
+        }
+    }
+    finally {
+        _rerankQueueDraining = false;
+    }
+}
+/** Compute one rankAll under a deadline clock started HERE (at dequeue), update
+ *  the consecutive-timeout breaker, and settle the item's promise. */
+async function computeRankAndSettle(item) {
     let timer;
+    const startedAt = Date.now();
+    const probing = _rerankConsecutiveTimeouts >= RERANK_MAX_CONSECUTIVE_TIMEOUTS;
     try {
         const scores = await Promise.race([
-            ctx.rankAll(query, docs),
+            item.ctx.rankAll(item.query, item.docs),
             new Promise((_, reject) => {
-                timer = setTimeout(() => reject(new Error(`rankAll timed out after ${RERANK_TIMEOUT_MS}ms`)), RERANK_TIMEOUT_MS);
+                timer = setTimeout(() => reject(new Error(`rankAll timed out after ${RERANK_TIMEOUT_MS}ms` +
+                    ` (compute clock; spent ${startedAt - item.enqueuedAt}ms queued first)`)), RERANK_TIMEOUT_MS);
             }),
         ]);
         // Success closes the breaker.
-        if (_rerankConsecutiveTimeouts > 0) {
+        if (_rerankConsecutiveTimeouts > 0 || probing) {
             log.warn("[rerank] cross-encoder recovered — timeout breaker closed");
         }
         _rerankConsecutiveTimeouts = 0;
         _rerankBreakerOpenedAt = null;
-        return scores;
+        item.resolve(scores);
     }
     catch (e) {
         if (e instanceof Error && e.message.includes("timed out")) {
             _rerankConsecutiveTimeouts++;
             if (_rerankConsecutiveTimeouts >= RERANK_MAX_CONSECUTIVE_TIMEOUTS) {
+                // Crossing the threshold (or a failed half-open probe) opens the
+                // breaker from NOW — a fresh full cooldown, not the stale window.
                 _rerankBreakerOpenedAt = Date.now();
                 log.error(`[rerank] timeout #${_rerankConsecutiveTimeouts}/${RERANK_MAX_CONSECUTIVE_TIMEOUTS}` +
-                    " — CROSS-ENCODER CIRCUIT BREAKER OPEN, falling back to lexical/distribution scoring");
+                    (probing ? " — HALF-OPEN PROBE FAILED, breaker re-opened" :
+                        " — CROSS-ENCODER CIRCUIT BREAKER OPEN") +
+                    ", falling back to lexical/distribution scoring");
             }
         }
-        throw e;
+        item.reject(e instanceof Error ? e : new Error(String(e)));
     }
     finally {
         if (timer !== undefined)
             clearTimeout(timer);
     }
+}
+/** Enqueue a rankAll onto the single serial FIFO and await its turn. Throws on
+ *  timeout (so the caller's try/catch falls back); resets the breaker on any
+ *  successful return. Returns null only when the breaker is already open at
+ *  DEQUEUE (caller should fall back without computing). The deadline clock for
+ *  each item starts at dequeue, not here at submit. */
+async function rankAllWithDeadline(ctx, query, docs) {
+    // Fast-path the already-open breaker without enqueuing: avoids growing the
+    // FIFO with work that would just resolve null at dequeue anyway.
+    if (rerankBreakerOpen())
+        return null;
+    // Backpressure: refuse past the ceiling rather than growing the FIFO without
+    // bound on a wedged cross-encoder.
+    if (_rerankQueue.length >= RERANK_QUEUE_MAX) {
+        throw new Error(`Rerank queue full (${_rerankQueue.length}/${RERANK_QUEUE_MAX}) — cross-encoder is underwater; retry shortly`);
+    }
+    return new Promise((resolve, reject) => {
+        _rerankQueue.push({ ctx, query, docs, enqueuedAt: Date.now(), resolve, reject });
+        void drainRerankQueue();
+    });
 }
 /** Tokenize + cap to a fixed token budget, returning Token[] for rankAll. Passing
  *  tokens (not a char-truncated string) gives EXACT length control: a char cap
@@ -1575,13 +1650,19 @@ stageTrace) {
             let contextNodes = takeWithConstraints(reranked, tokenBudget, budgets.maxContextItems);
             contextNodes = await ensureRecentTurns(contextNodes, session, store);
             if (contextNodes.length > 0) {
-                if (contextNodes.filter((n) => n.table === "concept" || n.table === "memory").length > 0) {
-                    store.bumpAccessCounts(contextNodes.filter((n) => n.table === "concept" || n.table === "memory").map((n) => n.id)).catch(e => swallow.warn("graph-context:bumpAccess", e));
-                }
-                // 0.7.27: build the [#N] → memory_id map from the final ordered list and
-                // hand it to stageRetrieval so Stop's evaluateRetrieval can parse [#N]
-                // citations out of the assistant response.
-                {
+                // K6-gc / R10: bump + stage only if the caller hasn't abandoned us on
+                // the deadline. The rerankResults() above is the CPU-bound stage that
+                // can overrun the deadline; a post-deadline completion here would bump
+                // access counts (polluting the ACAN signal) and seed Stop's
+                // evaluateRetrieval indexMap with a result the assembler discarded.
+                // Same `!signal?.aborted` guard as the main path + the cache write.
+                if (!signal?.aborted) {
+                    if (contextNodes.filter((n) => n.table === "concept" || n.table === "memory").length > 0) {
+                        store.bumpAccessCounts(contextNodes.filter((n) => n.table === "concept" || n.table === "memory").map((n) => n.id)).catch(e => swallow.warn("graph-context:bumpAccess", e));
+                    }
+                    // 0.7.27: build the [#N] → memory_id map from the final ordered list
+                    // and hand it to stageRetrieval so Stop's evaluateRetrieval can parse
+                    // [#N] citations out of the assistant response.
                     const stageIndexMap = new Map();
                     [...contextNodes]
                         .sort((a, b) => (b.finalScore ?? 0) - (a.finalScore ?? 0))
@@ -1697,17 +1778,23 @@ stageTrace) {
             const result = getRecentTurns(messages, budgets.conversation, budgets.toolHistory, contextWindow, session);
             return { messages: injectRulesSuffix(result, session), stats: makeStats(result, 0, 0, result.length, "graph") };
         }
-        // Bump access counts
-        const retrievedIds = contextNodes
-            .filter((n) => n.table === "concept" || n.table === "memory")
-            .map((n) => n.id);
-        if (retrievedIds.length > 0) {
-            store.bumpAccessCounts(retrievedIds).catch(e => swallow.warn("graph-context:bumpAccess", e));
-        }
-        // 0.7.27: build the [#N] → memory_id map from the final ordered list and
-        // hand it to stageRetrieval so Stop's evaluateRetrieval can parse [#N]
-        // citations out of the assistant response.
-        {
+        // K6-gc / R10: bump access counts + stage retrieval ONLY if the caller
+        // hasn't abandoned us on the deadline. A post-deadline completion that
+        // bumped access counts would pollute the ACAN access signal and over-credit
+        // items the assembler already discarded; staging would seed Stop's
+        // evaluateRetrieval / indexMap with a result the user never saw. Gated with
+        // the same `!signal?.aborted` idiom as the prefetch-cache write below.
+        if (!signal?.aborted) {
+            // Bump access counts
+            const retrievedIds = contextNodes
+                .filter((n) => n.table === "concept" || n.table === "memory")
+                .map((n) => n.id);
+            if (retrievedIds.length > 0) {
+                store.bumpAccessCounts(retrievedIds).catch(e => swallow.warn("graph-context:bumpAccess", e));
+            }
+            // 0.7.27: build the [#N] → memory_id map from the final ordered list and
+            // hand it to stageRetrieval so Stop's evaluateRetrieval can parse [#N]
+            // citations out of the assistant response.
             const stageIndexMap = new Map();
             [...contextNodes]
                 .sort((a, b) => (b.finalScore ?? 0) - (a.finalScore ?? 0))

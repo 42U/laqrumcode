@@ -383,6 +383,23 @@ export class DaemonServer {
     return this.clients.size;
   }
 
+  /** R13: the set of Claude Code session ids whose client socket is currently
+   *  attached. The stale-session reaper uses this to skip reaping any session
+   *  whose client is still connected (a live socket means the session is not
+   *  idle, regardless of how old its turnStartMs looks — e.g. a long agentic
+   *  turn). Prunes phantom (destroyed-but-not-closed) sockets first so a
+   *  stuck Map entry can't keep a session pinned forever. Anonymous clients
+   *  (null ClientInfo, pre-handshake or pre-0.7.9) contribute no id — they're
+   *  not yet associated with a session, so they can't protect one from reaping. */
+  attachedSessionIds(): Set<string> {
+    this.pruneDeadClients();
+    const ids = new Set<string>();
+    for (const info of this.clients.values()) {
+      if (info?.sessionId) ids.add(info.sessionId);
+    }
+    return ids;
+  }
+
   /** OS-assigned TCP port after listen(). Returns the configured port if
    *  tcpPort was specified non-zero, the OS-picked port if tcpPort=0, or
    *  null if TCP isn't enabled. Tests use tcpPort=0 to dodge win32 CI

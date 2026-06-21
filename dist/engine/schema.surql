@@ -83,6 +83,14 @@ DEFINE FIELD IF NOT EXISTS tags ON concept TYPE option<array>;
 DEFINE FIELD IF NOT EXISTS source ON concept TYPE option<string>;
 DEFINE FIELD IF NOT EXISTS created_at ON concept TYPE datetime DEFAULT time::now();
 DEFINE FIELD IF NOT EXISTS last_accessed ON concept TYPE option<datetime>;
+-- R12/K16 (mirrors K51 for memory): the live daemon embeds a concept as
+-- `${content} ${searchTerms.join(". ")}` (memory-daemon.ts) — a richer target
+-- than `content` alone — but only `content` was persisted, so when the embedder
+-- was DOWN at create time backfillConceptEmbeddings() healed to a content-only
+-- vector that DIVERGED from the live form. Persist the divergent embed target
+-- (option<string>, only written when it differs from content) so the heal path
+-- reproduces it. Plain optional field, no index. IF NOT EXISTS per file convention.
+DEFINE FIELD IF NOT EXISTS embedding_target ON concept TYPE option<string>;
 DEFINE INDEX IF NOT EXISTS concept_vec_idx ON concept FIELDS embedding HNSW DIMENSION 1024 DIST COSINE;
 -- tags index (K4): tagBoostedConcepts filters `tags CONTAINSANY $tags` then
 -- scores the survivors by cosine. Without this index the CONTAINSANY predicate
@@ -449,7 +457,20 @@ DEFINE FIELD IF NOT EXISTS retrieval_count ON memory_utility_cache TYPE int;
 -- materialized avg_utilization when util_sum IS NONE.
 DEFINE FIELD IF NOT EXISTS util_sum ON memory_utility_cache TYPE option<float>;
 DEFINE FIELD IF NOT EXISTS last_updated ON memory_utility_cache TYPE datetime DEFAULT time::now();
-DEFINE INDEX IF NOT EXISTS muc_mid_idx ON memory_utility_cache FIELDS memory_id UNIQUE;
+-- R1/K21: REMOVE the muc_mid_idx UNIQUE index. The K21 writer now keys each row
+-- on a DETERMINISTIC record id (memory_utility_cache:⟨memory_X⟩ — one row per
+-- target, mirroring access_stats which carries NO secondary index), so the
+-- record-id PK already guarantees one-row-per-target uniqueness. The retained
+-- UNIQUE was actively HARMFUL post-upgrade: a legacy random-ULID row written by
+-- the pre-K21 writer occupies the `memory_id = memory:X` slot, so the new
+-- deterministic-id UPSERT's `SET memory_id = memory:X` violated the UNIQUE and
+-- its write was swallowed by updateUtilityCache's catch — utility writeback for
+-- every pre-existing target froze SILENTLY forever after upgrade. Re-keying /
+-- removing rows on this telemetry/cache table is permitted (NOT a NEVER-DELETE
+-- content table). REMOVE IF EXISTS so installs that already created the index
+-- drop it on daemon restart; clean installs no-op. scripts/migrate-memory-
+-- utility-cache-id.mjs folds legacy random-id rows into the deterministic id.
+REMOVE INDEX IF EXISTS muc_mid_idx ON memory_utility_cache;
 
 -- ============================================================
 -- MEMORY SUBSTRATE: Turn Archive (cold storage for old turns)

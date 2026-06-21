@@ -10,6 +10,7 @@ import type { HookResponse } from "../http-api.js";
 import { ingestTurn } from "../context-assembler.js";
 import { swallow } from "../engine/errors.js";
 import { log } from "../engine/log.js";
+import { extractExtPaths } from "./post-tool-use.js";
 
 export async function handlePreCompact(
   state: GlobalPluginState,
@@ -71,10 +72,17 @@ export async function handlePreCompact(
           .map(m => m[0].trim().slice(0, 160))
           .slice(0, 5);
 
-        // Key file extraction (claw-code: compact.rs:256-269)
+        // Key file extraction (claw-code: compact.rs:256-269). Routed through the
+        // shared hardened extractor (R16 ReDoS fix): the previous inline
+        // /[\w\-/.]+\.\w{1,5}/g had the same stem/literal-dot overlap as R4 and
+        // stalled the shared event loop ~4s on a dot-heavy joined transcript.
+        // extractExtPaths is tokenized + length-capped + anchored => linear. We
+        // still apply pre-compact's narrower extension filter (the extractor's
+        // superset covers it) and the dedup+cap to keep output identical.
+        const extPaths: string[] = [];
+        extractExtPaths(fullText, p => extPaths.push(p));
         const filePaths = [...new Set(
-          (fullText.match(/[\w\-/.]+\.\w{1,5}/g) ?? [])
-            .filter(p => /\.(ts|js|py|rs|go|md|json|yaml|toml|tsx|jsx)$/.test(p)),
+          extPaths.filter(p => /\.(ts|js|py|rs|go|md|json|yaml|toml|tsx|jsx)$/.test(p)),
         )].slice(0, 10);
 
         // Tool names used (claw-code: compact.rs:127-137)

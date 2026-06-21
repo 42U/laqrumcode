@@ -30,21 +30,63 @@ function isPathObservingTool(toolName: string): boolean {
  *  over-extraction — a false positive is a harmless Set entry, while a
  *  false negative re-locks the gate and forces an avoidable Read call. */
 const SLASH_PATH_RE = /[/~][^\s'"`<>{}()\[\],]+/g;
-// Path-with-extension matcher: allows slashes, dots, tildes, hyphens in the
-// stem so relative paths like `src/engine/state.ts` and `./foo/bar.py` get
-// captured as a single entry, not just their bare filename. Bare filenames
-// alone wouldn't satisfy the gate (it compares against absolute paths).
-const EXT_PATH_RE =
-  /[\w./~-]+\.(?:ts|tsx|js|jsx|mjs|cjs|py|rb|go|rs|java|kt|swift|c|cc|cpp|h|hpp|cs|php|md|markdown|json|jsonc|yaml|yml|toml|sql|sh|bash|html|css|scss|sass|xml|env|surql|gradle|tf|tfvars)\b/g;
+// Token splitter for the extension scan. Same delimiter class as SLASH_PATH_RE's
+// negated set so wrapping punctuation `(foo.ts)` / `"foo.ts"` splits cleanly.
+const TOKEN_SPLIT_RE = /[\s'"`<>{}()\[\],]+/;
+// Anchored, per-token extension tester. CRITICAL (R4 ReDoS fix): this is matched
+// against a single short token with ^...$ anchors, NOT scanned globally over the
+// whole text. The previous `EXT_PATH_RE` ( `/[\w./~-]+\.(?:ext)\b/g` ) put `.`
+// inside the `+` class AND required a literal `\.` after it; on an adversarial
+// dot-heavy run those two overlap at every position, so a failed extension match
+// forces the engine to retry every partition — catastrophic O(n^2)+ backtracking
+// (~4s per 64KB slice on the shared daemon event loop). Anchoring + the
+// MAX_PATH_TOKEN length cap below make the work strictly bounded per token, and
+// String.split is linear, so a 64KB all-dots / "x."*N input is now sub-ms.
+const EXT_TOKEN_RE =
+  /^[\w./~-]*\.(?:ts|tsx|js|jsx|mjs|cjs|py|rb|go|rs|java|kt|swift|c|cc|cpp|h|hpp|cs|php|md|markdown|json|jsonc|yaml|yml|toml|sql|sh|bash|html|css|scss|sass|xml|env|surql|gradle|tf|tfvars)$/;
+// Recover a leading `path.ext` from a `path.ext:line[:col]match` token where the
+// matched line has NO whitespace (e.g. grep -n on a minified line) so the token
+// never split. The head class excludes `:`, so it cannot overlap the `:\d`
+// separator that follows — still linear (anchored, bounded token). This is what
+// the old `\b`-anchored global regex got for free; without it `bar.js:7:hit`
+// would silently drop `bar.js` from the gate / compaction summary.
+const EXT_HEAD_RE =
+  /^([\w./~-]*\.(?:ts|tsx|js|jsx|mjs|cjs|py|rb|go|rs|java|kt|swift|c|cc|cpp|h|hpp|cs|php|md|markdown|json|jsonc|yaml|yml|toml|sql|sh|bash|html|css|scss|sass|xml|env|surql|gradle|tf|tfvars)):\d/;
+// A real path token is short. Anything longer is junk (e.g. a multi-KB dot-run
+// crafted to trigger backtracking) — reject before the regex ever sees it.
+const MAX_PATH_TOKEN = 512;
+
+/** Shared hardened extension-path extractor (R4/R16). Tokenizes on whitespace
+ *  and wrapping punctuation, length-caps each token, then anchor-tests it. This
+ *  is the single ReDoS-safe primitive reused by post-tool-use AND pre-compact so
+ *  the fix cannot drift back into a vulnerable inline regex. Exported for
+ *  pre-compact.ts (key-file extraction over joined transcript turns). */
+export function extractExtPaths(text: string, observe: (path: string) => void): void {
+  for (const tok of text.split(TOKEN_SPLIT_RE)) {
+    if (tok.length === 0 || tok.length > MAX_PATH_TOKEN) continue;
+    // Strip a trailing grep/compiler line:col suffix and/or sentence
+    // punctuation in one pass (`foo.ts:42:`, `foo.ts:12:5`, `foo.ts.`). The old
+    // `\b`-anchored global regex got the clean path for free; this replicates it
+    // so `src/foo.ts:42:` still yields `src/foo.ts`. Each alternative consumes a
+    // bounded chunk and `$` anchors, so it is linear on a <=512-char token (no
+    // nested-quantifier / overlap blowup — verified on `:::...` and `:1:1...`).
+    const cleaned = tok.replace(/(?::\d+|[.,:;!?])+$/, "");
+    if (cleaned.length > 1 && EXT_TOKEN_RE.test(cleaned)) {
+      observe(cleaned);
+      continue;
+    }
+    // Whole-token didn't match: try the `path.ext:line` head (grep/compiler).
+    const head = EXT_HEAD_RE.exec(tok);
+    if (head && head[1].length > 1) observe(head[1]);
+  }
+}
 
 function extractPathsFromText(text: string, observe: (path: string) => void): void {
   for (const m of text.match(SLASH_PATH_RE) ?? []) {
     const cleaned = m.replace(/[.,:;!?]+$/, "");
     if (cleaned.length > 1) observe(cleaned);
   }
-  for (const m of text.match(EXT_PATH_RE) ?? []) {
-    observe(m);
-  }
+  extractExtPaths(text, observe);
 }
 
 export async function handlePostToolUse(

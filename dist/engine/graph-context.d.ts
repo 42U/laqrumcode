@@ -8,14 +8,20 @@ import type { AgentMessage } from "./types.js";
 import type { SurrealStore } from "./surreal.js";
 import type { EmbeddingService } from "./embeddings.js";
 import type { SessionState } from "./state.js";
+import type { LlamaRankingContext } from "node-llama-cpp";
 import type { ResourceProfile } from "./resource-tier.js";
-/** @internal test helper — reset breaker state between cases. */
+/** @internal test helper — reset breaker + queue state between cases. */
 export declare function _resetRerankBreaker(): void;
 /** @internal test helper — inspect breaker state. */
 export declare function _rerankBreakerState(): {
     consecutiveTimeouts: number;
     open: boolean;
+    queueDepth: number;
 };
+/** @internal test helper — inject a fake ranking context so the FIFO/breaker
+ *  path can be exercised without loading the 606MB bge-reranker model. Pass
+ *  null to clear. Used by the R2 queue-depth regression test. */
+export declare function _setRankingCtxForTest(ctx: LlamaRankingContext | null): void;
 export declare function configureReranker(modelPath: string, profile?: ResourceProfile): void;
 export declare function initReranker(modelPath: string): Promise<void>;
 export declare function disposeReranker(): Promise<void>;

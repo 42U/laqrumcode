@@ -304,7 +304,7 @@ export declare class SurrealStore {
      *  including race-recovery paths). commitConcept uses the flag to skip
      *  re-running hierarchy/related_to link scans for recurring concepts — the
      *  per-turn re-wiring that produced ×4,541 duplicate edges on hot pairs. */
-    upsertConcept(content: string, embedding: number[] | null, source?: string, provenance?: ConceptProvenance, projectId?: string): Promise<{
+    upsertConcept(content: string, embedding: number[] | null, source?: string, provenance?: ConceptProvenance, projectId?: string, embeddingTarget?: string): Promise<{
         id: string;
         existed: boolean;
     }>;

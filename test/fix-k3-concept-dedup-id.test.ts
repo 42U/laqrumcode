@@ -27,9 +27,11 @@ import { describe, it, expect, vi } from "vitest";
 import { createHash } from "node:crypto";
 import { SurrealStore } from "../src/engine/surreal.js";
 
-/** The exact key derivation the fix uses (see surreal.ts upsertConcept). */
+/** The exact key derivation the fix uses (see surreal.ts upsertConcept).
+ *  R11: prefixed with a constant non-digit "c" so the driver never brackets an
+ *  all-digit key into an id that fails RECORD_ID_RE. 31 hex + "c" = 32 chars. */
 function expectedKey(content: string): string {
-  return createHash("sha256").update(content.trim().toLowerCase()).digest("hex").slice(0, 32);
+  return "c" + createHash("sha256").update(content.trim().toLowerCase()).digest("hex").slice(0, 31);
 }
 
 /** Build a SurrealStore whose query layer is fully mocked. `onCreate` captures

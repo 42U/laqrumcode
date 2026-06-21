@@ -354,9 +354,11 @@ describe("writeExtractionResults", () => {
 
     expect(counts.concept).toBe(1);
     expect(embeddings.embed).not.toHaveBeenCalled();
-    // upsertConcept called with null embedding
+    // upsertConcept called with null embedding. R12/K16: the daemon now also
+    // passes embeddingTarget = `${content}${searchTerms?}` — with no searchTerms
+    // here it equals the content, so the 6th arg is the content string.
     expect(store.upsertConcept).toHaveBeenCalledWith(
-      "works without embeddings", null, "daemon:session:s1", undefined, undefined,
+      "works without embeddings", null, "daemon:session:s1", undefined, undefined, "works without embeddings",
     );
   });
 

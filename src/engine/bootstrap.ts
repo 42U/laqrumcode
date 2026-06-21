@@ -15,6 +15,8 @@ import { fileURLToPath } from "node:url";
 import { spawn, execFile, execFileSync, type ChildProcess } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { promisify } from "node:util";
+import { Readable, Transform } from "node:stream";
+import { pipeline } from "node:stream/promises";
 import { log } from "./log.js";
 
 const execFileAsync = promisify(execFile);
@@ -118,16 +120,56 @@ function detectPlatformKey(): string {
   return `${process.platform}-${arch}`;
 }
 
-async function downloadFile(
+/**
+ * Per-host inactivity (in ms) the download watchdog tolerates with NO bytes
+ * before it tears the transfer down. Exported so the regression test can drive
+ * it without waiting the production interval.
+ */
+export const DOWNLOAD_INACTIVITY_MS = 30_000;
+
+/**
+ * How long (ms) to wait for the CONNECTION + RESPONSE HEADERS only. This is a
+ * short, scoped bound: a CDN that accepts the TCP connect but never sends a
+ * status line must not hang bootstrap. It is cleared the instant fetch()
+ * resolves with headers, so it can NEVER abort a healthy body stream that is
+ * slow-but-progressing (R5) — the body phase is governed solely by the
+ * per-chunk inactivity watchdog below.
+ */
+const DOWNLOAD_CONNECT_TIMEOUT_MS = 30_000;
+
+export async function downloadFile(
   url: string,
   destPath: string,
   expectedSha256: string | null,
+  // Test seam: override the watchdog/connect bounds so the regression test runs
+  // in milliseconds instead of the 30s production interval. Production callers
+  // pass three args; the defaults preserve the prior behavior.
+  opts?: { inactivityMs?: number; connectTimeoutMs?: number },
 ): Promise<{ sizeBytes: number }> {
-  // K39: bound the overall request so a CDN that accepts the connection but
-  // never responds can't hang bootstrap forever. Generous (120s) because this
-  // covers large model downloads (~600MB reranker) on a slow link — the
-  // per-chunk inactivity watchdog below is the tighter guard once bytes flow.
-  const res = await fetch(url, { redirect: "follow", signal: AbortSignal.timeout(120_000) });
+  const INACTIVITY_MS = opts?.inactivityMs ?? DOWNLOAD_INACTIVITY_MS;
+  const CONNECT_TIMEOUT_MS = opts?.connectTimeoutMs ?? DOWNLOAD_CONNECT_TIMEOUT_MS;
+
+  // R5: bound ONLY the connection/headers phase, not the whole body stream. A
+  // fixed total-duration AbortSignal on the body would abort a healthy
+  // slow-but-progressing large download (BGE-M3 ~420MB / reranker ~606MB) on a
+  // modest link — a deterministic cold-start failure. Use an AbortController
+  // whose timer we clear the moment headers arrive, so the body phase is never
+  // wall-clock-capped. The per-chunk inactivity watchdog (below) is the only
+  // body-phase guard; it alone distinguishes "wedged" from "slow".
+  const connectController = new AbortController();
+  const connectTimer = setTimeout(() => {
+    connectController.abort(
+      new Error(`download connect timeout: no response headers within ${CONNECT_TIMEOUT_MS}ms for ${url}`),
+    );
+  }, CONNECT_TIMEOUT_MS);
+  let res: Response;
+  try {
+    res = await fetch(url, { redirect: "follow", signal: connectController.signal });
+  } finally {
+    // Headers are in (or the connect aborted/failed). Either way the connect
+    // bound has done its job — disarm it so it can't fire against the body read.
+    clearTimeout(connectTimer);
+  }
   if (!res.ok) {
     throw new Error(`download failed: ${res.status} ${res.statusText} for ${url}`);
   }
@@ -141,52 +183,60 @@ async function downloadFile(
   let bytes = 0;
   const hasher = expectedSha256 ? createHash("sha256") : null;
 
-  // K39: per-chunk inactivity watchdog. The overall AbortSignal.timeout above
-  // can't distinguish "slow but progressing" from "wedged"; a stalled transfer
-  // mid-stream (CDN hangs after sending headers + some bytes) would otherwise
-  // block the drain loop indefinitely. Reset the timer on every chunk; if no
-  // chunk arrives within INACTIVITY_MS, destroy the stream so the for-await
-  // rejects and the throw propagates out of downloadFile (same shape as a
-  // pre-existing network error) instead of hanging forever. The leftover
-  // .partial is harmless — a retry truncates+overwrites it via createWriteStream
-  // and rename only fires after a clean drain + hash check.
-  const INACTIVITY_MS = 30_000;
+  // R14/R15: stream via pipeline() instead of a manual write/drain loop.
+  //   - R14 (writer fd leak): pipeline() destroys the destination stream on a
+  //     source error AND on a transform error, so the .partial fd is always
+  //     closed even when the transfer throws mid-stream. The old try/finally
+  //     only cleared the stall timer — writer.end() was skipped on throw.
+  //   - R15 (drain hang): pipeline() propagates write-side errors (ENOSPC/EIO)
+  //     and rejects, where the old `writer.once("drain")` had no error/reject
+  //     path and would park forever.
+  //
+  // The Source is the fetch body normalized to a Node Readable. The Transform
+  // is a pass-through that (a) counts bytes, (b) feeds the sha256 hasher, and
+  // (c) re-arms the inactivity watchdog on every chunk. The watchdog destroys
+  // the SOURCE on stall; pipeline then rejects and tears down every stage.
+  const source = toNodeReadable(res.body);
+
+  // R5 + watchdog: per-chunk inactivity timer. Reset on every chunk; if no
+  // chunk arrives within INACTIVITY_MS, destroy the source so pipeline()
+  // rejects (same shape as a pre-existing network error) instead of hanging.
+  // The leftover .partial is harmless — a retry truncates+overwrites it via
+  // createWriteStream and rename only fires after a clean finish + hash check.
   let stallTimer: ReturnType<typeof setTimeout> | undefined;
-  const body = res.body as unknown as AsyncIterable<Uint8Array> & {
-    destroy?: (err?: Error) => void;
-    cancel?: () => void;
-  };
   const armStallTimer = () => {
     if (stallTimer) clearTimeout(stallTimer);
     stallTimer = setTimeout(() => {
-      const err = new Error(
-        `download stalled: no data for ${INACTIVITY_MS}ms after ${bytes} bytes for ${url}`,
+      source.destroy(
+        new Error(
+          `download stalled: no data for ${INACTIVITY_MS}ms after ${bytes} bytes for ${url}`,
+        ),
       );
-      // Tear down the underlying stream so the for-await loop throws. Node's
-      // fetch body exposes destroy(); fall back to cancel() for a web stream.
-      if (typeof body.destroy === "function") body.destroy(err);
-      else if (typeof body.cancel === "function") body.cancel();
     }, INACTIVITY_MS);
   };
 
-  // Node's fetch returns a web ReadableStream; iterate it as bytes.
-  // ReadableStream is async-iterable in Node 18+; cast through unknown.
-  try {
-    armStallTimer();
-    for await (const chunk of body) {
+  const meter = new Transform({
+    transform(chunk: Buffer, _enc, cb) {
       armStallTimer(); // progress — reset the inactivity deadline
       if (hasher) hasher.update(chunk);
       bytes += chunk.length;
-      if (!writer.write(chunk)) {
-        await new Promise<void>((resolve) => writer.once("drain", () => resolve()));
-      }
-    }
+      cb(null, chunk);
+    },
+  });
+
+  try {
+    armStallTimer(); // arm before the first byte so a never-starting body trips
+    // pipeline closes writer on completion AND destroys all stages on any
+    // error (source stall, network reset, write error). No manual end()/destroy.
+    await pipeline(source, meter, writer);
+  } catch (err) {
+    // Defense-in-depth: pipeline already destroyed the writer, but ensure the
+    // partial file is gone so a retry starts clean and no fd is left dangling.
+    await rm(tmpPath, { force: true }).catch(() => {});
+    throw err;
   } finally {
     if (stallTimer) clearTimeout(stallTimer);
   }
-  await new Promise<void>((resolve, reject) => {
-    writer.end((err: unknown) => (err ? reject(err) : resolve()));
-  });
 
   if (hasher && expectedSha256) {
     const actual = hasher.digest("hex");
@@ -200,6 +250,24 @@ async function downloadFile(
 
   await rename(tmpPath, destPath);
   return { sizeBytes: bytes };
+}
+
+/** Normalize a fetch() body to a Node Readable for pipeline().
+ *
+ *  Node's global fetch returns a WHATWG ReadableStream (web stream). pipeline()
+ *  from node:stream/promises wants a Node stream. Readable.fromWeb() bridges it
+ *  and — critically for the watchdog — propagates Readable.destroy(err) back to
+ *  the web stream's cancel(), so destroying the returned Readable on stall
+ *  actually tears down the underlying socket. If fromWeb is unavailable or the
+ *  body is already a Node Readable (some runtimes/mocks), fall back to
+ *  Readable.from over the async-iterable. */
+function toNodeReadable(body: unknown): Readable {
+  if (body instanceof Readable) return body;
+  const fromWeb = (Readable as unknown as { fromWeb?: (s: unknown) => Readable }).fromWeb;
+  if (typeof fromWeb === "function") {
+    return fromWeb(body);
+  }
+  return Readable.from(body as AsyncIterable<Uint8Array>);
 }
 
 async function ensureNpmDeps(

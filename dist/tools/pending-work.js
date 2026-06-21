@@ -341,8 +341,23 @@ export async function handleFetchPendingWork(state, _session, _args) {
  * buildWorkPayload and the success/failure paths in handleCommitWorkResults).
  * The stale-recovery transaction in handleFetchPendingWork above uses the
  * same pattern for stuck-processing rows.
+ *
+ * R9: `guardToken` makes the terminal transition ownership-gated. The K15
+ * `stillOwned` pre-check in handleCommitWorkResults is a snapshot taken BEFORE
+ * a multi-minute commitResults; if the row is reclaimed by another drainer
+ * DURING that window (its committing_token changes), an UNGUARDED
+ * markTerminal(completed) would still stamp this row completed → the residual
+ * C1 double-write. When guardToken is passed, the terminal UPDATE itself
+ * carries `WHERE status="committing" AND committing_token=$guard`, so the
+ * stamp lands ONLY if we still own the row at write time. Zero matched rows
+ * means "reclaimed mid-write" → returns false so the caller discards the
+ * outcome rather than reporting a completion it doesn't own. Callers that pass
+ * NO guardToken (buildWorkPayload's self-complete early-exits, which act on a
+ * row freshly claimed in "processing") keep the original unconditional
+ * behavior. Returns true when the row was terminalized or archived by THIS
+ * call, false only when a guardToken was supplied and no longer matched.
  */
-async function markTerminal(state, workId, sessionId, workType, status) {
+async function markTerminal(state, workId, sessionId, workType, status, guardToken) {
     assertRecordId(workId);
     // v0.7.95 append-only: was DELETE on terminal-sibling collision — now
     // soft-archives. Sibling already occupies the canonical (session, work,
@@ -351,22 +366,68 @@ async function markTerminal(state, workId, sessionId, workType, status) {
     // status for audit WITHOUT setting `status` (which would collide on the
     // (session,work_type,status) UNIQUE index — the very reason this branch
     // archives instead). (audit C4)
+    //
+    // R9 ownership gate: when guardToken is supplied the ELSE branch's UPDATE
+    // matches only a row still in "committing" carrying THIS token. The
+    // returned $changed array (RETURN AFTER) is empty when the gate didn't
+    // match — i.e. the row was reclaimed/terminalized by someone else
+    // mid-commit — and we report false so the caller discards its outcome.
+    // The sibling-archive branch is NOT gated: if a canonical sibling already
+    // holds the triple, this row is redundant regardless of who owns it, and
+    // archiving it (active=false) can never double-write knowledge.
     try {
-        await state.store.queryExec(`BEGIN TRANSACTION;
-       LET $siblings = (SELECT id FROM pending_work
+        if (!guardToken) {
+            // UNGUARDED path (buildWorkPayload self-complete early-exits): unchanged
+            // from the original — a fire-and-forget BEGIN/COMMIT via queryExec. These
+            // callers act on a row they JUST claimed in "processing", so there is no
+            // mid-write reclaim to defend against and no return value to read.
+            await state.store.queryExec(`BEGIN TRANSACTION;
+         LET $siblings = (SELECT id FROM pending_work
+           WHERE session_id = $sid AND work_type = $wt AND status = $st AND id != ${workId}
+             AND (active = true OR active IS NONE) LIMIT 1);
+         IF array::len($siblings) > 0 THEN
+           UPDATE ${workId} SET
+             active = false,
+             archived_at = time::now(),
+             completed_at = time::now(),
+             archived_status = $st,
+             archive_reason = "terminal_sibling_canonical"
+         ELSE
+           UPDATE ${workId} SET status = $st, completed_at = time::now()
+         END;
+         COMMIT TRANSACTION;`, { sid: sessionId, wt: workType, st: status });
+            return true;
+        }
+        // GUARDED path (R9, commit success/failure): the ELSE-branch UPDATE is
+        // ownership-gated — it matches only a row STILL in "committing" carrying
+        // OUR token. If a reclaim flipped the token mid-commit the UPDATE matches
+        // no row and $changed is empty → we report false so the caller discards a
+        // completion it no longer owns. The return value is read back via
+        // queryMulti's LET + conditional-UPDATE + `RETURN { … }` shape (the proven
+        // maintenance.ts purgeStalePendingWork / purgeEmbedCache idiom). No
+        // explicit BEGIN/COMMIT: the statements run in one request and the C2
+        // UNIQUE-collision race is still caught below by isUniqueViolation — the
+        // wrapper transaction never prevented that collision, the catch did.
+        const res = await state.store.queryMulti(`LET $siblings = (SELECT id FROM pending_work
          WHERE session_id = $sid AND work_type = $wt AND status = $st AND id != ${workId}
            AND (active = true OR active IS NONE) LIMIT 1);
-       IF array::len($siblings) > 0 THEN
-         UPDATE ${workId} SET
+       LET $archived = (IF array::len($siblings) > 0 THEN
+         (UPDATE ${workId} SET
            active = false,
            archived_at = time::now(),
            completed_at = time::now(),
            archived_status = $st,
-           archive_reason = "terminal_sibling_canonical"
-       ELSE
-         UPDATE ${workId} SET status = $st, completed_at = time::now()
-       END;
-       COMMIT TRANSACTION;`, { sid: sessionId, wt: workType, st: status });
+           archive_reason = "terminal_sibling_canonical" RETURN AFTER)
+       ELSE [] END);
+       LET $changed = (IF array::len($siblings) > 0 THEN []
+         ELSE (UPDATE ${workId} SET status = $st, completed_at = time::now()
+           WHERE status = "committing" AND committing_token = $guard RETURN AFTER) END);
+       RETURN { changed: array::len($changed), archived: array::len($archived) };`, { sid: sessionId, wt: workType, st: status, guard: guardToken });
+        // Gate matched nothing AND nothing was archived → row reclaimed mid-write.
+        if ((res?.changed ?? 0) === 0 && (res?.archived ?? 0) === 0) {
+            return false;
+        }
+        return true;
     }
     catch (e) {
         // C2: the LET $siblings check is a snapshot read. Under concurrency two
@@ -377,7 +438,9 @@ async function markTerminal(state, workId, sessionId, workType, status) {
         // canonical triple, so archive this row instead of re-throwing.
         if (isUniqueViolation(e)) {
             await state.store.queryExec(`UPDATE ${workId} SET active = false, archived_at = time::now(), completed_at = time::now(), archived_status = $st, archive_reason = "terminal_unique_race_lost"`, { st: status }).catch(err => swallow.warn("markTerminal:raceArchive", err));
-            return;
+            // A sibling holds the canonical triple — this row is archived, not
+            // reclaimed-out-from-under-us. The caller's outcome stays committed.
+            return true;
         }
         throw e;
     }
@@ -450,13 +513,50 @@ async function buildWorkPayload(item, state) {
                 await markTerminal(state, item.id, item.session_id, item.work_type, "completed");
                 return { work_id: item.id, work_type: "causal_graduate", empty: true, message: "No causal chains ready for graduation. Already marked complete." };
             }
+            // R8: BOUND the per-fetch claim. Pre-R8 the claim stamped graduated_at on
+            // the ENTIRE ungraduated backlog of every eligible type in one shot (no
+            // LIMIT) — so a single transient fetch→synth→commit failure stranded the
+            // whole backlog (all those chains consumed, never re-tried, since the
+            // commit no longer re-stamps and only an explicit un-stamp re-opens them).
+            // Capping the claim means one failure can strand at most CLAIM_CAP chains;
+            // the remainder stay graduated_at IS NONE and re-trigger on the NEXT
+            // causal_graduate fetch. SurrealDB rejects LIMIT on UPDATE ("Unexpected
+            // token 'LIMIT'", GH #17), so bound via a SELECT…LIMIT of candidate ids
+            // and claim `WHERE … AND id IN $ids` — the per-row `graduated_at IS NONE`
+            // guard on the UPDATE keeps the claim atomic and race-safe even though the
+            // SELECT and UPDATE are two round-trips (a concurrent item flipping rows
+            // between them just shrinks our won-set, which is exactly the K31 design).
+            const CLAIM_CAP = 200;
+            const candidates = await store.queryFirst(`SELECT id FROM causal_chain
+           WHERE success = true AND confidence >= 0.7 AND graduated_at IS NONE
+             AND chain_type IN $types
+           ORDER BY created_at ASC LIMIT $cap`, { types: eligibleTypes, cap: CLAIM_CAP });
+            if (candidates.length === 0) {
+                await markTerminal(state, item.id, item.session_id, item.work_type, "completed");
+                return { work_id: item.id, work_type: "causal_graduate", empty: true, message: "Causal chains already claimed by a concurrent graduation. Already marked complete." };
+            }
+            const candidateIds = candidates.map(c => String(c.id)).filter(s => { try {
+                assertRecordId(s);
+                return true;
+            }
+            catch {
+                return false;
+            } });
+            if (candidateIds.length === 0) {
+                await markTerminal(state, item.id, item.session_id, item.work_type, "completed");
+                return { work_id: item.id, work_type: "causal_graduate", empty: true, message: "Causal chains already claimed by a concurrent graduation. Already marked complete." };
+            }
             // Atomic claim: per-row `graduated_at IS NONE` guard + SET means a
             // concurrent identical UPDATE can never re-win a row we just stamped.
             // RETURN BEFORE yields the rows as they were pre-stamp (graduated_at NONE),
-            // i.e. exactly the set THIS item won.
+            // i.e. exactly the set THIS item won (intersection of our candidate ids and
+            // the rows still ungraduated at UPDATE time). The candidate ids are
+            // interpolated directly into `id IN [${list}]` — a string-array BINDING is
+            // treated as literal strings by SurrealDB and silently matches nothing
+            // (surreal.ts getSessionRetrievedMemories); they are assertRecordId-clean.
             const won = await store.queryFirst(`UPDATE causal_chain SET graduated_at = time::now()
            WHERE success = true AND confidence >= 0.7 AND graduated_at IS NONE
-             AND chain_type IN $types
+             AND chain_type IN $types AND id IN [${candidateIds.join(", ")}]
            RETURN BEFORE`, { types: eligibleTypes });
             if (won.length === 0) {
                 // A concurrent causal_graduate item claimed these chains first — nothing
@@ -464,6 +564,28 @@ async function buildWorkPayload(item, state) {
                 await markTerminal(state, item.id, item.session_id, item.work_type, "completed");
                 return { work_id: item.id, work_type: "causal_graduate", empty: true, message: "Causal chains already claimed by a concurrent graduation. Already marked complete." };
             }
+            // R8: persist the won chain ids onto THIS work item (top-level field on
+            // the SCHEMALESS pending_work row) so the commit handler — or the catch
+            // path in handleCommitWorkResults — can un-stamp them back to
+            // graduated_at = NONE if synthesis fails or produces zero skills, the
+            // failure-recovery the K31 claim-at-fetch otherwise lacked. A top-level
+            // field (not a nested payload.* set) sidesteps the set-on-NONE-object
+            // edge case since payload may be NONE here. Best effort: a failed write
+            // just means a future failure can't auto-retry these chains (they
+            // re-trigger once NEW chains re-cross cnt>=3), so swallow rather than
+            // abort the already-successful claim.
+            const wonChainIds = won.map(r => String(r.id)).filter(Boolean);
+            try {
+                assertRecordId(String(item.id));
+                await store.queryExec(`UPDATE ${item.id} SET won_chain_ids = $ids`, { ids: wonChainIds });
+            }
+            catch (e) {
+                swallow.warn("pending-work:persist-won-chain-ids", e);
+            }
+            // Reflect the persisted ids on the in-memory item too, so a same-process
+            // failure path (catch in handleCommitWorkResults) can un-stamp even though
+            // it never re-reads the row after the claim.
+            item.won_chain_ids = wonChainIds;
             // Re-group won rows by chain_type for the synthesis payload.
             const byType = new Map();
             for (const row of won) {
@@ -618,24 +740,98 @@ export async function handleCommitWorkResults(state, _session, args) {
             }));
         }
         const outcome = await commitResults(item, results, state);
-        // Mark completed. Uses markTerminal so a sibling completed row for the
-        // same (session, work_type) doesn't collide on pw_session_worktype_status_unique;
-        // in that case this row is DELETEd instead.
-        await markTerminal(state, workId, item.session_id, item.work_type, "completed");
+        // R9: gate the terminal stamp on ownership AT WRITE TIME. The stillOwned
+        // pre-check above is fail-fast only — it is snapshotted BEFORE the
+        // multi-minute commitResults, so a reclaim DURING the embed/synthesis loop
+        // would slip past it. Passing myToken makes markTerminal's UPDATE itself
+        // `WHERE status="committing" AND committing_token=myToken`; if the row was
+        // reclaimed mid-write it matches nothing and returns false. We then DISCARD
+        // the outcome instead of reporting a completion we no longer own — the new
+        // owner is responsible for terminalizing the row, and reporting success here
+        // would re-open the C1 double-completion the K15 fix exists to close.
+        const stamped = await markTerminal(state, workId, item.session_id, item.work_type, "completed", myToken);
+        if (!stamped) {
+            log.warn(`[pending_work] commit ownership lost DURING write for ${item.work_type} (${workId}) — outcome committed but completion not stamped (row reclaimed); reporting skipped`);
+            return text(JSON.stringify({
+                success: false,
+                skipped: true,
+                message: `work item ${workId} was reclaimed during commitResults; completion not stamped to avoid a double-complete`,
+            }));
+        }
         log.info(`[pending_work] Completed ${item.work_type} (${workId})`);
         return text(JSON.stringify({ success: true, work_type: item.work_type, ...outcome }));
     }
     catch (e) {
+        // R8: a causal_graduate synthesis that THREW must release the chains it
+        // claimed at fetch time — buildWorkPayload stamped graduated_at on the won
+        // chains BEFORE the agent ran (the K31 claim-at-fetch), and the commit
+        // handler no longer re-stamps, so without this un-stamp those chains are
+        // permanently consumed (graduated_at set, never synthesized into a skill).
+        // The won chain ids were persisted onto the work item payload at claim time;
+        // reset them to NONE so a later causal_graduate item retries them. Best
+        // effort: a failed un-stamp just defers retry until new chains re-cross the
+        // cnt>=3 bar (same as the no-op-commit path below).
+        if (item.work_type === "causal_graduate") {
+            await unstampGraduatedChains(item, state)
+                .catch(err => swallow.warn("pending-work:unstamp-on-error", err));
+        }
         // Mark failed. Uses markTerminal so a sibling failed row for the same
         // (session, work_type) doesn't collide on pw_session_worktype_status_unique;
         // in that case this row is DELETEd instead. If markTerminal itself fails
         // (e.g. DB unreachable), the row stays in "processing" until stale-recovery
         // catches it. Surface the failure to logs so it's not silently lost.
-        await markTerminal(state, workId, item.session_id, item.work_type, "failed")
+        // R9: gate on ownership too — if the row was reclaimed mid-commit the new
+        // owner terminalizes it; a false return is benign here (we are already on
+        // the error path) and just means we didn't own the row at write time.
+        await markTerminal(state, workId, item.session_id, item.work_type, "failed", myToken)
             .catch(e => swallow.warn("pending-work:mark-failed", e));
         log.error(`[pending_work] Failed ${item.work_type} (${workId}):`, e);
         return text(JSON.stringify({ success: false, error: serializeError(e) }));
     }
+}
+/**
+ * R8 failure-recovery: reset graduated_at = NONE on the causal chains a
+ * causal_graduate item CLAIMED at fetch time but failed to synthesize into a
+ * skill (synthesis threw, or produced zero skills). buildWorkPayload stamps
+ * graduated_at on the won chains BEFORE the agent runs and persists their ids
+ * onto the work item (`won_chain_ids` top-level field); this re-opens them so a
+ * later graduation item retries them, instead of stranding them permanently
+ * consumed.
+ *
+ * Idempotent: only resets rows still owned by this claim (graduated_at IS NOT
+ * NONE among the recorded ids). If the ids are missing (legacy row, or the
+ * fetch-side persist write failed), there is nothing to reset and we return 0.
+ */
+async function unstampGraduatedChains(item, state) {
+    const ids = item.won_chain_ids;
+    if (!Array.isArray(ids) || ids.length === 0)
+        return 0;
+    // Canonical id-list pattern (surreal.ts getSessionRetrievedMemories): a
+    // string-array BINDING is treated as literal strings and silently matches
+    // nothing, so after assertRecordId we interpolate the validated record-id
+    // strings directly into `id IN [${list}]` where SurrealDB parses them as
+    // Thing literals. Bound the count defensively (CLAIM_CAP is 200; 5000 is a
+    // generous ceiling against a corrupted payload).
+    const validated = ids
+        .map((x) => String(x))
+        .filter((s) => { try {
+        assertRecordId(s);
+        return true;
+    }
+    catch {
+        return false;
+    } })
+        .slice(0, 5000);
+    if (validated.length === 0)
+        return 0;
+    const idList = validated.join(", ");
+    const res = await state.store.queryMulti(`LET $reset = (UPDATE causal_chain SET graduated_at = NONE
+       WHERE id IN [${idList}] AND graduated_at IS NOT NONE RETURN BEFORE);
+     RETURN { n: array::len($reset) };`);
+    const n = Number(res?.n ?? 0);
+    if (n > 0)
+        log.info(`[pending_work] R8 un-stamped ${n} causal chain(s) after failed/no-op graduation (${item.id})`);
+    return n;
 }
 function computeCurationScore(transcript, turnToolNames = []) {
     const recallInText = /\b(recall|mcp__\w+__recall)\b/gi.test(transcript);
@@ -844,9 +1040,20 @@ async function commitResults(item, results, state) {
             // duplicate-skill window: two items fetched the same ungraduated chains
             // and both reached this point before either watermark landed. Stamping at
             // claim time closes that window; this handler now just persists the
-            // synthesized skills. An empty/no-op synthesis "consumes" the claim by
-            // design — the already-seen chains should not re-synthesize, and NEW
-            // chains of the same type re-trigger graduation once they re-cross cnt>=3.
+            // synthesized skills.
+            //
+            // R8 failure-recovery: a no-op synthesis (zero skills created — agent
+            // returned [], or every candidate skill was dropped by the parser) must
+            // RELEASE the chains it claimed, not strand them. Pre-R8 the comment here
+            // said the claim was "consumed by design"; that left a transient empty
+            // commit permanently burning the whole claimed backlog (graduated_at set,
+            // never synthesized). Un-stamp the won chains back to graduated_at = NONE
+            // so a later graduation item retries them. When >=1 skill WAS created we
+            // keep the watermark (those chains are genuinely graduated).
+            if (created === 0) {
+                await unstampGraduatedChains(item, state)
+                    .catch(err => swallow.warn("pending-work:unstamp-on-noop", err));
+            }
             return { skills_created: created };
         }
         case "soul_generate": {

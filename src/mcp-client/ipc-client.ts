@@ -94,9 +94,19 @@ export class IpcClient {
 
   private async doConnect(): Promise<void> {
     return new Promise<void>((resolve, reject) => {
+      // TCP mode requires a concrete port. Port 0 means "OS-assigned" on a
+      // LISTEN socket but is invalid for an outbound connect — guard against a
+      // misconfigured construction silently dialing port 0 and hanging.
+      if (!this.opts.socketPath && !(Number.isInteger(this.opts.tcpPort) && (this.opts.tcpPort as number) > 0)) {
+        reject(new IpcError(
+          IpcErrorCode.DAEMON_RESTARTING,
+          `IpcClient TCP mode requires a positive tcpPort (got ${String(this.opts.tcpPort)})`,
+        ));
+        return;
+      }
       const sock = this.opts.socketPath
         ? createConnection({ path: this.opts.socketPath })
-        : createConnection({ host: this.opts.tcpHost ?? "127.0.0.1", port: this.opts.tcpPort ?? 0 });
+        : createConnection({ host: this.opts.tcpHost ?? "127.0.0.1", port: this.opts.tcpPort as number });
       const onError = (err: Error) => {
         sock.removeListener("connect", onConnect);
         // Destroy the failed socket so it doesn't linger in Node's internal

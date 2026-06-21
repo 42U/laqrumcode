@@ -146,11 +146,16 @@ export async function writeExtractionResults(result, sessionId, store, embedding
             counts.concept++;
             priorState.conceptNames.push(c.name);
             try {
+                // R12/K16: compute the richer embed target ALWAYS (cheap string work),
+                // not just when the embedder is up, so it can be persisted as
+                // embedding_target even if the embed itself fails — that's exactly the
+                // case backfillConceptEmbeddings must heal with the SAME target the live
+                // path would have used (otherwise the heal diverges to content-only).
+                const embeddingText = Array.isArray(c.searchTerms) && c.searchTerms.length > 0
+                    ? `${c.content} ${c.searchTerms.join(". ")}`
+                    : c.content;
                 let emb = null;
                 if (embeddings.isAvailable()) {
-                    const embeddingText = Array.isArray(c.searchTerms) && c.searchTerms.length > 0
-                        ? `${c.content} ${c.searchTerms.join(". ")}`
-                        : c.content;
                     try {
                         emb = await embeddings.embed(embeddingText);
                     }
@@ -175,6 +180,10 @@ export async function writeExtractionResults(result, sessionId, store, embedding
                     projectId,
                     derivedFromTargetId: targetForProvenance,
                     precomputedVec: emb,
+                    // R12/K16: persist the daemon's `${content} ${searchTerms}` form so a
+                    // backfill heal reproduces it (diverges from name only when
+                    // searchTerms exist — exactly the persist condition in upsertConcept).
+                    embeddingTarget: embeddingText,
                 });
                 if (conceptId) {
                     extractedConceptIds.push(conceptId);

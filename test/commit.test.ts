@@ -44,6 +44,7 @@ describe("commitKnowledge — concept kind", () => {
       "test",
       undefined,
       undefined,
+      undefined, // R12/K16: embeddingTarget (unset here → undefined)
     );
   });
 
@@ -89,7 +90,7 @@ describe("commitKnowledge — concept kind", () => {
       precomputedVec: vec,
     });
     expect(state.embeddings.embed).not.toHaveBeenCalled();
-    expect(state.store.upsertConcept).toHaveBeenCalledWith("with-vec", vec, "test", undefined, undefined);
+    expect(state.store.upsertConcept).toHaveBeenCalledWith("with-vec", vec, "test", undefined, undefined, undefined);
   });
 
   it("still commits the concept row even when linking fails", async () => {

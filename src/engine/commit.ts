@@ -42,8 +42,14 @@ export interface CommitDeps {
 
 export interface CommitConceptData {
   kind: "concept";
-  /** The concept label (also used as the embedding target). */
+  /** The concept label (also used as the embedding target unless embeddingTarget is set). */
   name: string;
+  /** R12/K16: optional richer embed target (e.g. the daemon's
+   *  `${content} ${searchTerms}`). When set, this is embedded instead of `name`
+   *  and persisted on the row (when it diverges from name) so
+   *  backfillConceptEmbeddings can reproduce the same vector on a heal.
+   *  Mirrors CommitMemoryData.embeddingText (K51). */
+  embeddingTarget?: string;
   /** Optional source node asserting this concept (turn:xxx, memory:xxx, artifact:xxx). */
   sourceId?: string;
   /** Edge type from sourceId to the concept. Required if sourceId set. */
@@ -489,15 +495,20 @@ async function commitConcept(
   const { store, embeddings } = deps;
   const logTag = `commit:concept:${data.source ?? "anon"}`;
 
-  // 1. Embed the name (or reuse caller's vec).
+  // 1. Embed the target (or reuse caller's vec). R12/K16: when embeddingTarget
+  //    is set, embed it (not the bare name) so the create-time vector matches
+  //    the daemon's richer `${content} ${searchTerms}` form; the same target is
+  //    persisted in step 2 so a heal reproduces it. Mirrors commitMemory's
+  //    `embeddingText ?? text` (K51).
   let embedding: number[] | null = data.precomputedVec ?? null;
   if (!embedding && embeddings.isAvailable()) {
-    try { embedding = await embeddings.embed(data.name); }
+    try { embedding = await embeddings.embed(data.embeddingTarget ?? data.name); }
     catch (e) { swallow.warn(`${logTag}:embed`, e); }
   }
 
-  // 2. Upsert the concept row (provenance passed through when supplied).
-  const { id: conceptId, existed: conceptExisted } = await store.upsertConcept(data.name, embedding, data.source, data.provenance, data.projectId);
+  // 2. Upsert the concept row (provenance + embed target passed through when
+  //    supplied). embeddingTarget is persisted only when it diverges from name.
+  const { id: conceptId, existed: conceptExisted } = await store.upsertConcept(data.name, embedding, data.source, data.provenance, data.projectId, data.embeddingTarget);
   let edges = 0;
 
   // 3. Link source → concept via the requested edge, if caller provided one.

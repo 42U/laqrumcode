@@ -104,6 +104,11 @@ const startedAt = Date.now();
 /** Module-level state — once initialized, every IPC handler closes over this.
  *  Mirrors mcp-server.ts's globalState pattern but lives in the daemon now. */
 let globalState = null;
+/** R13: module-level handle to the JSON-RPC server, set in main(). The
+ *  stale-session reaper (armed in initializeStack, a module-level fn that can't
+ *  see main()'s local `server`) reads server.attachedSessionIds() so it never
+ *  reaps a session whose client socket is still attached. */
+let daemonServer = null;
 /** K1: periodic stale-session reaper. reapStaleSessions() existed but had ZERO
  *  callers — the daemon's sessions Map was only ever pruned by the SessionEnd
  *  hook's removeSession(), so any session whose SessionEnd never fired (crashed
@@ -239,7 +244,16 @@ async function initializeStack() {
     if (!sessionReaperTimer) {
         sessionReaperTimer = setInterval(() => {
             try {
-                const reaped = globalState?.reapStaleSessions() ?? 0;
+                // R13: pass an attachment-aware predicate so a session whose client
+                // socket is still attached is never reaped — protects a long agentic
+                // turn (turnStartMs only resets at turn START, so one multi-hour turn
+                // looks "stale") and any still-live client from being dropped mid-turn.
+                // The in-progress-turn guard (active subagents / pending tool args)
+                // lives inside reapStaleSessions itself. If the server isn't up yet the
+                // predicate is omitted (degrades to the prior age-only behavior).
+                const attached = daemonServer?.attachedSessionIds();
+                const isLive = attached ? (sid) => attached.has(sid) : undefined;
+                const reaped = globalState?.reapStaleSessions(undefined, isLive) ?? 0;
                 if (reaped > 0)
                     log.info(`[daemon] stale-session reaper: reaped ${reaped} idle session(s), ${globalState?.sessionCount ?? 0} remaining`);
             }
@@ -709,6 +723,21 @@ async function main() {
         catch (e) {
             log.warn(`[daemon] stopHttpApi: ${e.message}`);
         }
+        // R3: drain detached Stop-path background work (evaluateRetrieval writes the
+        // last turn's ACAN rows: retrieval_outcome + turn_score) BEFORE disposing
+        // the reranker or closing Surreal — both server.close()'s RPC drain and
+        // globalState.shutdown()'s store.dispose() would otherwise race the in-flight
+        // eval, losing those rows and crashing the eval mid-write. Bounded (<=3s,
+        // comfortably inside the 8s watchdog) and after both listeners are closed,
+        // so no new Stop hooks can register more work past this point.
+        if (globalState) {
+            try {
+                await globalState.awaitPendingTasks(3_000);
+            }
+            catch (e) {
+                log.warn(`[daemon] awaitPendingTasks: ${e.message}`);
+            }
+        }
         if (globalState) {
             try {
                 await globalState.shutdown();
@@ -751,6 +780,10 @@ async function main() {
         idleTimeoutMs,
         onIdleReap: reaperExit(`idle timeout (${Math.round(idleTimeoutMs / 1000)}s) elapsed with no clients`),
     });
+    // R13: publish the server handle so the module-level stale-session reaper
+    // (armed in initializeStack) can consult attachedSessionIds() and skip
+    // reaping sessions whose client socket is still connected.
+    daemonServer = server;
     // ── Meta handlers (always available, no bootstrap dependency) ──
     server.register("meta.handshake", async (params, ctx) => {
         // Register caller identity if provided. Pre-0.7.22 clients send empty

@@ -189,6 +189,25 @@ export class GlobalPluginState {
      * GC reclaims those maps with the instance.
      */
     sessionRemovedCallbacks = new Set();
+    /**
+     * R3: registry of detached "fire-and-forget" background promises that the
+     * graceful-shutdown path must drain before disposing shared resources.
+     *
+     * The Stop hook kicks off {@link import("./retrieval-quality.js").evaluateRetrieval}
+     * fire-and-forget so the user-visible turn boundary isn't blocked on the
+     * cross-encoder. But that work writes the LAST turn's ACAN rows
+     * (retrieval_outcome + turn_score). The server's in-flight drain only counts
+     * RPCs still executing in dispatchLine — the Stop RPC has already returned by
+     * the time the eval runs, so the drain skipped it, and gracefulCleanup raced
+     * straight into disposeReranker()/shutdownManagedSurreal({force}), tearing the
+     * reranker and DB out from under the in-flight eval and losing those rows.
+     *
+     * Register the promise here; gracefulCleanup awaits {@link awaitPendingTasks}
+     * (bounded) BEFORE disposing the reranker / force-closing Surreal. Entries
+     * self-remove on settle so the Set never grows unbounded on a long-lived
+     * daemon (the same per-host leak class this round of hardening targets).
+     */
+    pendingTasks = new Set();
     constructor(config, store, embeddings) {
         this.config = config;
         this.store = store;
@@ -198,23 +217,37 @@ export class GlobalPluginState {
     getOrCreateSession(sessionKey, sessionId) {
         let session = this.sessions.get(sessionKey);
         if (!session) {
-            // K1 backstop: evict the oldest session(s) before inserting a new one if
+            // K1 backstop: evict the COLDEST session(s) before inserting a new one if
             // we're at the cap. Fires onSessionRemoved for each eviction so
             // module-scoped session-keyed maps clear too (same contract as
             // removeSession / reapStaleSessions). Guards against an unbounded Map on
             // a long-lived daemon when normal removal lags or stalls.
+            //
+            // R7: eviction targets the least-recently-ACCESSED entry, not the
+            // oldest-by-creation. We maintain LRU recency by deleting+re-setting on
+            // every access (the existing-session branch below and getSession), so
+            // sessions.keys().next() yields the genuinely coldest entry — the same
+            // delete+re-insert trick embeddings.ts uses for its L1 cache. Without
+            // this the cap dropped the longest-LIVED active session first (FIFO),
+            // silently resetting a live mid-conversation session.
             while (this.sessions.size >= this.maxSessions) {
-                const oldestKey = this.sessions.keys().next().value;
-                if (oldestKey === undefined)
+                const coldestKey = this.sessions.keys().next().value;
+                if (coldestKey === undefined)
                     break;
-                const evicted = this.sessions.get(oldestKey);
-                this.sessions.delete(oldestKey);
+                const evicted = this.sessions.get(coldestKey);
+                this.sessions.delete(coldestKey);
                 if (evicted) {
                     this.fireSessionRemovedCallbacks(evicted.sessionId, evicted.surrealSessionId);
                 }
             }
             session = new SessionState(sessionId, sessionKey);
             session.midSessionCleanupThreshold = this.config.thresholds.midSessionCleanupThreshold;
+            this.sessions.set(sessionKey, session);
+        }
+        else {
+            // R7: refresh LRU recency — move this key to the most-recent position so
+            // the cap eviction above never drops an actively-used session.
+            this.sessions.delete(sessionKey);
             this.sessions.set(sessionKey, session);
         }
         return session;
@@ -226,7 +259,18 @@ export class GlobalPluginState {
     }
     /** Get an existing session by key. */
     getSession(sessionKey) {
-        return this.sessions.get(sessionKey);
+        const session = this.sessions.get(sessionKey);
+        if (session !== undefined) {
+            // R7: refresh LRU recency on every read so the K1 size-cap eviction in
+            // getOrCreateSession drops the genuinely coldest session, not the oldest
+            // by insertion order. Every hook (Stop/PostToolUse/…) routes through here,
+            // so an actively-used session keeps getting bumped to the most-recent slot
+            // and survives the cap. Delete+re-set is the same O(1) LRU bump pattern in
+            // embeddings.ts's L1 cache.
+            this.sessions.delete(sessionKey);
+            this.sessions.set(sessionKey, session);
+        }
+        return session;
     }
     /**
      * Register a callback to run when a session is removed (via SessionEnd
@@ -270,16 +314,47 @@ export class GlobalPluginState {
             return;
         this.fireSessionRemovedCallbacks(session.sessionId, session.surrealSessionId);
     }
-    /** Reap sessions that have been idle for longer than maxAgeMs. */
-    reapStaleSessions(maxAgeMs = 2 * 60 * 60_000) {
+    /**
+     * Reap sessions that have been idle for longer than maxAgeMs.
+     *
+     * R13: the bare turnStartMs-age test could drop a session that is still
+     * LIVE — a long agentic turn (turnStartMs is only reset at turn start, so a
+     * single multi-hour turn looks "stale") or a session whose client socket is
+     * still attached. Reaping such a session orphans its subagent rows and
+     * unconsumed pending tool args, and resets mid-conversation state. We add two
+     * guards, both fail-safe (skip-on-doubt — never reap when liveness is
+     * uncertain):
+     *
+     *   1. {@link isLive} — daemon threads in a predicate backed by the set of
+     *      session ids whose client socket is currently attached (server.clients).
+     *      A session with a live socket is never idle, regardless of turn age.
+     *
+     *   2. in-progress turn — a non-empty {@link SessionState._activeSubagents} or
+     *      {@link SessionState.pendingToolArgs} means a turn is mid-flight (a
+     *      subagent hasn't reported SubagentStop, or a PreToolUse stashed args a
+     *      PostToolUse hasn't consumed). Reaping here would strand those rows.
+     *
+     * isLive is matched against {@link SessionState.sessionId} (the Claude Code
+     * session id the attached client reports), NOT the map key — the two differ
+     * for daemon tool calls that key by sessionId-as-sessionKey but the contract
+     * is the sessionId identity either way.
+     */
+    reapStaleSessions(maxAgeMs = 2 * 60 * 60_000, isLive) {
         const now = Date.now();
         let reaped = 0;
         for (const [key, session] of this.sessions) {
-            if (now - session.turnStartMs > maxAgeMs) {
-                this.sessions.delete(key);
-                this.fireSessionRemovedCallbacks(session.sessionId, session.surrealSessionId);
-                reaped++;
-            }
+            if (now - session.turnStartMs <= maxAgeMs)
+                continue;
+            // Guard 1: client socket still attached → not idle, never reap.
+            if (isLive && isLive(session.sessionId))
+                continue;
+            // Guard 2: a turn is in progress (unfinished subagent / unconsumed tool
+            // args) → reaping would orphan those rows. Skip until the turn settles.
+            if (session._activeSubagents.size > 0 || session.pendingToolArgs.size > 0)
+                continue;
+            this.sessions.delete(key);
+            this.fireSessionRemovedCallbacks(session.sessionId, session.surrealSessionId);
+            reaped++;
         }
         return reaped;
     }
@@ -298,6 +373,47 @@ export class GlobalPluginState {
                 // eslint-disable-next-line no-console
                 console.error("[state] onSessionRemoved callback threw:", err);
             }
+        }
+    }
+    /**
+     * R3: register a detached background promise that {@link awaitPendingTasks}
+     * (called from the daemon's graceful shutdown) should drain before shared
+     * resources are torn down. The promise is removed from the set when it
+     * settles — register-and-forget; callers keep their own `.catch`. Swallows
+     * the rejection here too so a rejected detached task can't surface as an
+     * unhandledRejection just because we held a second reference to it.
+     */
+    registerPendingTask(p) {
+        this.pendingTasks.add(p);
+        const done = () => { this.pendingTasks.delete(p); };
+        p.then(done, done);
+    }
+    /** Number of detached background tasks not yet settled. Exposed for tests. */
+    get pendingTaskCount() {
+        return this.pendingTasks.size;
+    }
+    /**
+     * R3: await all currently-registered detached tasks, bounded by timeoutMs so
+     * a wedged task can't hang shutdown past the daemon's 8s watchdog. Uses
+     * allSettled (a rejected eval must not abort the drain) raced against a
+     * timer. Snapshots the set up front; tasks registered after the call begins
+     * are not awaited (shutdown is in progress — no new Stop hooks should arrive).
+     */
+    async awaitPendingTasks(timeoutMs = 3_000) {
+        const tasks = [...this.pendingTasks];
+        if (tasks.length === 0)
+            return;
+        let timer;
+        const timeout = new Promise((resolve) => {
+            timer = setTimeout(resolve, timeoutMs);
+            timer.unref?.();
+        });
+        try {
+            await Promise.race([Promise.allSettled(tasks), timeout]);
+        }
+        finally {
+            if (timer)
+                clearTimeout(timer);
         }
     }
     /** Shut down all shared resources. */

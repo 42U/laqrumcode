@@ -1,8 +1,11 @@
 #!/usr/bin/env node
 /**
  * One-off migration: retype memory_utility_cache.memory_id from `string` to
- * `option<record<memory>>` and rewrite legacy string values back as proper
- * record references.
+ * `option<record<memory>>`, rewrite legacy string values back as proper
+ * record references, AND (R1/K21) fold legacy random-ULID-id rows into the
+ * deterministic per-target id the K21 writer now uses, dropping the
+ * muc_mid_idx UNIQUE index that the deterministic-id scheme makes both
+ * redundant and harmful.
  *
  * Why this exists
  * ---------------
@@ -34,9 +37,31 @@
  *          or references a memory row that has been deleted. These are
  *          preserved in a new `memory_id_legacy` string field on the same
  *          row before the migration and the migrated field is set to NONE.
- *   4. REMOVE FIELD memory_id ON memory_utility_cache.
+ *   4. REMOVE INDEX muc_mid_idx + REMOVE FIELD memory_id ON memory_utility_cache.
  *   5. DEFINE FIELD memory_id ON memory_utility_cache TYPE option<record<memory>>.
+ *      (The muc_mid_idx UNIQUE is NOT re-created — see R1/K21 below.)
  *   6. For each migratable row, UPDATE memory_id back as a RecordId.
+ *
+ * R1/K21 fold-in (after the type migration)
+ * -----------------------------------------
+ *   The K21 writer (surreal.ts updateUtilityCache) now UPSERTs against a
+ *   DETERMINISTIC record id `memory_utility_cache:⟨memory_X⟩` (memory_id with
+ *   ':'→'_'), one row per target. Legacy rows written by the pre-K21 writer
+ *   carry a RANDOM ULID id with memory_id=<target>. After upgrade those legacy
+ *   rows are orphaned: reads keyed `WHERE memory_id IN $ids` still see them, but
+ *   the live writer accumulates into the deterministic-id row, so the two
+ *   diverge — and while muc_mid_idx UNIQUE existed, the deterministic UPSERT
+ *   even FAILED (the legacy row owns the memory_id slot) and writeback froze.
+ *
+ *   This script folds each legacy random-id row into its deterministic-id row:
+ *   it sums util_sum + retrieval_count into memory_utility_cache:⟨memory_X⟩
+ *   (UPSERT … += so a pre-existing deterministic row is augmented, not clobbered)
+ *   then DELETEs the legacy row. memory_utility_cache is a telemetry/cache table
+ *   (re-keying/removing rows is explicitly permitted — NOT a NEVER-DELETE content
+ *   table), so the delete is safe. It also drops muc_mid_idx (the deterministic
+ *   PK already enforces one-row-per-target, exactly like access_stats which has
+ *   no secondary index). Idempotent: a row already at the deterministic id has
+ *   id == memory_utility_cache:⟨memory_X⟩ and is skipped.
  *
  * Safety
  * ------
@@ -220,20 +245,24 @@ async function main() {
   }
 
   // ── Steps 3-4 (atomic): REMOVE INDEX → REMOVE FIELD → DEFINE FIELD →
-  // DEFINE INDEX → writeback of migratable rows, all in a single
-  // BEGIN/COMMIT transaction. If any step fails, SurrealDB auto-rolls back,
-  // leaving the original `string` field + UNIQUE index intact for a retry.
-  // Without this, a failure between REMOVE INDEX and DEFINE INDEX would
-  // leave the unique-key invariant unenforced for the duration the daemon
-  // is running against the partially-migrated DB.
-  console.log(`[migrate-muc-memory-id] BEGIN TRANSACTION: REMOVE INDEX muc_mid_idx + REMOVE FIELD memory_id + DEFINE option<record<…>> + DEFINE INDEX UNIQUE + writeback ${migratable.length} rows…`);
+  // writeback of migratable rows, all in a single BEGIN/COMMIT transaction.
+  // If any step fails, SurrealDB auto-rolls back, leaving the original
+  // `string` field intact for a retry.
+  //
+  // R1/K21: the muc_mid_idx UNIQUE index is REMOVED and NOT re-created. The
+  // K21 writer keys each row on a deterministic per-target record id, so the
+  // record-id PK already guarantees one-row-per-target (like access_stats,
+  // which has no secondary index). Re-creating the UNIQUE here would also
+  // BREAK the daemon: the deterministic-id UPSERT collides with any legacy
+  // random-id row that still owns the same memory_id, freezing writeback —
+  // the very regression this script's fold-in step (below) repairs.
+  console.log(`[migrate-muc-memory-id] BEGIN TRANSACTION: REMOVE INDEX muc_mid_idx (NOT re-created) + REMOVE FIELD memory_id + DEFINE option<record<…>> + writeback ${migratable.length} rows…`);
 
   const sqlParts = [
     `BEGIN TRANSACTION;`,
-    `REMOVE INDEX muc_mid_idx ON memory_utility_cache;`,
+    `REMOVE INDEX IF EXISTS muc_mid_idx ON memory_utility_cache;`,
     `REMOVE FIELD memory_id ON memory_utility_cache;`,
     `DEFINE FIELD memory_id ON memory_utility_cache TYPE option<record<memory> | record<concept> | record<turn>>;`,
-    `DEFINE INDEX muc_mid_idx ON memory_utility_cache FIELDS memory_id UNIQUE;`,
   ];
   const bindings = {};
   for (let i = 0; i < migratable.length; i++) {
@@ -272,6 +301,57 @@ async function main() {
     console.log(`[migrate-muc-memory-id] cleared memory_id on ${updated} rows now living in memory_id_legacy`);
   } catch (e) {
     console.error(`[migrate-muc-memory-id] WARN: cleanup of legacy string values failed: ${e?.message ?? e}`);
+  }
+
+  // ── Step 5c (R1/K21): fold legacy random-ULID-id rows into the deterministic
+  // per-target id the K21 writer uses (memory_utility_cache:⟨<tb>_<key>⟩, i.e.
+  // memory_id with the FIRST ':' replaced by '_' — matching updateUtilityCache's
+  // `memoryId.replace(":", "_")`). Sum util_sum + retrieval_count into the
+  // deterministic row via `+=` (so a pre-existing deterministic row is augmented,
+  // never clobbered) and DELETE the legacy row. memory_utility_cache is a
+  // telemetry/cache table — re-keying/removing rows is explicitly permitted.
+  // Idempotent: a row already AT the deterministic id (id === target) is skipped.
+  try {
+    const foldRows = await qFirst(
+      db,
+      `SELECT id, memory_id, util_sum, retrieval_count, avg_utilization FROM memory_utility_cache WHERE memory_id != NONE AND type::is_record(memory_id) = true`,
+    );
+    let folded = 0;
+    let skippedAlreadyDet = 0;
+    for (const r of foldRows) {
+      const midStr = String(r.memory_id);            // e.g. "memory:abc"
+      const idStr = String(r.id);                    // e.g. "memory_utility_cache:01HX…" or the det. id
+      const colon = midStr.indexOf(":");
+      if (colon < 0) continue;                       // not a record-shaped memory_id; leave alone
+      const detKey = midStr.slice(0, colon) + "_" + midStr.slice(colon + 1); // "memory_abc"
+      const detId = `memory_utility_cache:⟨${detKey}⟩`;
+      // Already the deterministic row → nothing to fold. Compare on the bare
+      // "<tb>:<id>" stringification (idStr) against the unbracketed target.
+      if (idStr === `memory_utility_cache:${detKey}`) { skippedAlreadyDet++; continue; }
+      const us = typeof r.util_sum === "number" ? r.util_sum
+        : (typeof r.avg_utilization === "number" && typeof r.retrieval_count === "number"
+            ? r.avg_utilization * r.retrieval_count   // reconstruct sum from a pre-K21 materialized mean
+            : 0);
+      const rc = typeof r.retrieval_count === "number" ? r.retrieval_count : 0;
+      // Bind the legacy row id as a RecordId for the DELETE rather than
+      // interpolating idStr raw — the key half is opaque (a ULID today, but
+      // don't assume) so a bound param escapes it identically on every driver.
+      const idColon = idStr.indexOf(":");
+      const legacyId = new RecordId("memory_utility_cache", idStr.slice(idColon + 1));
+      try {
+        await db.query(
+          `UPSERT ${detId} SET memory_id = $mid, util_sum += $us, retrieval_count += $rc, last_updated = time::now();
+           DELETE $legacy;`,
+          { mid: new RecordId(midStr.slice(0, colon), midStr.slice(colon + 1)), us, rc, legacy: legacyId },
+        );
+        folded++;
+      } catch (e) {
+        console.error(`[migrate-muc-memory-id] WARN: fold of legacy row ${idStr} → ${detId} failed: ${e?.message ?? e}`);
+      }
+    }
+    console.log(`[migrate-muc-memory-id] R1 fold-in: folded ${folded} legacy random-id row(s) into deterministic ids; ${skippedAlreadyDet} already deterministic`);
+  } catch (e) {
+    console.error(`[migrate-muc-memory-id] WARN: R1 fold-in step failed: ${e?.message ?? e}`);
   }
 
   // ── Step 5: verification pass.

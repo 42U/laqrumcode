@@ -32,7 +32,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 
 import { IpcClient, IpcError } from "./ipc-client.js";
-import { ensureDaemon } from "./daemon-spawn.js";
+import { ensureDaemon, resolveTransport } from "./daemon-spawn.js";
 import { MCP_TOOLS, MCP_TO_IPC_METHOD } from "../shared/tool-defs.js";
 import { IpcErrorCode } from "../shared/ipc-types.js";
 import { log } from "../engine/log.js";
@@ -78,11 +78,17 @@ function compareSemver(a: string, b: string): number {
 }
 
 async function connectAndHandshake(): Promise<IpcClient> {
-  const { socketPath, spawned } = await ensureDaemon({
+  const { socketPath, tcpHost, tcpPort, spawned } = await ensureDaemon({
     log: { info: log.info, warn: log.warn, error: log.error },
   });
-  log.info(`[mcp-client] daemon ${spawned ? "spawned" : "found"} at ${socketPath}`);
-  const client = new IpcClient({ socketPath, log: { info: log.info, warn: log.warn, error: log.error } });
+  // In TCP mode (Windows / KONGCODE_DAEMON_TRANSPORT=tcp) ensureDaemon returns
+  // {tcpHost,tcpPort}; pass socketPath:null so IpcClient connects over TCP.
+  // Otherwise connect over the Unix socket.
+  const where = tcpPort !== undefined ? `TCP ${tcpHost}:${tcpPort}` : socketPath;
+  log.info(`[mcp-client] daemon ${spawned ? "spawned" : "found"} at ${where}`);
+  const client = tcpPort !== undefined
+    ? new IpcClient({ socketPath: null, tcpHost, tcpPort, log: { info: log.info, warn: log.warn, error: log.error } })
+    : new IpcClient({ socketPath, log: { info: log.info, warn: log.warn, error: log.error } });
   await client.connect();
   const handshake = await client.handshake({
     pid: process.pid,
@@ -184,19 +190,30 @@ async function tryOrphanRecycle(
     // Daemon may exit before responding — that's fine, we're trying to kill it.
   }
   try { client.close(); } catch {}
-  // Poll for socket file disappearance so ensureDaemon's fast-path doesn't
-  // latch back onto the dying daemon.
-  const { existsSync } = await import("node:fs");
-  const deadline = Date.now() + 10_000;
-  while (Date.now() < deadline) {
-    if (!existsSync(socketPath)) break;
-    await new Promise(r => setTimeout(r, 100));
+  // Wait for the old daemon to release its endpoint so ensureDaemon's
+  // fast-path doesn't latch back onto the dying daemon. UDS: poll for the
+  // socket FILE disappearing (graceful shutdown unlinks it). TCP: there is no
+  // file to watch — the OS frees the loopback port on process exit, so give a
+  // bounded grace delay before respawn. ensureDaemon's fast-path ping would
+  // still reach the daemon if it lingers, which is harmless (we'd reuse it).
+  if (resolveTransport() === "tcp") {
+    await new Promise(r => setTimeout(r, 1_000));
+  } else {
+    const { existsSync } = await import("node:fs");
+    const deadline = Date.now() + 10_000;
+    while (Date.now() < deadline) {
+      if (!existsSync(socketPath)) break;
+      await new Promise(r => setTimeout(r, 100));
+    }
   }
   const fresh = await ensureDaemon({
     log: { info: log.info, warn: log.warn, error: log.error },
   });
-  log.info(`[mcp-client] post-recycle daemon ${fresh.spawned ? "spawned" : "found"} at ${fresh.socketPath}`);
-  const newClient = new IpcClient({ socketPath: fresh.socketPath, log: { info: log.info, warn: log.warn, error: log.error } });
+  const freshWhere = fresh.tcpPort !== undefined ? `TCP ${fresh.tcpHost}:${fresh.tcpPort}` : fresh.socketPath;
+  log.info(`[mcp-client] post-recycle daemon ${fresh.spawned ? "spawned" : "found"} at ${freshWhere}`);
+  const newClient = fresh.tcpPort !== undefined
+    ? new IpcClient({ socketPath: null, tcpHost: fresh.tcpHost, tcpPort: fresh.tcpPort, log: { info: log.info, warn: log.warn, error: log.error } })
+    : new IpcClient({ socketPath: fresh.socketPath, log: { info: log.info, warn: log.warn, error: log.error } });
   await newClient.connect();
   const h2 = await newClient.handshake();
   if (h2.daemonVersion !== CLIENT_VERSION) {

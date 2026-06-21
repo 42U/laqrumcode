@@ -73,8 +73,15 @@ export async function handleStop(state, payload) {
         const evalSessionId = session.sessionId;
         const evalTurnId = session.lastAssistantTurnId;
         const evalText = session.lastAssistantText;
-        void evaluateRetrieval(evalSessionId, evalTurnId, evalText, store)
+        // R3: register the detached eval with the daemon-level pending-task set so
+        // graceful shutdown drains it (bounded) BEFORE disposing the reranker /
+        // force-closing Surreal. Still fire-and-forget for the user-visible turn —
+        // we do NOT await here — but the LAST turn's ACAN rows (retrieval_outcome +
+        // turn_score) survive a close that lands right after Stop. The .catch keeps
+        // it from rejecting the awaitPendingTasks allSettled with an unhandled error.
+        const evalPromise = evaluateRetrieval(evalSessionId, evalTurnId, evalText, store)
             .catch(e => swallow("stop:retrievalQuality", e));
+        state.registerPendingTask(evalPromise);
     }
     // Postflight: write the per-turn orchestrator_metrics row. The writer
     // in orchestrator.ts had been intact since the port but with zero

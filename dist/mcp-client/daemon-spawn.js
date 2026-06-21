@@ -17,8 +17,36 @@ import { mkdir } from "node:fs/promises";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { homedir, platform } from "node:os";
+import { DEFAULT_DAEMON_TCP_PORT, } from "../shared/ipc-types.js";
 import { IpcClient } from "./ipc-client.js";
 const DEFAULT_HOME = homedir();
+/** Decide the client transport, symmetric with the daemon side
+ *  (daemon/index.ts: `useUds = TRANSPORT !== "tcp" && platform !== "win32"`).
+ *  Windows has no Unix sockets (the daemon binds TCP-only there), and the
+ *  KONGCODE_DAEMON_TRANSPORT=tcp opt-in forces TCP on every platform. Kept
+ *  as a pure, testable function so the parity with the daemon is verifiable
+ *  without spawning anything. */
+export function resolveTransport(env = process.env, plat = process.platform) {
+    if (plat === "win32")
+        return "tcp";
+    if (env.KONGCODE_DAEMON_TRANSPORT === "tcp")
+        return "tcp";
+    return "uds";
+}
+/** The TCP port the daemon binds. Must match daemon/index.ts exactly:
+ *  KONGCODE_DAEMON_PORT if set and valid, else the fixed DEFAULT_DAEMON_TCP_PORT.
+ *  The daemon binds a DETERMINISTIC port in production (the ephemeral tcpPort=0
+ *  path in server.ts is test-only), so no discovery file is needed — both sides
+ *  derive the port from the same constant + env var. */
+export function resolveTcpPort(env = process.env) {
+    const raw = env.KONGCODE_DAEMON_PORT;
+    if (raw) {
+        const n = Number(raw);
+        if (Number.isFinite(n) && n > 0)
+            return Math.round(n);
+    }
+    return DEFAULT_DAEMON_TCP_PORT;
+}
 /** Try to acquire an exclusive file lock to prevent concurrent daemon spawns.
  *  POSIX-only via O_EXCL — Windows clients run sequentially via Claude Code's
  *  plugin loader so the race window is small enough to ignore. Returns the fd
@@ -123,8 +151,15 @@ function daemonCmdlineMatches(pid) {
         return false;
     }
 }
-async function pingSocket(socketPath, timeoutMs = 1500) {
-    const c = new IpcClient({ socketPath, defaultTimeoutMs: timeoutMs });
+/** Attempt a real RPC against the daemon over the resolved transport. A
+ *  successful meta.health means the daemon is up AND past bootstrap enough to
+ *  serve — works identically over UDS and TCP (same dispatcher, same wire
+ *  format). In TCP mode this doubles as the readiness probe: a closed port
+ *  rejects the connect fast. */
+async function pingDaemon(target, timeoutMs = 1500) {
+    const c = target.tcpPort !== undefined
+        ? new IpcClient({ socketPath: null, tcpHost: target.tcpHost, tcpPort: target.tcpPort, defaultTimeoutMs: timeoutMs })
+        : new IpcClient({ socketPath: target.socketPath, defaultTimeoutMs: timeoutMs });
     try {
         await c.connect();
         await c.call("meta.health", {}, timeoutMs);
@@ -136,10 +171,15 @@ async function pingSocket(socketPath, timeoutMs = 1500) {
         return false;
     }
 }
-async function pollSocketReady(socketPath, deadline, log) {
+async function pollSocketReady(target, deadline, log) {
+    const tcpMode = target.tcpPort !== undefined;
     while (Date.now() < deadline) {
-        if (existsSync(socketPath)) {
-            if (await pingSocket(socketPath, 1500))
+        // UDS: gate on the socket file existing before paying for a connect
+        // attempt (cheap existsSync vs an ECONNREFUSED round-trip). TCP: there is
+        // no socket file (daemon binds a port), so skip the existsSync gate
+        // entirely and let the connect attempt itself be the readiness signal.
+        if (tcpMode || existsSync(target.socketPath)) {
+            if (await pingDaemon(target, 1500))
                 return true;
         }
         await new Promise((r) => setTimeout(r, 500));
@@ -161,7 +201,10 @@ function resolveDaemonScript() {
         return join(dirname(process.execPath), "..", "..", "dist", "daemon", "index.js");
     }
 }
-/** Get a daemon URL — either the existing one if alive, or spawn a new one. */
+/** Get a daemon endpoint — either the existing one if alive, or spawn a new
+ *  one. Transport-aware: returns a TCP endpoint {tcpHost,tcpPort} on Windows
+ *  or under KONGCODE_DAEMON_TRANSPORT=tcp (matching the daemon's own bind
+ *  decision), else a Unix-socket endpoint. */
 export async function ensureDaemon(opts = {}) {
     const log = opts.log ?? { info: () => { }, warn: () => { }, error: () => { } };
     // Resolve all paths absolutely. The shared/ipc-types constants may use
@@ -172,9 +215,25 @@ export async function ensureDaemon(opts = {}) {
     const pidFile = join(cacheDir, "daemon.pid");
     const lockPath = join(cacheDir, "daemon.spawn.lock");
     const readyTimeoutMs = opts.readyTimeoutMs ?? 300_000; // 5 min cold first run
-    // Fast path: socket exists and pings successfully.
-    if (existsSync(socketPath) && (await pingSocket(socketPath))) {
-        return { socketPath, spawned: false };
+    // Resolve transport ONCE, symmetric with the daemon. In TCP mode every
+    // readiness probe and the returned endpoint must use {tcpHost,tcpPort};
+    // existsSync(socketPath) is meaningless there (no socket file exists).
+    const transport = resolveTransport();
+    const tcpHost = "127.0.0.1";
+    const tcpPort = resolveTcpPort();
+    const tcpMode = transport === "tcp";
+    const probe = tcpMode
+        ? { socketPath, tcpHost, tcpPort }
+        : { socketPath };
+    // Stamp the resolved transport onto every endpoint we return so callers
+    // (index.ts) construct IpcClient with the matching connect params.
+    const endpoint = (spawned) => tcpMode ? { socketPath, tcpHost, tcpPort, spawned } : { socketPath, spawned };
+    // Fast path: daemon already reachable. UDS gates on the socket file first;
+    // TCP just attempts the connect (no file to stat).
+    if ((tcpMode || existsSync(socketPath)) && (await pingDaemon(probe))) {
+        if (tcpMode)
+            log.info(`[daemon-spawn] reached existing daemon over TCP ${tcpHost}:${tcpPort}`);
+        return endpoint(false);
     }
     // PID file probe with identity verification. If a live kongcode daemon
     // owns the singleton lock but isn't serving its socket yet (still
@@ -191,12 +250,12 @@ export async function ensureDaemon(opts = {}) {
             // cmdline === true → confirmed daemon, wait for its socket.
             // cmdline === null → non-Linux, can't verify; conservative: wait too.
             if (cmdline !== false) {
-                log.info(`[daemon-spawn] live kongcode daemon detected at pid=${marker.pid} v${marker.daemonVersion} — waiting for socket instead of spawning`);
+                log.info(`[daemon-spawn] live kongcode daemon detected at pid=${marker.pid} v${marker.daemonVersion} — waiting for ${tcpMode ? `TCP ${tcpHost}:${tcpPort}` : "socket"} instead of spawning`);
                 const deadline = Date.now() + readyTimeoutMs;
-                const ok = await pollSocketReady(socketPath, deadline, log);
+                const ok = await pollSocketReady(probe, deadline, log);
                 if (ok)
-                    return { socketPath, spawned: false };
-                log.warn(`[daemon-spawn] daemon pid=${marker.pid} alive but socket never became ready — proceeding to spawn fresh`);
+                    return endpoint(false);
+                log.warn(`[daemon-spawn] daemon pid=${marker.pid} alive but ${tcpMode ? "TCP endpoint" : "socket"} never became ready — proceeding to spawn fresh`);
             }
             else {
                 log.warn(`[daemon-spawn] daemon.pid claims pid=${marker.pid} but cmdline doesn't match kongcode daemon (recycled PID) — proceeding to spawn fresh`);
@@ -210,9 +269,9 @@ export async function ensureDaemon(opts = {}) {
     if (lockFd === null) {
         log.info(`[daemon-spawn] another client holds spawn lock — waiting for daemon ready`);
         const deadline = Date.now() + readyTimeoutMs;
-        const ok = await pollSocketReady(socketPath, deadline, log);
+        const ok = await pollSocketReady(probe, deadline, log);
         if (ok)
-            return { socketPath, spawned: false };
+            return endpoint(false);
         // Lock holder died without spawning — remove stale lock and try again
         try {
             unlinkSync(lockPath);
@@ -247,13 +306,13 @@ export async function ensureDaemon(opts = {}) {
         });
         child.unref();
         closeSync(logFd);
-        log.info(`[daemon-spawn] daemon spawned pid=${child.pid} — waiting for ready`);
+        log.info(`[daemon-spawn] daemon spawned pid=${child.pid} — waiting for ${tcpMode ? `TCP ${tcpHost}:${tcpPort}` : "ready"}`);
         const deadline = Date.now() + readyTimeoutMs;
-        const ok = await pollSocketReady(socketPath, deadline, log);
+        const ok = await pollSocketReady(probe, deadline, log);
         if (!ok) {
             throw new Error(`daemon failed to become ready within ${readyTimeoutMs}ms`);
         }
-        return { socketPath, spawned: true };
+        return endpoint(true);
     }
     finally {
         if (lockFd !== null)

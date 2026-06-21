@@ -29,8 +29,14 @@ export interface CommitDeps {
 }
 export interface CommitConceptData {
     kind: "concept";
-    /** The concept label (also used as the embedding target). */
+    /** The concept label (also used as the embedding target unless embeddingTarget is set). */
     name: string;
+    /** R12/K16: optional richer embed target (e.g. the daemon's
+     *  `${content} ${searchTerms}`). When set, this is embedded instead of `name`
+     *  and persisted on the row (when it diverges from name) so
+     *  backfillConceptEmbeddings can reproduce the same vector on a heal.
+     *  Mirrors CommitMemoryData.embeddingText (K51). */
+    embeddingTarget?: string;
     /** Optional source node asserting this concept (turn:xxx, memory:xxx, artifact:xxx). */
     sourceId?: string;
     /** Edge type from sourceId to the concept. Required if sourceId set. */

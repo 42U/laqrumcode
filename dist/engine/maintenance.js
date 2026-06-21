@@ -514,7 +514,12 @@ async function backfillConceptEmbeddings(state) {
         // hole. We now require `content` to be set; the legacy `name` arm is kept
         // as a fallback (OR) so any pre-migration row that still carries only
         // `name` is also selected and healed via the COALESCE embed target below.
-        `SELECT id, content, name FROM concept
+        // R12 — also SELECT embedding_target (the daemon's persisted
+        // `${content} ${searchTerms}` form). The heal embeds that when present so
+        // the healed vector matches the live create-time vector instead of
+        // diverging to content-only. NOT in the WHERE: a row without
+        // embedding_target must STILL be selectable (backfill-coverage invariant).
+        `SELECT id, content, name, embedding_target FROM concept
         WHERE (embedding IS NONE OR array::len(embedding) = 0)
           AND (
             (content IS NOT NONE AND content != "")
@@ -528,8 +533,15 @@ async function backfillConceptEmbeddings(state) {
         for (const row of rows) {
             if (!row?.id)
                 continue;
-            // Embed target = content (hot-path column), falling back to legacy name.
-            let target = row.content && row.content !== "" ? row.content : (row.name ?? "");
+            // Embed target precedence (R12/K16):
+            //   1. embedding_target — the daemon's persisted `${content} ${searchTerms}`
+            //      form; embedding this reproduces the live create-time vector so the
+            //      healed concept does NOT diverge to a content-only vector.
+            //   2. content — the hot-path column (the common case; embedding_target is
+            //      only persisted when it diverges from content).
+            //   3. name — legacy pre-rename fallback.
+            const contentOrName = row.content && row.content !== "" ? row.content : (row.name ?? "");
+            let target = row.embedding_target && row.embedding_target !== "" ? row.embedding_target : contentOrName;
             if (!target)
                 continue;
             // Content is typically short, but guard with the same 6000-char

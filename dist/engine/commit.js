@@ -122,18 +122,23 @@ async function linkToProject(deps, sourceId, sourceKind, projectId) {
 async function commitConcept(deps, data) {
     const { store, embeddings } = deps;
     const logTag = `commit:concept:${data.source ?? "anon"}`;
-    // 1. Embed the name (or reuse caller's vec).
+    // 1. Embed the target (or reuse caller's vec). R12/K16: when embeddingTarget
+    //    is set, embed it (not the bare name) so the create-time vector matches
+    //    the daemon's richer `${content} ${searchTerms}` form; the same target is
+    //    persisted in step 2 so a heal reproduces it. Mirrors commitMemory's
+    //    `embeddingText ?? text` (K51).
     let embedding = data.precomputedVec ?? null;
     if (!embedding && embeddings.isAvailable()) {
         try {
-            embedding = await embeddings.embed(data.name);
+            embedding = await embeddings.embed(data.embeddingTarget ?? data.name);
         }
         catch (e) {
             swallow.warn(`${logTag}:embed`, e);
         }
     }
-    // 2. Upsert the concept row (provenance passed through when supplied).
-    const { id: conceptId, existed: conceptExisted } = await store.upsertConcept(data.name, embedding, data.source, data.provenance, data.projectId);
+    // 2. Upsert the concept row (provenance + embed target passed through when
+    //    supplied). embeddingTarget is persisted only when it diverges from name.
+    const { id: conceptId, existed: conceptExisted } = await store.upsertConcept(data.name, embedding, data.source, data.provenance, data.projectId, data.embeddingTarget);
     let edges = 0;
     // 3. Link source → concept via the requested edge, if caller provided one.
     // 0.7.118 (QA item 4): source can dedup-fold into the same concept id —
