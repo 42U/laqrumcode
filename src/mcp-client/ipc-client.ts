@@ -22,6 +22,7 @@ import {
   type IpcMethod,
   type MetaHandshakeResponse,
 } from "../shared/ipc-types.js";
+import { readDaemonToken } from "./daemon-spawn.js";
 
 interface PendingRequest {
   id: number;
@@ -134,9 +135,29 @@ export class IpcClient {
    *  trigger daemon-restart, and retry.
    *
    *  Optionally register this client's identity with the daemon (0.7.9+).
-   *  Older daemons silently ignore the extra params field. */
-  async handshake(clientInfo?: { pid: number; version: string; sessionId: string }): Promise<MetaHandshakeResponse> {
-    const params = clientInfo ? { clientInfo } : {};
+   *  Older daemons silently ignore the extra params field.
+   *
+   *  S6: in TCP mode the caller passes `handshakeToken` — the per-user secret
+   *  read from the daemon's 0600 token file. A daemon that bound TCP rejects a
+   *  missing/mismatched token (a different OS user who hash-collided onto our
+   *  port can't read the file, so they're turned away). UDS daemons ignore it
+   *  (they're already filesystem-isolated at 0600), and the token is omitted
+   *  there so the handshake shape is unchanged for the Unix-socket path. */
+  async handshake(
+    clientInfo?: { pid: number; version: string; sessionId: string },
+    handshakeToken?: string,
+  ): Promise<MetaHandshakeResponse> {
+    const params: { clientInfo?: typeof clientInfo; handshake?: string } = {};
+    if (clientInfo) params.clientInfo = clientInfo;
+    // S6: in TCP mode (socketPath === null) auto-attach the per-user handshake
+    // token so the non-owned index.ts call sites get isolation for free — no
+    // caller change needed. An explicit token arg (tests) always wins. UDS mode
+    // sends none (it is already filesystem-isolated at 0600). readDaemonToken
+    // returns null when the token file is absent/unreadable; we still send the
+    // (empty→omitted) param so a TCP daemon can reject us, which is the intended
+    // outcome when we can't read another user's 0600 token.
+    const token = handshakeToken ?? (this.opts.socketPath === null ? readDaemonToken() ?? undefined : undefined);
+    if (token) params.handshake = token;
     const resp = await this.call<MetaHandshakeResponse>("meta.handshake", params);
     if (resp.protocolVersion !== PROTOCOL_VERSION) {
       throw new IpcError(

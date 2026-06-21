@@ -16,7 +16,7 @@ import { existsSync, openSync, closeSync, writeSync, readFileSync, unlinkSync } 
 import { mkdir } from "node:fs/promises";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { homedir, platform } from "node:os";
+import { homedir, platform, userInfo } from "node:os";
 import { DEFAULT_DAEMON_TCP_PORT, } from "../shared/ipc-types.js";
 import { IpcClient } from "./ipc-client.js";
 const DEFAULT_HOME = homedir();
@@ -33,11 +33,63 @@ export function resolveTransport(env = process.env, plat = process.platform) {
         return "tcp";
     return "uds";
 }
+/** Width of the per-user TCP-port window. The daemon's loopback port is
+ *  DEFAULT_DAEMON_TCP_PORT + (hash(username) % PORT_OFFSET_RANGE), keeping it in
+ *  [18764, 18764+9999] — well clear of the ephemeral range and of the managed
+ *  SurrealDB window (18765 + uid%10000) that bootstrap.pickPort() uses. Same
+ *  modulus shape as pickPort so the two derivations are auditable side by side. */
+const PORT_OFFSET_RANGE = 10000;
+/** The OS-user discriminator used to derive a per-user TCP port and token-file
+ *  path. On POSIX the uid is the canonical, collision-free identity (mirrors
+ *  bootstrap.pickPort()); on Windows there is no getuid(), so we fall back to
+ *  the account username (os.userInfo().username) — distinct per Windows account
+ *  and the closest portable stand-in for the SID without a native call. Returns
+ *  null only when neither is resolvable (then callers use the flat default).
+ *  MUST stay identical on the client and the daemon — both import this. */
+export function osUserDiscriminator() {
+    if (typeof process.getuid === "function") {
+        try {
+            return `uid:${process.getuid()}`;
+        }
+        catch { /* fall through */ }
+    }
+    try {
+        const u = userInfo().username;
+        if (u)
+            return `user:${u}`;
+    }
+    catch { /* fall through */ }
+    return null;
+}
+/** Tiny deterministic 32-bit string hash (FNV-1a). Not cryptographic — only
+ *  used to scatter different OS users across the per-user port window. Stable
+ *  across processes/platforms/Node versions (pure integer arithmetic), which is
+ *  the property the client↔daemon parity depends on. Returns a non-negative int. */
+export function stableHash32(s) {
+    let h = 0x811c9dc5; // FNV offset basis
+    for (let i = 0; i < s.length; i++) {
+        h ^= s.charCodeAt(i);
+        // FNV prime 16777619, kept in 32-bit via Math.imul.
+        h = Math.imul(h, 0x01000193);
+    }
+    return h >>> 0; // force unsigned 32-bit
+}
 /** The TCP port the daemon binds. Must match daemon/index.ts exactly:
- *  KONGCODE_DAEMON_PORT if set and valid, else the fixed DEFAULT_DAEMON_TCP_PORT.
- *  The daemon binds a DETERMINISTIC port in production (the ephemeral tcpPort=0
- *  path in server.ts is test-only), so no discovery file is needed — both sides
- *  derive the port from the same constant + env var. */
+ *  - KONGCODE_DAEMON_PORT if set and valid → used verbatim, NO per-user offset
+ *    (explicit operator intent; mirrors pickPort's env-override-wins rule).
+ *  - else DEFAULT_DAEMON_TCP_PORT + (hash(osUserDiscriminator) % PORT_OFFSET_RANGE).
+ *
+ *  S6 (multi-OS-user Windows host): the prior flat default (18764 for every
+ *  user) let a 2nd OS user's client fast-path-ping 127.0.0.1:18764 and ADOPT
+ *  the 1st user's already-running daemon — reading their private graph. Deriving
+ *  the port per-user (the same shape bootstrap.pickPort() already uses for the
+ *  managed SurrealDB port) means different accounts land on different ports and
+ *  never cross-adopt. The handshake token (resolveDaemonTokenPath) is the
+ *  defense-in-depth backstop for the rare hash collision.
+ *
+ *  The daemon still binds a DETERMINISTIC port in production (the ephemeral
+ *  tcpPort=0 path in server.ts is test-only), so no discovery file is needed —
+ *  both sides derive the port from the same constant + env + user identity. */
 export function resolveTcpPort(env = process.env) {
     const raw = env.KONGCODE_DAEMON_PORT;
     if (raw) {
@@ -45,7 +97,33 @@ export function resolveTcpPort(env = process.env) {
         if (Number.isFinite(n) && n > 0)
             return Math.round(n);
     }
-    return DEFAULT_DAEMON_TCP_PORT;
+    const who = osUserDiscriminator();
+    if (who === null)
+        return DEFAULT_DAEMON_TCP_PORT;
+    return DEFAULT_DAEMON_TCP_PORT + (stableHash32(who) % PORT_OFFSET_RANGE);
+}
+/** Per-user handshake-token file path. Co-located with the daemon pid file in
+ *  the user's own home (homedir()), which is per-account on every OS — so two
+ *  OS users never share it. The daemon writes a random secret here at 0600 on
+ *  TCP-bind; the client reads it and echoes it in meta.handshake. Defense in
+ *  depth: loopback TCP is reachable by ANY local user (unlike the 0600 Unix
+ *  socket), so even if two users hash-collide onto the same port, the wrong
+ *  user can't read this file and is rejected at handshake. MUST stay identical
+ *  on both sides — both derive the path from homedir(). */
+export function resolveDaemonTokenPath(home = homedir()) {
+    return join(home, ".kongcode-daemon.token");
+}
+/** Read the per-user handshake token, or null if the file is absent/unreadable
+ *  (e.g. daemon not yet up, or — the breach case — a different OS user's file we
+ *  have no permission to read). Trimmed; empty content is treated as null. */
+export function readDaemonToken(home = homedir()) {
+    try {
+        const t = readFileSync(resolveDaemonTokenPath(home), "utf8").trim();
+        return t || null;
+    }
+    catch {
+        return null;
+    }
 }
 /** Try to acquire an exclusive file lock to prevent concurrent daemon spawns.
  *  POSIX-only via O_EXCL — Windows clients run sequentially via Claude Code's

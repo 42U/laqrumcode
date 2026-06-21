@@ -340,6 +340,14 @@ export class SurrealStore {
   private reconnecting: Promise<void> | null = null;
   private shutdownFlag = false;
   private initialized = false;
+  /** S1: true ONLY after runSchema() has resolved against the live connection.
+   *  isAvailable() gates on this so a connect-OK-but-schema-FAILED store reports
+   *  unavailable (degraded mode) instead of serving writes ungated for the
+   *  daemon's whole lifetime — the UNIQUE seals / DEFINE INDEX the dedup +
+   *  committing_token CAS campaign relies on would otherwise never exist on that
+   *  store. Set false on any runSchema throw; re-set true when a reconnect heals
+   *  the schema apply (ensureConnected). */
+  private schemaApplied = false;
 
   constructor(config: SurrealConfig) {
     this.config = config;
@@ -380,9 +388,49 @@ export class SurrealStore {
     // boot path catches it and the daemon enters degraded mode (store
     // unavailable) instead of wedging — and a later ensureConnected() retries.
     await this.connectWithTimeout();
-    await this.runSchema();
+    // S1: bounded retry of the schema apply. A transient server hiccup
+    // (consolidate/HNSW build blowing the deadline once) shouldn't drop the
+    // whole daemon into degraded-mode for its lifetime when one retry would
+    // heal it. applySchemaWithRetry() sets schemaApplied on success and rethrows
+    // after the last attempt; the rethrow still propagates to the boot catch
+    // (degraded mode), and a later ensureConnected() re-attempts the apply.
+    await this.applySchemaWithRetry();
     this.initialized = true;
     return true;
+  }
+
+  /** S1: run runSchema() with a small bounded retry, owning the schemaApplied
+   *  flag. On success sets schemaApplied=true; on every failure sets it false;
+   *  rethrows the last error so callers (initialize / ensureConnected) can react.
+   *  Kept separate from runSchema() so the reconnect path can re-arm the schema
+   *  (and thus isAvailable()) without duplicating the retry logic. */
+  private async applySchemaWithRetry(): Promise<void> {
+    const MAX_ATTEMPTS = 3;
+    const BACKOFF_MS = [500, 1500];
+    let lastErr: unknown;
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      try {
+        await this.runSchema();
+        this.schemaApplied = true;
+        return;
+      } catch (e) {
+        // Schema NOT applied — keep the store honestly degraded until a
+        // subsequent attempt succeeds.
+        this.schemaApplied = false;
+        lastErr = e;
+        if (attempt < MAX_ATTEMPTS) {
+          log.warn(
+            `[surreal] schema apply failed (attempt ${attempt}/${MAX_ATTEMPTS}); retrying: ${(e as Error).message}`,
+          );
+          await new Promise((r) => setTimeout(r, BACKOFF_MS[attempt - 1]));
+        } else {
+          log.error(
+            `[surreal] schema apply failed after ${MAX_ATTEMPTS} attempts — store stays UNAVAILABLE (degraded): ${(e as Error).message}`,
+          );
+        }
+      }
+    }
+    throw lastErr;
   }
 
   markShutdown(): void {
@@ -412,6 +460,21 @@ export class SurrealStore {
           // bug the old inline finally-clear existed to avoid). Same 5s budget
           // (SurrealStore.CONNECT_TIMEOUT_MS) now used by initialize() too.
           await this.connectWithTimeout();
+          // S1: a reconnect builds a FRESH Surreal instance (line above), so the
+          // schema context must be re-applied. Re-arm schemaApplied here so a
+          // store that booted degraded (schema apply failed at init) self-heals
+          // on the next reconnect, and a store whose connection dropped doesn't
+          // silently keep reporting available without re-confirming its schema.
+          // applySchemaWithRetry owns the flag: on failure it stays false (store
+          // honestly unavailable) but we DON'T throw out of the reconnect — the
+          // connection itself is healthy and a later attempt can still heal it.
+          try {
+            await this.applySchemaWithRetry();
+          } catch (e) {
+            log.error(
+              `[surreal] reconnect succeeded but schema re-apply failed — store stays UNAVAILABLE until next heal: ${(e as Error).message}`,
+            );
+          }
           log.warn("SurrealDB reconnected successfully.");
           this.zombieSuspect = false;
           return;
@@ -3066,7 +3129,12 @@ export class SurrealStore {
 
   isAvailable(): boolean {
     try {
-      return this.db?.isConnected ?? false;
+      // S1: connected is necessary but NOT sufficient — a store whose socket is
+      // up but whose schema apply failed lacks the UNIQUE seals / DEFINE INDEX
+      // the write path + dedup campaign rely on. Gate on schemaApplied so such a
+      // store reports unavailable (daemon routes to degraded mode) instead of
+      // serving writes ungated for its whole lifetime.
+      return (this.db?.isConnected ?? false) && this.schemaApplied;
     } catch {
       return false;
     }

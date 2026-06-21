@@ -231,7 +231,10 @@ export async function handleFetchPendingWork(state, _session, _args) {
             // is wrongly reverted while the drainer is still working it (feeds the
             // C1 double-write). Also catch the transient "committing" state so a
             // crash between the commit-CAS and markTerminal can't wedge a row.
-            `SELECT id, session_id, work_type FROM pending_work
+            // S5: also SELECT won_chain_ids — a stuck causal_graduate row claimed
+            // (graduated_at-stamped) its chains at fetch time; recovering the work
+            // item must also un-stamp those chains or they strand permanently.
+            `SELECT id, session_id, work_type, won_chain_ids FROM pending_work
            WHERE (status = "processing" OR status = "committing")
              AND (processing_started_at ?? created_at) < time::now() - 10m
              AND (active = true OR active IS NONE)
@@ -239,6 +242,19 @@ export async function handleFetchPendingWork(state, _session, _args) {
             for (const row of stuck) {
                 try {
                     assertRecordId(String(row.id));
+                    // S5: lost-RPC / crash between a causal_graduate fetch-claim and its
+                    // commit leaves the work item stuck AND its won chains graduated_at-
+                    // stamped but never synthesized into a skill — the commit-path R8
+                    // un-stamp (handleCommitWorkResults catch / no-op) never ran because
+                    // no commit arrived. Re-open those chains here BEFORE reverting/
+                    // archiving the work item, mirroring the commit-path un-stamp helper,
+                    // so a later causal_graduate fetch retries them instead of stranding
+                    // them. Idempotent (resets only still-stamped rows) and best-effort:
+                    // a failed un-stamp just defers retry until new chains re-cross the
+                    // cnt>=3 bar (same fallback as the commit-path R8 recovery).
+                    if (row.work_type === "causal_graduate") {
+                        await unstampGraduatedChains({ id: String(row.id), won_chain_ids: row.won_chain_ids }, state).catch(err => swallow.warn("pending-work:stale-recovery-unstamp", err));
+                    }
                     // BEGIN/COMMIT around the (sibling-check + DELETE-or-UPDATE) so the
                     // check-and-act is atomic. The sibling SELECT is unfiltered by
                     // status (widened in v0.7.75 from "pending"-only): any other row
@@ -350,8 +366,11 @@ export async function handleFetchPendingWork(state, _session, _args) {
  * C1 double-write. When guardToken is passed, the terminal UPDATE itself
  * carries `WHERE status="committing" AND committing_token=$guard`, so the
  * stamp lands ONLY if we still own the row at write time. Zero matched rows
- * means "reclaimed mid-write" → returns false so the caller discards the
- * outcome rather than reporting a completion it doesn't own. Callers that pass
+ * means EITHER "reclaimed mid-write" (→ false, caller discards) OR "our own
+ * withRetry re-fire already stamped it server-side" (S4) — disambiguated by a
+ * confirmation SELECT for our own terminal state+token (mirrors K41
+ * self-recognition): if the row is already in OUR terminal status with OUR
+ * token, the earlier retried write succeeded → returns true. Callers that pass
  * NO guardToken (buildWorkPayload's self-complete early-exits, which act on a
  * row freshly claimed in "processing") keep the original unconditional
  * behavior. Returns true when the row was terminalized or archived by THIS
@@ -423,8 +442,24 @@ async function markTerminal(state, workId, sessionId, workType, status, guardTok
          ELSE (UPDATE ${workId} SET status = $st, completed_at = time::now()
            WHERE status = "committing" AND committing_token = $guard RETURN AFTER) END);
        RETURN { changed: array::len($changed), archived: array::len($archived) };`, { sid: sessionId, wt: workType, st: status, guard: guardToken });
-        // Gate matched nothing AND nothing was archived → row reclaimed mid-write.
+        // Gate matched nothing AND nothing was archived → EITHER the row was
+        // reclaimed mid-write (genuine C1 discard) OR this is our OWN withRetry
+        // re-fire: queryMulti wraps the statement in withRetry, and a deadline'd
+        // write MAY have executed server-side (flipping status="committing" →
+        // status=$st, committing_token still ours) before the response was lost.
+        // The re-fire then finds status already $st, so the
+        // `WHERE status="committing"` gate matches nothing — a genuinely-completed
+        // commit would be misreported false/skipped (S4). Mirror the K41
+        // committing_token self-recognition: confirm whether the row is ALREADY in
+        // OUR terminal state carrying OUR token. If so, our earlier (retried) write
+        // stamped it → return true (genuine success). Only when the row is NOT in
+        // our terminal state with our token is it genuinely reclaimed → false.
         if ((res?.changed ?? 0) === 0 && (res?.archived ?? 0) === 0) {
+            const mine = await state.store.queryFirst(`SELECT id FROM ${workId} WHERE status = $st AND committing_token = $guard`, { st: status, guard: guardToken }).catch(() => []);
+            // Our own prior retried write already terminalized this row with our
+            // token → genuine success, not a reclaim.
+            if (mine.length > 0)
+                return true;
             return false;
         }
         return true;
@@ -759,7 +794,14 @@ export async function handleCommitWorkResults(state, _session, args) {
             }));
         }
         log.info(`[pending_work] Completed ${item.work_type} (${workId})`);
-        return text(JSON.stringify({ success: true, work_type: item.work_type, ...outcome }));
+        // S4: the commit lifecycle succeeded (markTerminal stamped "completed"), so
+        // report success authoritatively. Strip any internal `skipped` from the
+        // outcome spread: a no-op commitResults (soul_evolve "no changes", the
+        // unknown-type default, or a retry-idempotent re-stamp) must NOT emit the
+        // contradictory {success:true, skipped:true} envelope — the drain agent
+        // reads top-level `skipped` as a discard, the opposite of what happened.
+        const { skipped: _omitSkipped, ...committedOutcome } = (outcome ?? {});
+        return text(JSON.stringify({ success: true, work_type: item.work_type, ...committedOutcome }));
     }
     catch (e) {
         // R8: a causal_graduate synthesis that THREW must release the chains it

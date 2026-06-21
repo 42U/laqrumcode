@@ -92,6 +92,14 @@ export declare class SurrealStore {
     private reconnecting;
     private shutdownFlag;
     private initialized;
+    /** S1: true ONLY after runSchema() has resolved against the live connection.
+     *  isAvailable() gates on this so a connect-OK-but-schema-FAILED store reports
+     *  unavailable (degraded mode) instead of serving writes ungated for the
+     *  daemon's whole lifetime — the UNIQUE seals / DEFINE INDEX the dedup +
+     *  committing_token CAS campaign relies on would otherwise never exist on that
+     *  store. Set false on any runSchema throw; re-set true when a reconnect heals
+     *  the schema apply (ensureConnected). */
+    private schemaApplied;
     constructor(config: SurrealConfig);
     /** K32: shared connect timeout for BOTH the first connect (initialize) and
      *  every reconnect (ensureConnected). A non-settling WS handshake at boot used
@@ -105,6 +113,12 @@ export declare class SurrealStore {
     private connectWithTimeout;
     /** Connect and run schema. Returns true if a new connection was made, false if already initialized. */
     initialize(): Promise<boolean>;
+    /** S1: run runSchema() with a small bounded retry, owning the schemaApplied
+     *  flag. On success sets schemaApplied=true; on every failure sets it false;
+     *  rethrows the last error so callers (initialize / ensureConnected) can react.
+     *  Kept separate from runSchema() so the reconnect path can re-arm the schema
+     *  (and thus isAvailable()) without duplicating the retry logic. */
+    private applySchemaWithRetry;
     markShutdown(): void;
     private ensureConnected;
     private runSchema;

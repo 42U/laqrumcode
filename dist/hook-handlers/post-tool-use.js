@@ -28,7 +28,15 @@ function isPathObservingTool(toolName) {
 const SLASH_PATH_RE = /[/~][^\s'"`<>{}()\[\],]+/g;
 // Token splitter for the extension scan. Same delimiter class as SLASH_PATH_RE's
 // negated set so wrapping punctuation `(foo.ts)` / `"foo.ts"` splits cleanly.
-const TOKEN_SPLIT_RE = /[\s'"`<>{}()\[\],]+/;
+// S7: backslash is a delimiter too. A Windows path `C:\Users\x\foo.ts` is one
+// whitespace-delimited token; without `\\` in the split class the leading `C:`
+// makes EXT_TOKEN_RE's head class (`[\w./~-]*`, no `:`) fail and the whole path
+// is silently dropped — a functional regression vs the old `\b`-anchored
+// EXT_PATH_RE on Windows. Splitting on `\\` peels the tail `foo.ts` so the
+// FILES: compaction hint still names the file (it need not reconstruct the full
+// backslash path, and this token is only a hint — it does not clear the
+// edit-gate, which keys on the surfaced path verbatim).
+const TOKEN_SPLIT_RE = /[\s'"`<>{}()\[\],\\]+/;
 // Anchored, per-token extension tester. CRITICAL (R4 ReDoS fix): this is matched
 // against a single short token with ^...$ anchors, NOT scanned globally over the
 // whole text. The previous `EXT_PATH_RE` ( `/[\w./~-]+\.(?:ext)\b/g` ) put `.`
@@ -49,6 +57,59 @@ const EXT_HEAD_RE = /^([\w./~-]*\.(?:ts|tsx|js|jsx|mjs|cjs|py|rb|go|rs|java|kt|s
 // A real path token is short. Anything longer is junk (e.g. a multi-KB dot-run
 // crafted to trigger backtracking) — reject before the regex ever sees it.
 const MAX_PATH_TOKEN = 512;
+/** Strip a trailing grep/compiler `:line[:col]` and/or sentence punctuation from
+ *  a token, in one linear reverse pass. Equivalent to the old
+ *  `/(?::\d+|[.,:;!?])+$/` replace, but NON-backtracking.
+ *
+ *  S3: the regex form was still residually QUADRATIC. The outer `(...)+` wraps an
+ *  alternation whose `:\d+` branch itself contains `\d+`; on a token like
+ *  `:1:1:1…X` (a `:digit` run whose final char breaks the `$` anchor) the engine
+ *  tries every way to partition the run across the two nested quantifiers —
+ *  measured O(n^2): ~16ms @4KB, ~260ms @16KB, ~4200ms @64KB. The MAX_PATH_TOKEN
+ *  cap bounds a single live token to ~1ms, but the primitive itself stays a
+ *  latent footgun and the R4/R16 "linear" claim was false for this line.
+ *
+ *  Reverse scan reads the suffix grammar `(?::\d+|[.,:;!?])+` backward:
+ *   - a char in [.,:;!?] (this includes a bare `:`) is a single-char atom;
+ *   - a run of digits counts only when immediately preceded by `:` (a `:\d+`
+ *     group); bare digits are not in the grammar, so we stop.
+ *  We peel maximal atoms off the end until none matches — the largest suffix the
+ *  greedy `(atom)+$` regex would have matched. Verified byte-identical to the
+ *  regex across the documented cases (`foo.ts:42:`, `foo.ts:12:5`, `foo.ts.`,
+ *  `bar.js:7:hit`) and O(n) (sub-0.1ms on the 64KB `:1`-bomb). */
+function stripPathSuffix(tok) {
+    let end = tok.length;
+    for (;;) {
+        if (end === 0)
+            break;
+        const last = tok.charCodeAt(end - 1);
+        // digit (0-9): tail of a possible `:\d+` group
+        if (last >= 0x30 && last <= 0x39) {
+            let j = end;
+            while (j > 0) {
+                const c = tok.charCodeAt(j - 1);
+                if (c >= 0x30 && c <= 0x39)
+                    j--;
+                else
+                    break;
+            }
+            // need a ':' immediately before the digit run to form `:\d+`
+            if (j > 0 && tok.charCodeAt(j - 1) === 0x3a /* ':' */) {
+                end = j - 1;
+                continue;
+            }
+            break; // bare digits — not in the suffix grammar
+        }
+        // single-char punct atom: . , : ; ! ?
+        if (last === 0x2e /* . */ || last === 0x2c /* , */ || last === 0x3a /* : */ ||
+            last === 0x3b /* ; */ || last === 0x21 /* ! */ || last === 0x3f /* ? */) {
+            end -= 1;
+            continue;
+        }
+        break;
+    }
+    return end === tok.length ? tok : tok.slice(0, end);
+}
 /** Shared hardened extension-path extractor (R4/R16). Tokenizes on whitespace
  *  and wrapping punctuation, length-caps each token, then anchor-tests it. This
  *  is the single ReDoS-safe primitive reused by post-tool-use AND pre-compact so
@@ -59,12 +120,12 @@ export function extractExtPaths(text, observe) {
         if (tok.length === 0 || tok.length > MAX_PATH_TOKEN)
             continue;
         // Strip a trailing grep/compiler line:col suffix and/or sentence
-        // punctuation in one pass (`foo.ts:42:`, `foo.ts:12:5`, `foo.ts.`). The old
-        // `\b`-anchored global regex got the clean path for free; this replicates it
-        // so `src/foo.ts:42:` still yields `src/foo.ts`. Each alternative consumes a
-        // bounded chunk and `$` anchors, so it is linear on a <=512-char token (no
-        // nested-quantifier / overlap blowup — verified on `:::...` and `:1:1...`).
-        const cleaned = tok.replace(/(?::\d+|[.,:;!?])+$/, "");
+        // punctuation (`foo.ts:42:`, `foo.ts:12:5`, `foo.ts.`). The old `\b`-anchored
+        // global regex got the clean path for free; stripPathSuffix replicates it so
+        // `src/foo.ts:42:` still yields `src/foo.ts`. S3: this used to be a
+        // `/(?::\d+|[.,:;!?])+$/` replace whose nested quantifiers backtracked
+        // quadratically on a `:1:1…` token; the reverse scan is strictly O(n).
+        const cleaned = stripPathSuffix(tok);
         if (cleaned.length > 1 && EXT_TOKEN_RE.test(cleaned)) {
             observe(cleaned);
             continue;

@@ -112,18 +112,28 @@ describe("R6: resolveTransport mirrors the daemon's useUds decision", () => {
 });
 
 describe("R6: resolveTcpPort matches daemon/index.ts port logic", () => {
-  it("defaults to the shared DEFAULT_DAEMON_TCP_PORT constant", () => {
-    expect(resolveTcpPort({})).toBe(DEFAULT_DAEMON_TCP_PORT);
+  // S6 update: the no-override default is no longer the FLAT DEFAULT_DAEMON_TCP_PORT
+  // (that flat port was the multi-OS-user breach). It is now the PER-USER port
+  // base + hash(osUserDiscriminator)%10000. The full per-user behavior is
+  // covered in fix-s6-win-isolation.test.ts; here we just assert R6's parity
+  // claim still holds under the corrected contract.
+  it("defaults into the per-user window based at DEFAULT_DAEMON_TCP_PORT", () => {
+    const got = resolveTcpPort({});
+    expect(got).toBeGreaterThanOrEqual(DEFAULT_DAEMON_TCP_PORT);
+    expect(got).toBeLessThan(DEFAULT_DAEMON_TCP_PORT + 10000);
   });
 
-  it("honors a valid KONGCODE_DAEMON_PORT override", () => {
+  it("honors a valid KONGCODE_DAEMON_PORT override (verbatim, no per-user offset)", () => {
     expect(resolveTcpPort({ KONGCODE_DAEMON_PORT: "23456" })).toBe(23456);
   });
 
-  it("falls back to the default on an invalid/zero/negative override", () => {
-    expect(resolveTcpPort({ KONGCODE_DAEMON_PORT: "0" })).toBe(DEFAULT_DAEMON_TCP_PORT);
-    expect(resolveTcpPort({ KONGCODE_DAEMON_PORT: "-1" })).toBe(DEFAULT_DAEMON_TCP_PORT);
-    expect(resolveTcpPort({ KONGCODE_DAEMON_PORT: "notanumber" })).toBe(DEFAULT_DAEMON_TCP_PORT);
+  it("ignores an invalid/zero/negative override and falls through to the per-user derivation", () => {
+    // Invalid overrides no longer pin the flat default; they fall through to the
+    // per-user port (identical to the no-override default on this host).
+    const perUser = resolveTcpPort({});
+    expect(resolveTcpPort({ KONGCODE_DAEMON_PORT: "0" })).toBe(perUser);
+    expect(resolveTcpPort({ KONGCODE_DAEMON_PORT: "-1" })).toBe(perUser);
+    expect(resolveTcpPort({ KONGCODE_DAEMON_PORT: "notanumber" })).toBe(perUser);
   });
 });
 

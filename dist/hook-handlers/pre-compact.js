@@ -53,6 +53,20 @@ export async function handlePreCompact(state, payload) {
             const turns = await store.getSessionTurnsRich(sessionId, 30);
             if (turns.length > 0) {
                 const fullText = turns.map(t => t.text).join("\n");
+                // S3: cap the text fed to the path extractor at 64KB, mirroring the K48
+                // guard in post-tool-use. fullText is up to 30 untruncated turns joined,
+                // which can be many MB (a pasted blob, a long transcript). extractExtPaths
+                // is O(n) in fullText length even after the S3 reverse-scan fix, so a
+                // multi-MB join still does multi-MB of tokenizing work synchronously on
+                // the shared daemon event loop right when the user is waiting for
+                // compaction. The FILES: summary only needs recently-mentioned paths, so
+                // the first 64KB is plenty. (The pending/error regexes below stay on
+                // fullText: they are bounded-repetition `[^.\n]{0,N}` linear scans — not
+                // ReDoS — and recentErrors relies on `.slice(-3)` to keep the MOST RECENT
+                // errors, which a head-slice would drop.)
+                const extScanText = fullText.length > 64 * 1024
+                    ? fullText.slice(0, 64 * 1024)
+                    : fullText;
                 // Pending work detection (claw-code pattern: compact.rs:235-254)
                 const pendingRe = /\b(todo|next|pending|follow up|remaining|unfinished|still need)\b[^.\n]{0,100}/gi;
                 const pendingMatches = [...fullText.matchAll(pendingRe)]
@@ -66,7 +80,7 @@ export async function handlePreCompact(state, payload) {
                 // still apply pre-compact's narrower extension filter (the extractor's
                 // superset covers it) and the dedup+cap to keep output identical.
                 const extPaths = [];
-                extractExtPaths(fullText, p => extPaths.push(p));
+                extractExtPaths(extScanText, p => extPaths.push(p));
                 const filePaths = [...new Set(extPaths.filter(p => /\.(ts|js|py|rs|go|md|json|yaml|toml|tsx|jsx)$/.test(p)))].slice(0, 10);
                 // Tool names used (claw-code: compact.rs:127-137)
                 const toolNames = [...new Set(turns.filter(t => t.tool_name).map(t => t.tool_name))];

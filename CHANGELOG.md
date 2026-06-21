@@ -84,6 +84,32 @@ fixed; full suite green (1407 tests).
 - **Coverage gaps (R19/R20/R22/R23):** added the real-behavior tests whose absence let
   the round-1 fixes ship under-verified (the mocked-test-blindspot class that hid K0).
 
+### Hardened — round 4/5 (convergence): regressions in the round-3 fixes + 1 pre-existing
+
+A third review round (regression audit of the round-2/3 commit + whole-campaign
+completeness critic) found **6 more** (trend: 36 → 19 → 6, converging); all fixed,
+full suite green (1451 tests).
+
+- **S1 (pre-existing, HIGH):** a failed schema apply left `isAvailable()` returning
+  true (it checked only socket connectivity), so the daemon served writes for its
+  whole lifetime WITHOUT the `pending_work` UNIQUE seal the dedup/`committing_token`
+  CAS relies on. Added a `schemaApplied` gate (`isAvailable = isConnected &&
+  schemaApplied`), a bounded schema-apply retry, and a reconnect-path re-arm so a
+  degraded store self-heals.
+- **S6 (Windows multi-user isolation):** R6's TCP path bound a *flat shared* loopback
+  port, so a 2nd OS user on a Windows host adopted the 1st user's daemon + graph.
+  Port is now derived per-user (username/SID hash offset, symmetric client/daemon),
+  plus a 0600 per-user handshake token (loopback TCP isn't user-isolated like the
+  Unix socket).
+- **Regressions in the round-3 fixes:** S3 — R4/R16's replacement left a *quadratic*
+  suffix-strip regex and pre-compact lost its size cap → non-backtracking reverse
+  scan (0.1ms vs 4.2s @64KB) + restored 64KB cap; S7 — R4/R16 silently dropped
+  Windows backslash paths → backslash added to the token splitter; S4 — R9's guarded
+  terminal stamp mis-reported a retry-idempotent success as `skipped` → self-token
+  confirmation SELECT + stripped the contradictory `skipped` from the success
+  envelope (a pre-existing ambiguity); S5 — R8's graduation un-stamp missed the
+  stale-recovery path → stale-recovery now un-stamps `won_chain_ids`.
+
 ## [0.7.130] — 2026-06-19
 
 ### Added — `update_skill` MCP tool

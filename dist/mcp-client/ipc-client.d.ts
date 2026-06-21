@@ -56,12 +56,19 @@ export declare class IpcClient {
      *  trigger daemon-restart, and retry.
      *
      *  Optionally register this client's identity with the daemon (0.7.9+).
-     *  Older daemons silently ignore the extra params field. */
+     *  Older daemons silently ignore the extra params field.
+     *
+     *  S6: in TCP mode the caller passes `handshakeToken` — the per-user secret
+     *  read from the daemon's 0600 token file. A daemon that bound TCP rejects a
+     *  missing/mismatched token (a different OS user who hash-collided onto our
+     *  port can't read the file, so they're turned away). UDS daemons ignore it
+     *  (they're already filesystem-isolated at 0600), and the token is omitted
+     *  there so the handshake shape is unchanged for the Unix-socket path. */
     handshake(clientInfo?: {
         pid: number;
         version: string;
         sessionId: string;
-    }): Promise<MetaHandshakeResponse>;
+    }, handshakeToken?: string): Promise<MetaHandshakeResponse>;
     /** Make an RPC call. Returns the daemon's `result` payload, or throws
      *  IpcError on JSON-RPC error / timeout / disconnect. */
     call<T = unknown>(method: IpcMethod | string, params: unknown, timeoutMs?: number): Promise<T>;

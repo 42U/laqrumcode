@@ -26,13 +26,14 @@
 import { writeFileSync, unlinkSync, existsSync, readFileSync, mkdirSync, readdirSync, rmSync, openSync, writeSync, closeSync, statSync, constants as fsConstants } from "node:fs";
 import { join, dirname } from "node:path";
 import { homedir, platform } from "node:os";
+import { randomBytes } from "node:crypto";
 import { applyGpuPin } from "./gpu-pin.js";
+import { resolveTcpPort, resolveDaemonTokenPath } from "../mcp-client/daemon-spawn.js";
 import { ensureEdgeIndexes } from "../engine/edge-indexes.js";
 import { runBootstrapMaintenance } from "../engine/maintenance.js";
 import {
   PROTOCOL_VERSION,
   DEFAULT_DAEMON_SOCKET_PATH,
-  DEFAULT_DAEMON_TCP_PORT,
   DAEMON_PID_FILE,
   type MetaHandshakeResponse,
   type MetaHealthResponse,
@@ -662,6 +663,58 @@ function removeOwnPidFile(): void {
   }
 }
 
+/** S6: the per-user handshake token enforced when this daemon serves over TCP.
+ *  Generated once per process at TCP-bind, written to a 0600 per-user file
+ *  (resolveDaemonTokenPath), and compared against the `handshake` field every
+ *  client sends in meta.handshake. null when the daemon is UDS-only (the Unix
+ *  socket's 0600 perms already isolate OS users, so no token is needed). */
+let daemonHandshakeToken: string | null = null;
+
+/** Mint the per-user handshake token and persist it at 0600 in the user's home.
+ *  Called only when the daemon binds TCP as a real transport (Windows, or
+ *  KONGCODE_DAEMON_TRANSPORT=tcp / KONGCODE_DAEMON_PORT). The file is written
+ *  with O_CREAT|O_TRUNC|O_WRONLY at mode 0600 so a different OS user — who, on
+ *  loopback TCP, CAN reach the port — cannot read the secret and is therefore
+ *  rejected at handshake even on a rare per-user-port hash collision. Returns
+ *  the token (also stored in daemonHandshakeToken). Best-effort persist: if the
+ *  write fails we still keep the in-memory token so the daemon enforces auth
+ *  (clients just can't read it → they're rejected, which fails safe). */
+function initDaemonHandshakeToken(): string {
+  const token = randomBytes(32).toString("hex");
+  daemonHandshakeToken = token;
+  const path = resolveDaemonTokenPath();
+  try {
+    // O_TRUNC so a stale token from a crashed predecessor is overwritten; 0600
+    // so only this OS user can read it (the whole point of the defense layer).
+    const fd = openSync(path, fsConstants.O_CREAT | fsConstants.O_TRUNC | fsConstants.O_WRONLY, 0o600);
+    try { writeSync(fd, token); } finally { closeSync(fd); }
+    log.info(`[daemon] wrote per-user handshake token at ${path} (0600)`);
+  } catch (e) {
+    log.warn(`[daemon] couldn't persist handshake token at ${path}: ${(e as Error).message} — clients will be unable to authenticate over TCP`);
+  }
+  return token;
+}
+
+/** Remove our token file on shutdown, but only if it still holds OUR token —
+ *  never clobber a replacement daemon's freshly-written secret. Mirrors
+ *  removeOwnPidFile's ownership check. No-op in UDS-only mode (token is null). */
+function removeOwnTokenFile(): void {
+  if (daemonHandshakeToken === null) return;
+  const path = resolveDaemonTokenPath();
+  try {
+    if (!existsSync(path)) return;
+    const raw = readFileSync(path, "utf8").trim();
+    if (raw === daemonHandshakeToken) {
+      unlinkSync(path);
+      log.info(`[daemon] removed handshake token file ${path}`);
+    } else {
+      log.warn(`[daemon] not removing token file — owned by a different daemon now`);
+    }
+  } catch (e) {
+    log.warn(`[daemon] couldn't remove token file: ${(e as Error).message}`);
+  }
+}
+
 async function main(): Promise<void> {
   log.info(`[daemon] starting kongcode-daemon ${DAEMON_VERSION} (pid=${process.pid})`);
 
@@ -687,15 +740,32 @@ async function main(): Promise<void> {
   const useUds = process.env.KONGCODE_DAEMON_TRANSPORT !== "tcp" && process.platform !== "win32";
 
   // GH #13 (multi-user port collision): when UDS is the primary transport, do
-  // NOT also bind a fixed TCP port. The Unix socket already lives at a
-  // per-user path ($HOME/.kongcode-daemon.sock), giving each OS user their own
-  // daemon endpoint. Binding the shared, hardcoded DEFAULT_DAEMON_TCP_PORT
-  // (127.0.0.1:18764) on top of that made the 2nd OS user's daemon crash with
-  // EADDRINUSE. An explicit KONGCODE_DAEMON_PORT still forces a TCP bind (opt-in,
-  // e.g. for clients that can only speak TCP). On Windows useUds is false, so
-  // TCP remains the sole transport and the default port is used.
+  // NOT also bind a TCP port. The Unix socket already lives at a per-user path
+  // ($HOME/.kongcode-daemon.sock), giving each OS user their own daemon
+  // endpoint. Binding a TCP port on top of that made the 2nd OS user's daemon
+  // crash with EADDRINUSE. An explicit KONGCODE_DAEMON_PORT still forces a TCP
+  // bind (opt-in, e.g. for clients that can only speak TCP). On Windows useUds
+  // is false, so TCP remains the sole transport.
+  //
+  // S6 (multi-OS-user Windows host): when TCP IS the transport, bind the
+  // PER-USER port from resolveTcpPort() — the SAME helper the client uses, so
+  // the two derive an identical port (DEFAULT_DAEMON_TCP_PORT + hash(user)%N,
+  // or the verbatim KONGCODE_DAEMON_PORT override). The prior flat 18764 let a
+  // 2nd OS user's client fast-path-ping that port and ADOPT this user's daemon
+  // + private graph. Different accounts now land on different ports; the 0600
+  // handshake token below is the collision backstop.
   const tcpPortEnv = process.env.KONGCODE_DAEMON_PORT;
-  const tcpPort = tcpPortEnv ? Number(tcpPortEnv) : (useUds ? null : DEFAULT_DAEMON_TCP_PORT);
+  const tcpPort = (tcpPortEnv || !useUds) ? resolveTcpPort() : null;
+
+  // S6: if we will serve over TCP, mint + persist the per-user handshake token
+  // BEFORE server.listen() so it's already enforceable the instant the first
+  // client can connect. UDS-only daemons skip this (token stays null →
+  // meta.handshake doesn't require it; the socket's 0600 perms isolate users).
+  const tcpBound = typeof tcpPort === "number" && Number.isFinite(tcpPort) && tcpPort > 0;
+  if (tcpBound) {
+    initDaemonHandshakeToken();
+    log.info(`[daemon] TCP transport on 127.0.0.1:${tcpPort} — per-user handshake token enforced`);
+  }
 
   // Idle reaper config: 6s default (per user direction — anything longer
   // mostly just holds RAM for nobody). The only real value of staying
@@ -729,6 +799,7 @@ async function main(): Promise<void> {
     const watchdog = setTimeout(() => {
       log.error(`[daemon] graceful exit (${reason}) exceeded 8s — forcing exit`);
       try { removeOwnPidFile(); } catch { /* best-effort */ }
+      try { removeOwnTokenFile(); } catch { /* best-effort */ }
       process.exit(1);
     }, 8_000);
     watchdog.unref();
@@ -757,6 +828,7 @@ async function main(): Promise<void> {
     try { await disposeSharedLlama(); } catch {}
     shutdownManagedSurreal({ force: true });
     removeOwnPidFile();
+    removeOwnTokenFile();
     process.exit(0);
   };
 
@@ -794,7 +866,24 @@ async function main(): Promise<void> {
     // Register caller identity if provided. Pre-0.7.22 clients send empty
     // params and stay anonymous (still counted in activeClients but absent
     // from the per-client registry). 0.7.22+ clients send {clientInfo}.
-    const p = (params as { clientInfo?: { pid: number; version: string; sessionId: string } }) ?? {};
+    const p = (params as { clientInfo?: { pid: number; version: string; sessionId: string }; handshake?: string }) ?? {};
+    // S6: when serving over TCP (daemonHandshakeToken set), the client MUST
+    // present the per-user secret read from our 0600 token file. A different OS
+    // user who hash-collided onto our loopback port can't read that file, so
+    // they arrive with a missing/wrong token and are turned away here BEFORE any
+    // identity registration or graph access. UDS daemons leave the token null
+    // and skip this entirely (the socket's 0600 perms already isolate users),
+    // so the existing Unix-socket handshake path is unchanged. Constant-time-ish
+    // compare via length+equality; the token is 256-bit random so timing leakage
+    // is not a practical concern, but we still avoid early-exit on the prefix.
+    if (daemonHandshakeToken !== null) {
+      const presented = typeof p.handshake === "string" ? p.handshake : "";
+      const ok = presented.length === daemonHandshakeToken.length && presented === daemonHandshakeToken;
+      if (!ok) {
+        log.warn(`[daemon] REJECTED meta.handshake over TCP — missing/invalid per-user token (possible cross-OS-user adoption attempt on shared loopback port)`);
+        throw new Error("handshake token mismatch — this daemon belongs to a different OS user");
+      }
+    }
     if (p.clientInfo && typeof p.clientInfo.pid === "number" && p.clientInfo.version && p.clientInfo.sessionId) {
       ctx.registerIdentity(p.clientInfo);
     }
@@ -985,5 +1074,6 @@ main().catch((err) => {
   bootstrapPhase = "failed";
   bootstrapError = { message: (err as Error).message, stack: (err as Error).stack };
   removeOwnPidFile();
+  removeOwnTokenFile();
   process.exit(1);
 });
