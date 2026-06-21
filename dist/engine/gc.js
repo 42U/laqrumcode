@@ -10,9 +10,11 @@
  *
  * The five QA-gate primitives (all REAL — no stubs):
  *   (1) blast-radius      — co-delete EVERY incident edge across all 26
- *                           relation tables; NULL third-party scalar
- *                           back-pointers (superseded_by/resolved_by) on
- *                           surviving rows so nothing is left dangling.
+ *                           relation tables; NULL the COMPLETE set of scalar
+ *                           back-pointers (4× superseded_by, resolved_by,
+ *                           causal_chain trigger/outcome_memory, and the
+ *                           *.memory_id refs) on surviving rows so nothing is
+ *                           left dangling. after-verify re-checks every one.
  *   (2) genuinely-dead    — caller supplies the dead-set; this helper
  *                           additionally REFUSES to delete a correction
  *                           memory (defense in depth — a correction is
@@ -387,6 +389,119 @@ export async function gcHardDelete(state, table, ids, opts) {
         swallow("gc:recordMaintenanceRun", e);
     }
     return { deleted, edgesRemoved, snapshot: snapshotPath };
+}
+/** An edge is ORPHANED iff a linked-record id dereferences to NONE — i.e. the
+ *  endpoint record is ABSENT (hard-deleted / never-existed). A SOFT-TAGGED
+ *  endpoint still EXISTS, so its id resolves and the edge is NOT caught (those
+ *  are handled by the graphExpand read-path liveness filter G3, never deleted). */
+const ORPHAN_PRED = "in.id IS NONE OR out.id IS NONE";
+const BOTH_LIVE_PRED = "in.id IS NOT NONE AND out.id IS NOT NONE";
+/**
+ * G2 — orphaned-edge sweep. Delete EDGE rows whose `in` OR `out` endpoint
+ * record no longer exists (true danglers: residue of pre-v0.7.93 DELETE-based
+ * concept GC + bulk imports). Graph hygiene, NOT a content delete — relation
+ * tables are not content-bearing, so this is lint-legal — but it still follows
+ * the QA gate: snapshot the danglers first, then after-verify.
+ *
+ * Detector VERIFIED live (2026-06-21, populated DB): orphan + both-endpoints-
+ * live == total per table (exhaustive + disjoint, zero false positives; 309
+ * orphans concentrated in concept-edge tables). after-verify throws unless every
+ * swept table's orphan count is 0 AND its both-live count did NOT DROP (we
+ * removed only danglers — robust to concurrent inserts that only raise it).
+ *
+ * Reusable: also the trailing sweep to call after a content node delete.
+ */
+export async function gcSweepOrphanedEdges(state, opts = {}) {
+    const started = Date.now();
+    const store = state.store;
+    const reason = (opts.reason ?? "orphaned-edge sweep").trim() || "orphaned-edge sweep";
+    const dryRun = opts.dryRun ?? false;
+    const perTable = {};
+    const baselineLive = {};
+    const snapshotLines = [
+        `-- kongcode gcSweepOrphanedEdges snapshot`,
+        `-- reason: ${reason}`,
+        `-- generated_at: ${new Date().toISOString()}`,
+        `-- detector: ${ORPHAN_PRED} (absent endpoint record)`,
+        `-- To restore: re-CREATE the edge rows below (they carry in/out).`,
+        ``,
+    ];
+    let orphaned = 0;
+    // 1. Detect orphans per table + capture the both-live baseline (after-verify).
+    for (const edgeTb of RELATION_TABLES) {
+        const orphRows = await store.queryFirst(`SELECT * FROM ${edgeTb} WHERE ${ORPHAN_PRED}`);
+        const live = await store.queryFirst(`SELECT count() AS n FROM ${edgeTb} WHERE ${BOTH_LIVE_PRED} GROUP ALL`);
+        baselineLive[edgeTb] = live[0]?.n ?? 0;
+        if (orphRows.length === 0)
+            continue;
+        perTable[edgeTb] = orphRows.length;
+        orphaned += orphRows.length;
+        snapshotLines.push(`-- ${edgeTb} (${orphRows.length})`);
+        for (const row of orphRows) {
+            const stmt = rowToCreateStatement(row);
+            if (stmt)
+                snapshotLines.push(stmt);
+        }
+    }
+    if (orphaned === 0) {
+        return { scanned: RELATION_TABLES.length, orphaned: 0, removed: 0, perTable, snapshot: "", dryRun };
+    }
+    // 2. Snapshot (reversibility) — write failure ABORTS before any delete.
+    const dir = gcBackupDir(state);
+    const ts = new Date().toISOString().replace(/[:.]/g, "-");
+    const snapshotPath = join(dir, `gc-orphan-edges-${ts}.surql`);
+    try {
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(snapshotPath, snapshotLines.join("\n") + "\n", "utf-8");
+    }
+    catch (e) {
+        throw new Error(`gcSweepOrphanedEdges: snapshot write failed (${String(e)}). Aborting.`);
+    }
+    if (dryRun) {
+        return { scanned: RELATION_TABLES.length, orphaned, removed: 0, perTable, snapshot: snapshotPath, dryRun };
+    }
+    // 3. Delete the orphaned edges, table by table.
+    let removed = 0;
+    for (const edgeTb of Object.keys(perTable)) {
+        // Edge table (not content) — lint-legal, but routed through the QA snapshot
+        // above + after-verify below. The marker is required because the lint's
+        // DYNAMIC_DELETE_RE catches the `DELETE ${edgeTb}` template form.
+        await store.queryExec(`DELETE ${edgeTb} WHERE ${ORPHAN_PRED}`); // GATED-GC: orphaned-edge sweep
+        removed += perTable[edgeTb];
+    }
+    // 4. After-verify: orphans gone AND no table's both-live count DROPPED.
+    const failures = [];
+    for (const edgeTb of Object.keys(perTable)) {
+        const remain = await store.queryFirst(`SELECT count() AS n FROM ${edgeTb} WHERE ${ORPHAN_PRED} GROUP ALL`);
+        if ((remain[0]?.n ?? 0) > 0)
+            failures.push(`${remain[0]?.n} orphan(s) remain in ${edgeTb}`);
+        const liveNow = await store.queryFirst(`SELECT count() AS n FROM ${edgeTb} WHERE ${BOTH_LIVE_PRED} GROUP ALL`);
+        if ((liveNow[0]?.n ?? 0) < baselineLive[edgeTb]) {
+            failures.push(`${edgeTb} both-live DROPPED ${baselineLive[edgeTb]} -> ${liveNow[0]?.n} (a LIVE edge was wrongly removed!)`);
+        }
+    }
+    if (failures.length > 0) {
+        throw new Error(`gcSweepOrphanedEdges after-verify FAILED:\n` +
+            failures.map((f) => `  - ${f}`).join("\n") +
+            `\nSnapshot for manual restore: ${snapshotPath}`);
+    }
+    // 5. Audit.
+    try {
+        await store.queryExec(`CREATE maintenance_runs CONTENT $data`, {
+            data: {
+                op: "gcSweepOrphanedEdges",
+                job: "gcSweepOrphanedEdges",
+                reason,
+                removed,
+                rows_affected: removed,
+                duration_ms: Date.now() - started,
+            },
+        });
+    }
+    catch (e) {
+        swallow("gc:sweepOrphanedEdges:audit", e);
+    }
+    return { scanned: RELATION_TABLES.length, orphaned, removed, perTable, snapshot: snapshotPath, dryRun };
 }
 /**
  * NEVER-DELETE-A-CORRECTION guard, extracted so the G1 unit test can exercise

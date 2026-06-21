@@ -10,9 +10,11 @@
  *
  * The five QA-gate primitives (all REAL — no stubs):
  *   (1) blast-radius      — co-delete EVERY incident edge across all 26
- *                           relation tables; NULL third-party scalar
- *                           back-pointers (superseded_by/resolved_by) on
- *                           surviving rows so nothing is left dangling.
+ *                           relation tables; NULL the COMPLETE set of scalar
+ *                           back-pointers (4× superseded_by, resolved_by,
+ *                           causal_chain trigger/outcome_memory, and the
+ *                           *.memory_id refs) on surviving rows so nothing is
+ *                           left dangling. after-verify re-checks every one.
  *   (2) genuinely-dead    — caller supplies the dead-set; this helper
  *                           additionally REFUSES to delete a correction
  *                           memory (defense in depth — a correction is
@@ -91,6 +93,38 @@ export interface GcHardDeleteOpts {
  * No-ops (returns deleted:0, snapshot:"") on an empty id list.
  */
 export declare function gcHardDelete(state: GlobalPluginState, table: string, ids: string[], opts: GcHardDeleteOpts): Promise<GcHardDeleteResult>;
+export interface GcSweepResult {
+    /** Relation tables scanned. */
+    scanned: number;
+    /** Orphaned edges found. */
+    orphaned: number;
+    /** Orphaned edges removed (0 on dryRun). */
+    removed: number;
+    /** Per-table orphan counts. */
+    perTable: Record<string, number>;
+    /** Snapshot path ("" if no orphans). */
+    snapshot: string;
+    dryRun: boolean;
+}
+/**
+ * G2 — orphaned-edge sweep. Delete EDGE rows whose `in` OR `out` endpoint
+ * record no longer exists (true danglers: residue of pre-v0.7.93 DELETE-based
+ * concept GC + bulk imports). Graph hygiene, NOT a content delete — relation
+ * tables are not content-bearing, so this is lint-legal — but it still follows
+ * the QA gate: snapshot the danglers first, then after-verify.
+ *
+ * Detector VERIFIED live (2026-06-21, populated DB): orphan + both-endpoints-
+ * live == total per table (exhaustive + disjoint, zero false positives; 309
+ * orphans concentrated in concept-edge tables). after-verify throws unless every
+ * swept table's orphan count is 0 AND its both-live count did NOT DROP (we
+ * removed only danglers — robust to concurrent inserts that only raise it).
+ *
+ * Reusable: also the trailing sweep to call after a content node delete.
+ */
+export declare function gcSweepOrphanedEdges(state: GlobalPluginState, opts?: {
+    dryRun?: boolean;
+    reason?: string;
+}): Promise<GcSweepResult>;
 /**
  * NEVER-DELETE-A-CORRECTION guard, extracted so the G1 unit test can exercise
  * it directly. Returns the subset of `ids` that are correction memories.

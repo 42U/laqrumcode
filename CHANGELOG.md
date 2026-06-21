@@ -258,6 +258,22 @@ deletes nothing itself; it is the gate. Five REAL primitives (no stubs):
   DELETE inside `gc.ts` is auto-laundered). Full suite green (1483). A 2.3 GB master DB snapshot was
   taken first as the disaster net.
 
+### Hardened — Phase 2 Round 2: orphaned-edge sweep (`gcSweepOrphanedEdges`) — FIRST real GC delete
+
+The graph carried **309 dangling edges** — relation rows whose `in`/`out` endpoint record was
+hard-deleted long ago (residue of pre-v0.7.93 DELETE-based concept GC + bulk imports). Added
+`gcSweepOrphanedEdges` (reusable; also the trailing sweep after a future node delete): detects via
+`in.id IS NONE OR out.id IS NONE` (absent endpoint — a SOFT-tagged endpoint still exists and is
+read-filtered by G3, never deleted), snapshots the danglers, deletes per table, and after-verifies
+(throws unless every table's orphan count is 0 AND its both-endpoints-live count did not DROP).
+- **Detector proven before deleting** (read-only): per-table `orphan + both-live == total`
+  (exhaustive + disjoint, zero false positives); sampled endpoints confirmed absent.
+- **Executed on the live DB with per-action sign-off**: removed exactly 309 (related_to 97,
+  derived_from 90, relevant_to 90, broader 20, performed 11, owns 1); independent global re-count
+  → **0**; reversible 38 K snapshot (309 `CREATE` statements) written first. `fix-g2-orphaned-edge-
+  sweep.test.ts` guards the contract. Edge tables aren't content-bearing (lint-legal), but the sweep
+  still runs the full snapshot + after-verify QA gate.
+
 ## [0.7.130] — 2026-06-19
 
 ### Added — `update_skill` MCP tool
