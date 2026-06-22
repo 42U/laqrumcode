@@ -47,6 +47,14 @@ export declare function computeDrainCooldown(consecutiveFailures: number): numbe
  *  progress — ambiguous, e.g. a slow extractor that crashed mid-item) leaves
  *  it unchanged so legitimate slow work never accrues a cooldown. */
 export declare function classifyDrainOutcome(runtimeMs: number, queueBefore: number, queueAfter: number): "progress" | "fast-failure" | "neutral";
+/** Pure: map a completed-drain classification to the maintenance_runs status
+ *  E12 records. A "fast-failure" (extractor died instantly, no queue progress —
+ *  the chronic-drainer signal) is the only outcome that reads as a FAILED drain;
+ *  "progress" and "neutral" (a legitimately slow run that did work or is
+ *  ambiguous) read as 'ok' so a slow-but-healthy extractor never flips
+ *  memory_health to RED. Exported so the regression test pins the exact wiring
+ *  the child-exit handler uses without spawning a real subprocess. */
+export declare function drainOutcomeToStatus(outcome: "progress" | "fast-failure" | "neutral"): "ok" | "error";
 /** Test hook — reset backoff state between cases. */
 export declare function resetDrainBackoffForTest(): void;
 /** Build a minimal environment for the drain subprocess.
@@ -181,6 +189,36 @@ declare function pruneStaleSpending(cacheDir: string): void;
  *  rewrite it keeping only today's entries. Bounds growth at roughly one
  *  day's worth of activity (~5KB at the default 50/day cap). */
 declare function bumpSpending(cacheDir: string): SpendingState;
+/**
+ * E12 (observability): fold the drainer into E1's maintenance_runs stream so a
+ * chronically-failing background extractor becomes visible.
+ *
+ * Pre-E12, auto-drain.ts only ever logged via swallow.warn on startup/periodic/
+ * trigger (no health row); the only operator-visible symptom of a drainer that
+ * dies on every spawn was the LAGGING pending_work>50 backlog proxy, which trips
+ * minutes-to-hours after the drainer first wedged. memory_health (E1) reads the
+ * newest maintenance_runs row per job and pushes a RED diagnostic for any job
+ * whose latest status='error'; writing a job='autoDrain' row here means a
+ * wedged drainer surfaces on the NEXT memory_health call instead of waiting for
+ * the backlog to build.
+ *
+ * Writes the SAME `CREATE maintenance_runs CONTENT $data` shape as
+ * maintenance.ts runJob (job/status/rows_affected/duration_ms[/error]).
+ * auto-drain has no easy handle on the runJob helper (it lives in the
+ * maintenance orchestrator and wraps a fn it runs itself; the drain result is
+ * only known later, in the detached child's exit handler), so we write the row
+ * directly via the store.
+ *
+ * Store-guarded and never-throws: identical to runJob's finally — if the store
+ * is down we can't record, and a failure to RECORD a drain must never propagate
+ * into the exit/error/catch handlers that call this (they run inside detached
+ * child callbacks where a throw would be unhandled).
+ */
+declare function recordDrainRun(state: GlobalPluginState, status: "ok" | "error", opts?: {
+    durationMs?: number;
+    rowsAffected?: number;
+    error?: string;
+}): Promise<void>;
 /** Start the periodic drain scheduler. Idempotent — calling twice is a no-op. */
 export declare function startDrainScheduler(state: GlobalPluginState, opts: DrainSchedulerOpts): void;
 /** Stop the periodic drain scheduler (call during shutdown). */
@@ -211,6 +249,9 @@ export declare const __testing: {
     writeChildMarker: typeof writeChildMarker;
     cmdlineLooksLikeDrainer: typeof cmdlineLooksLikeDrainer;
     buildDrainEnv: typeof buildDrainEnv;
+    recordDrainRun: typeof recordDrainRun;
+    classifyDrainOutcome: typeof classifyDrainOutcome;
+    drainOutcomeToStatus: typeof drainOutcomeToStatus;
     SPENDING_PRUNE_THRESHOLD_BYTES: number;
 };
 export {};

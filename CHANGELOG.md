@@ -330,6 +330,37 @@ Full suite green (1546; sole failure is the pre-existing environmental R6 real-d
 timeout). Wave 2 (E8 stale-daemon-restart, E10 EADDRINUSE, E11/E12 maintenance backoff + drain
 liveness, E13 sweep cadence, E17 hot-table indexes, E20 skill path) follows.
 
+### Hardened — Phase 3 Wave 2: remaining 7 audited gaps (lifecycle / maintenance-perf / drain / skill)
+
+Closes the rest of the 16-gap audit:
+
+- **E8 (HIGH) — stale daemon after upgrade.** A busy single-host daemon only exited at the
+  last-client-disconnect, so it ran old `dist/` indefinitely after `npm upgrade`. Added a bounded
+  supersede grace window (`supersedeGraceMs`, 3min default): once flagged superseded by a newer
+  client it drains in-flight RPCs (via the audited K11 `close()` path) and exits even with clients
+  attached, so a fresh daemon spawns. Graceful last-disconnect path still wins if it fires first
+  (single shared `supersedeFired` guard; can't double-exit or thrash).
+- **E10 (MEDIUM) — TCP EADDRINUSE recovery.** The TCP listen path now probes the occupant with an
+  unauthenticated `meta.health` and throws a distinguishable `TcpPortInUseError{kind}` —
+  `kongcode-daemon` → defer to the live sibling (exit 0), `foreign` → clear diagnostic + exit 1
+  (was an opaque bind crash; UDS path unchanged).
+- **E11 (LOW) — maintenance failure backoff.** `shouldRunMaintenance` now reads the E1 status field
+  and skips a job whose latest run errored within a 30min cooldown — a permanently-failing job no
+  longer hot-loops every boot.
+- **E13 (MEDIUM) — orphan-sweep cadence.** Throttled `gcSweepOrphanedEdges` to weekly (with a
+  zero-orphan heartbeat row to gate on) instead of ~56 full edge-table scans every 6h; `force`
+  (post-delete trailing sweep) + dryRun bypass the throttle.
+- **E17 (MEDIUM) — hot-table indexes.** Added the composite/endpoint indexes the archiveOldTurns +
+  garbageCollectConcepts predicates need (turn `pruned_at,timestamp`; retrieval_outcome
+  `memory_table,memory_id`; concept-edge endpoints) so they aren't full scans on a large graph.
+- **E12 (MEDIUM) — drain liveness.** Auto-drain now writes a `maintenance_runs` row (job=`autoDrain`,
+  ok/error) per attempt, so E1's `memory_health` diagnostic surfaces a chronically-failing drainer.
+- **E20 (LOW) — backup skill.** `kongcode-backup-native` de-hardcoded (runtime-resolved surreal
+  binary, version de-pinned, Verify section corrected to the real batched-INSERT export format).
+
+Full suite green (1577; sole failure is the pre-existing environmental R6 TCP-spawn timeout). All 16
+audited enterprise-readiness gaps are now addressed.
+
 ## [0.7.130] — 2026-06-19
 
 ### Added — `update_skill` MCP tool

@@ -50,6 +50,7 @@ import { join } from "node:path";
 import { mkdirSync, writeFileSync } from "node:fs";
 import type { GlobalPluginState } from "./state.js";
 import { RECORD_ID_RE, swallow } from "./errors.js";
+import { parseDatetimeMs } from "./observability.js";
 
 /**
  * Content-bearing tables. MUST stay in lockstep with CONTENT_TABLES in
@@ -487,7 +488,22 @@ export interface GcSweepResult {
   /** Snapshot path ("" if no orphans). */
   snapshot: string;
   dryRun: boolean;
+  /** E13: true when a scheduled sweep was skipped by the weekly throttle
+   *  (no scan performed). Distinct from a zero-orphan no-op, which DID scan. */
+  throttled?: boolean;
 }
+
+/** E13: minimum interval between scheduled (non-forced) full sweeps. The 6h
+ *  maintenance cycle calls gcSweepOrphanedEdges every cycle; at a large
+ *  per-install graph that is 26 full edge-table scans (each row's
+ *  `in.id IS NONE OR out.id IS NONE` fans out to an endpoint lookup) ~4x/day for
+ *  what is normally a zero-orphan no-op. The keystone (gcHardDelete) co-deletes
+ *  incident edges in the same op and the D4 lint blocks ad-hoc content DELETEs,
+ *  so new orphans stay ~0 — there is nothing for a frequent sweep to find.
+ *  Throttle the *scheduled* cadence to weekly; the post-content-delete trailing
+ *  sweep passes force:true to bypass this (it MUST run right after a delete to
+ *  catch any edge that delete just orphaned). */
+const SWEEP_MIN_INTERVAL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 
 /**
  * G2 — orphaned-edge sweep. Delete EDGE rows whose `in` OR `out` endpoint
@@ -502,16 +518,42 @@ export interface GcSweepResult {
  * swept table's orphan count is 0 AND its both-live count did NOT DROP (we
  * removed only danglers — robust to concurrent inserts that only raise it).
  *
+ * E13: scheduled (non-forced, non-dryRun) calls are throttled to a weekly
+ * cadence (SWEEP_MIN_INTERVAL_MS) — pass force:true for the trailing sweep
+ * after a content node delete, which must run immediately.
+ *
  * Reusable: also the trailing sweep to call after a content node delete.
  */
 export async function gcSweepOrphanedEdges(
   state: GlobalPluginState,
-  opts: { dryRun?: boolean; reason?: string } = {},
+  opts: { dryRun?: boolean; reason?: string; force?: boolean } = {},
 ): Promise<GcSweepResult> {
   const started = Date.now();
   const store = state.store;
   const reason = (opts.reason ?? "orphaned-edge sweep").trim() || "orphaned-edge sweep";
   const dryRun = opts.dryRun ?? false;
+  const force = opts.force ?? false;
+
+  // E13 throttle: skip a scheduled sweep if a prior sweep ran within the
+  // interval. force:true (post-delete trailing sweep) and dryRun (inspection)
+  // always bypass — neither should be gated. Best-effort: a query failure
+  // falls through and the sweep runs (never worse than the pre-E13 behavior).
+  if (!force && !dryRun) {
+    try {
+      const last = await store.queryFirst<{ ran_at: string }>(
+        `SELECT ran_at FROM maintenance_runs WHERE job = 'gcSweepOrphanedEdges' ORDER BY ran_at DESC LIMIT 1`,
+      );
+      const lastRanAt = last[0]?.ran_at != null ? parseDatetimeMs(last[0].ran_at) : null;
+      if (lastRanAt != null) {
+        const ageMs = Date.now() - lastRanAt;
+        if (ageMs >= 0 && ageMs < SWEEP_MIN_INTERVAL_MS) {
+          return { scanned: 0, orphaned: 0, removed: 0, perTable: {}, snapshot: "", dryRun, throttled: true };
+        }
+      }
+    } catch (e) {
+      swallow("gc:sweepOrphanedEdges:throttle", e);
+    }
+  }
 
   const perTable: Record<string, number> = {};
   const baselineLive: Record<string, number> = {};
@@ -545,6 +587,28 @@ export async function gcSweepOrphanedEdges(
   }
 
   if (orphaned === 0) {
+    // E13 heartbeat: the steady state is zero orphans, and the pre-E13 code
+    // wrote an audit row ONLY when it deleted something (step 5). With the
+    // weekly throttle reading the last `gcSweepOrphanedEdges` ran_at, a no-op
+    // scan MUST leave a row or the throttle never engages and we scan every
+    // cycle anyway. Record a lightweight ok/0 row here (skipped on dryRun —
+    // inspection must not reset the throttle clock). Best-effort.
+    if (!dryRun) {
+      try {
+        await store.queryExec(`CREATE maintenance_runs CONTENT $data`, {
+          data: {
+            op: "gcSweepOrphanedEdges",
+            job: "gcSweepOrphanedEdges",
+            reason,
+            removed: 0,
+            rows_affected: 0,
+            duration_ms: Date.now() - started,
+          },
+        });
+      } catch (e) {
+        swallow("gc:sweepOrphanedEdges:heartbeat", e);
+      }
+    }
     return { scanned: RELATION_TABLES.length, orphaned: 0, removed: 0, perTable, snapshot: "", dryRun };
   }
 

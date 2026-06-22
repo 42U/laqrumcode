@@ -2298,7 +2298,20 @@ export class SurrealStore {
    * graph organically grew large enough to cross the floor. Now a fresh
    * install runs each job once in the first session (baselining), then
    * weekly, plus any time volume crosses the legacy floor.
+   *
+   * E11 (failure backoff): E1 now records status='error' rows for jobs that
+   * throw (via runJob's finally). Without a backoff, a PERMANENTLY-failing job
+   * hot-loops: its newest row is an error (not a success), so the time gate
+   * above treats it as "due" and re-runs it every boot — wasting the scan on a
+   * job that cannot succeed (e.g. a SurrealQL parse error that survives until
+   * the next release). Mirroring auto-drain's fast-fail cooldown, if the most
+   * recent row for this job is status='error' AND younger than
+   * FAILURE_BACKOFF_MS, we skip the retry until the cooldown elapses. A fresh
+   * daemon (newer dist) is unaffected: the error row pre-dates its boot only by
+   * the cooldown window at most, so a real fix retries within ~30 min.
    */
+  private static readonly FAILURE_BACKOFF_MS = 30 * 60 * 1000; // 30 min
+
   private async shouldRunMaintenance(
     job: string,
     countFloor: number,
@@ -2306,8 +2319,8 @@ export class SurrealStore {
     currentCount: number,
   ): Promise<boolean> {
     try {
-      const rows = await this.queryFirst<{ ran_at: string }>(
-        `SELECT ran_at FROM maintenance_runs WHERE job = $job ORDER BY ran_at DESC LIMIT 1`,
+      const rows = await this.queryFirst<{ ran_at: string; status?: string }>(
+        `SELECT ran_at, status FROM maintenance_runs WHERE job = $job ORDER BY ran_at DESC LIMIT 1`,
         { job },
       );
       if (rows.length === 0) return true; // baseline
@@ -2317,6 +2330,15 @@ export class SurrealStore {
       // skipping all maintenance runs. parseDatetimeMs returns null in that
       // case and we treat unknown age as "stale" (run it) rather than fresh.
       const lastRanAt = parseDatetimeMs(rows[0].ran_at);
+      // E11: failure backoff. Only applies when the newest row's age is KNOWN
+      // and within the cooldown — an unparseable/unknown age falls through to
+      // the unknown-age "re-run" branch below (we never want a bad timestamp to
+      // permanently wedge a job). status defaults to 'ok' in schema, so legacy
+      // rows and success rows never trigger the backoff.
+      if (rows[0].status === "error" && lastRanAt != null) {
+        const ageMs = Date.now() - lastRanAt;
+        if (ageMs >= 0 && ageMs < SurrealStore.FAILURE_BACKOFF_MS) return false;
+      }
       if (lastRanAt == null) return true; // unknown age — re-run
       const ageDays = (Date.now() - lastRanAt) / (1000 * 60 * 60 * 24);
       if (ageDays >= maxDaysSince) return true;

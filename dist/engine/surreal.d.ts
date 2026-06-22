@@ -381,7 +381,19 @@ export declare class SurrealStore {
      * graph organically grew large enough to cross the floor. Now a fresh
      * install runs each job once in the first session (baselining), then
      * weekly, plus any time volume crosses the legacy floor.
+     *
+     * E11 (failure backoff): E1 now records status='error' rows for jobs that
+     * throw (via runJob's finally). Without a backoff, a PERMANENTLY-failing job
+     * hot-loops: its newest row is an error (not a success), so the time gate
+     * above treats it as "due" and re-runs it every boot — wasting the scan on a
+     * job that cannot succeed (e.g. a SurrealQL parse error that survives until
+     * the next release). Mirroring auto-drain's fast-fail cooldown, if the most
+     * recent row for this job is status='error' AND younger than
+     * FAILURE_BACKOFF_MS, we skip the retry until the cooldown elapses. A fresh
+     * daemon (newer dist) is unaffected: the error row pre-dates its boot only by
+     * the cooldown window at most, so a real fix retries within ~30 min.
      */
+    private static readonly FAILURE_BACKOFF_MS;
     private shouldRunMaintenance;
     private recordMaintenanceRun;
     runMemoryMaintenance(): Promise<void>;

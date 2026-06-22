@@ -65,6 +65,16 @@ export function classifyDrainOutcome(runtimeMs, queueBefore, queueAfter) {
         return "progress";
     return runtimeMs < DRAIN_FAST_FAIL_MS ? "fast-failure" : "neutral";
 }
+/** Pure: map a completed-drain classification to the maintenance_runs status
+ *  E12 records. A "fast-failure" (extractor died instantly, no queue progress —
+ *  the chronic-drainer signal) is the only outcome that reads as a FAILED drain;
+ *  "progress" and "neutral" (a legitimately slow run that did work or is
+ *  ambiguous) read as 'ok' so a slow-but-healthy extractor never flips
+ *  memory_health to RED. Exported so the regression test pins the exact wiring
+ *  the child-exit handler uses without spawning a real subprocess. */
+export function drainOutcomeToStatus(outcome) {
+    return outcome === "fast-failure" ? "error" : "ok";
+}
 /** Test hook — reset backoff state between cases. */
 export function resetDrainBackoffForTest() {
     consecutiveFastFailures = 0;
@@ -675,6 +685,50 @@ async function getPendingCount(state) {
         return 0;
     }
 }
+/**
+ * E12 (observability): fold the drainer into E1's maintenance_runs stream so a
+ * chronically-failing background extractor becomes visible.
+ *
+ * Pre-E12, auto-drain.ts only ever logged via swallow.warn on startup/periodic/
+ * trigger (no health row); the only operator-visible symptom of a drainer that
+ * dies on every spawn was the LAGGING pending_work>50 backlog proxy, which trips
+ * minutes-to-hours after the drainer first wedged. memory_health (E1) reads the
+ * newest maintenance_runs row per job and pushes a RED diagnostic for any job
+ * whose latest status='error'; writing a job='autoDrain' row here means a
+ * wedged drainer surfaces on the NEXT memory_health call instead of waiting for
+ * the backlog to build.
+ *
+ * Writes the SAME `CREATE maintenance_runs CONTENT $data` shape as
+ * maintenance.ts runJob (job/status/rows_affected/duration_ms[/error]).
+ * auto-drain has no easy handle on the runJob helper (it lives in the
+ * maintenance orchestrator and wraps a fn it runs itself; the drain result is
+ * only known later, in the detached child's exit handler), so we write the row
+ * directly via the store.
+ *
+ * Store-guarded and never-throws: identical to runJob's finally — if the store
+ * is down we can't record, and a failure to RECORD a drain must never propagate
+ * into the exit/error/catch handlers that call this (they run inside detached
+ * child callbacks where a throw would be unhandled).
+ */
+async function recordDrainRun(state, status, opts = {}) {
+    if (!state.store.isAvailable())
+        return;
+    try {
+        const data = {
+            job: "autoDrain",
+            status,
+            rows_affected: Number.isFinite(opts.rowsAffected) ? opts.rowsAffected : 0,
+            duration_ms: Number.isFinite(opts.durationMs) ? opts.durationMs : 0,
+        };
+        if (opts.error)
+            data.error = opts.error.slice(0, 300);
+        await state.store.queryExec(`CREATE maintenance_runs CONTENT $data`, { data });
+    }
+    catch (e) {
+        // A failure to RECORD the run must not itself throw — mirrors runJob.
+        swallow("auto-drain:recordRun", e);
+    }
+}
 const DRAIN_PROMPT = "Drain the KongCode pending_work queue. Loop: call mcp__plugin_kongcode_kongcode__fetch_pending_work " +
     "to claim the next item, analyze the data per the work-type instructions, then call " +
     "mcp__plugin_kongcode_kongcode__commit_work_results with your output. Repeat until fetch_pending_work " +
@@ -898,6 +952,22 @@ async function spawnHeadlessDrainer(state, opts, reason) {
                 }
                 catch { /* unknown → treat as no progress */ }
                 const outcome = classifyDrainOutcome(runtimeMs, queueBefore, queueAfter);
+                // E12: fold this completed drain attempt into the maintenance_runs
+                // stream. A "fast-failure" (extractor died instantly, made no queue
+                // progress — the chronic-drainer signal) records status='error' so
+                // memory_health's newest-row-per-job RED diagnostic surfaces it;
+                // "progress" and "neutral" (a legitimately slow run) record 'ok'.
+                // rows_affected = items drained = queueBefore - queueAfter (clamped ≥0,
+                // since queueAfter can exceed queueBefore if new work was enqueued
+                // concurrently). Fire-and-forget like the rest of this block.
+                const drained = Math.max(0, queueBefore - queueAfter);
+                void recordDrainRun(state, drainOutcomeToStatus(outcome), {
+                    durationMs: runtimeMs,
+                    rowsAffected: drained,
+                    error: outcome === "fast-failure"
+                        ? `extractor exited code=${code} after ${Math.round(runtimeMs / 1000)}s with no queue progress (${queueBefore}→${queueAfter})`
+                        : undefined,
+                });
                 if (outcome === "progress") {
                     consecutiveFastFailures = 0;
                     drainCooldownUntil = 0;
@@ -917,6 +987,13 @@ async function spawnHeadlessDrainer(state, opts, reason) {
         child.on("error", (err) => {
             log.error(`[auto-drain] extractor pid=${child.pid} error:`, err);
             releaseOnce();
+            // E12: a child 'error' event means the spawned extractor failed to run
+            // (e.g. exec error post-fork) — record it as a failed drain attempt so
+            // memory_health sees status='error' for autoDrain.
+            void recordDrainRun(state, "error", {
+                durationMs: Date.now() - spawnedAt,
+                error: `extractor process error: ${err.message}`,
+            });
         });
         return { spawned: true };
     }
@@ -934,6 +1011,11 @@ async function spawnHeadlessDrainer(state, opts, reason) {
         }
         releaseLock(lockFd, lockPath);
         log.error("[auto-drain] spawn failed:", e);
+        // E12: spawn() threw before the child launched — record a failed drain
+        // attempt so a host where the claude binary is broken (ENOENT/EMFILE
+        // bursts) shows status='error' for autoDrain in memory_health rather than
+        // staying silently green. Fire-and-forget; never blocks the return.
+        void recordDrainRun(state, "error", { error: `spawn failed: ${e.message}` });
         return { spawned: false, reason: e.message };
     }
 }
@@ -1037,5 +1119,8 @@ export const __testing = {
     writeChildMarker,
     cmdlineLooksLikeDrainer,
     buildDrainEnv,
+    recordDrainRun,
+    classifyDrainOutcome,
+    drainOutcomeToStatus,
     SPENDING_PRUNE_THRESHOLD_BYTES,
 };

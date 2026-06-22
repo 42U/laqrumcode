@@ -105,6 +105,9 @@ export interface GcSweepResult {
     /** Snapshot path ("" if no orphans). */
     snapshot: string;
     dryRun: boolean;
+    /** E13: true when a scheduled sweep was skipped by the weekly throttle
+     *  (no scan performed). Distinct from a zero-orphan no-op, which DID scan. */
+    throttled?: boolean;
 }
 /**
  * G2 — orphaned-edge sweep. Delete EDGE rows whose `in` OR `out` endpoint
@@ -119,11 +122,16 @@ export interface GcSweepResult {
  * swept table's orphan count is 0 AND its both-live count did NOT DROP (we
  * removed only danglers — robust to concurrent inserts that only raise it).
  *
+ * E13: scheduled (non-forced, non-dryRun) calls are throttled to a weekly
+ * cadence (SWEEP_MIN_INTERVAL_MS) — pass force:true for the trailing sweep
+ * after a content node delete, which must run immediately.
+ *
  * Reusable: also the trailing sweep to call after a content node delete.
  */
 export declare function gcSweepOrphanedEdges(state: GlobalPluginState, opts?: {
     dryRun?: boolean;
     reason?: string;
+    force?: boolean;
 }): Promise<GcSweepResult>;
 /**
  * NEVER-DELETE-A-CORRECTION guard, extracted so the G1 unit test can exercise

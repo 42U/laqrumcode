@@ -16,7 +16,7 @@
  * EmbeddingService) handles its own concurrency.
  */
 
-import { createServer, Socket as NetSocket, type Server, type Socket } from "node:net";
+import { createServer, connect as netConnect, Socket as NetSocket, type Server, type Socket } from "node:net";
 import { unlinkSync, existsSync, chmodSync } from "node:fs";
 import {
   PROTOCOL_VERSION,
@@ -83,6 +83,25 @@ export interface DaemonServerOpts {
    *  exit at the natural disconnect boundary, without disrupting other
    *  still-attached older-version clients. */
   onSupersedeReady?: () => void;
+  /** E8: bounded grace window for the supersede path. onSupersedeReady alone
+   *  only fires at the LAST-client-disconnect boundary — so on a busy
+   *  single-host install whose client count never reaches zero, a daemon
+   *  flagged superseded by a newer client keeps running OLD dist/ code
+   *  indefinitely after `npm upgrade`. This is the upper bound: once the
+   *  supersede flag is set, the daemon waits at most this long for clients to
+   *  drain to zero on their own (the graceful onSupersedeReady path); if they
+   *  haven't, onSupersedeDeadline fires so daemon main can drain in-flight
+   *  RPCs and exit ANYWAY, letting a fresh daemon (new dist) spawn on the next
+   *  client connect. Set 0/undefined to disable the bound (legacy
+   *  wait-for-last-disconnect-only behavior). Default wired in daemon/index.ts. */
+  supersedeGraceMs?: number;
+  /** E8: fired once when the supersede grace window (supersedeGraceMs) elapses
+   *  and clients are STILL attached. Daemon main wires this to the same
+   *  drain-and-exit path as onSupersedeReady / onIdleReap. Never fires if the
+   *  graceful onSupersedeReady path already fired first (last client
+   *  disconnected inside the window) — the two are mutually exclusive per
+   *  supersede cycle. */
+  onSupersedeDeadline?: () => void;
   /** Idle-reaper: when clients.size === 0 for this many ms, fire onIdleReap.
    *  Set to 0 to disable. Default wired in daemon/index.ts (0.7.11+) is
    *  60s; users can override via KONGCODE_DAEMON_IDLE_TIMEOUT_MS env var.
@@ -103,6 +122,37 @@ export interface DaemonServerOpts {
    *  already isolate OS users, so no per-socket gate is needed and the existing
    *  handshake-optional Unix-socket path is unchanged. */
   requireHandshakeAuth?: boolean;
+  /** E10: token presented when probing an EADDRINUSE occupant on the TCP listen
+   *  path. meta.health needs no auth so the probe works without it, but if a
+   *  future health gate is added this lets the probe still identify a sibling
+   *  kongcode daemon. Daemon main passes the current per-user token-file
+   *  contents (readDaemonToken). Optional — null/undefined means "probe
+   *  unauthenticated", which is sufficient to classify the occupant. */
+  probeToken?: string | null;
+  /** E10: how long the EADDRINUSE occupant probe waits for a meta.health reply
+   *  before giving up and classifying the occupant as foreign/unresponsive.
+   *  Small by design — a live local kongcode daemon answers meta.health in
+   *  single-digit ms. Default 1500ms; tests override to keep the suite fast. */
+  probeTimeoutMs?: number;
+}
+
+/** E10: thrown by listen() when the TCP port is already bound (EADDRINUSE) and
+ *  the daemon couldn't take it over. `kind` makes the failure DISTINGUISHABLE —
+ *  callers (and tests) can tell a sibling kongcode daemon already owning the
+ *  port ("kongcode-daemon") from an unrelated foreign process squatting it
+ *  ("foreign"), instead of seeing a generic Error('listen EADDRINUSE'). This is
+ *  the asymmetry E10 fixes: the UDS path already unlinks a stale socket and
+ *  re-binds; the TCP path used to just rethrow the raw bind error with no
+ *  diagnosis of WHO holds the port. */
+export class TcpPortInUseError extends Error {
+  constructor(
+    public readonly kind: "kongcode-daemon" | "foreign",
+    public readonly port: number,
+    message: string,
+  ) {
+    super(message);
+    this.name = "TcpPortInUseError";
+  }
 }
 
 export class DaemonServer {
@@ -128,6 +178,13 @@ export class DaemonServer {
   private rpcsInFlight = 0;
   private startedAt = Date.now();
   private pendingSupersede = false;
+  /** E8: upper-bound timer armed by markPendingSupersede. When it fires (and
+   *  the supersede path hasn't already completed via last-client-disconnect),
+   *  onSupersedeDeadline runs so the daemon exits even with clients attached,
+   *  freeing the endpoint for a fresh-dist daemon. Cleared on graceful
+   *  supersede completion and in close(). Unref'd so it never keeps the loop
+   *  alive on its own. */
+  private supersedeGraceTimer: NodeJS.Timeout | null = null;
   private idleTimer: NodeJS.Timeout | null = null;
   private idleSince: number | null = null;
   /** Periodic phantom-client reaper. Agent E flagged that pruneDeadClients
@@ -162,9 +219,76 @@ export class DaemonServer {
     this.handlers.set(method, handler);
   }
 
+  /** E10: probe whoever holds an in-use TCP port by opening a short-lived
+   *  connection and asking meta.health (which needs no auth — the token gate is
+   *  only on meta.handshake and non-meta methods, so any kongcode daemon
+   *  answers it). A well-formed JSON-RPC health reply ⇒ the occupant IS a
+   *  kongcode daemon (this OS user's sibling, or — on a hash-collided shared
+   *  loopback port — another user's; either way a real daemon, not a squatter).
+   *  No reply / connection refused / unparseable bytes ⇒ a FOREIGN process.
+   *  This is what lets listen() throw a DISTINGUISHABLE TcpPortInUseError
+   *  instead of a generic bind failure. Best-effort and bounded; never throws —
+   *  returns "kongcode-daemon" | "foreign". Presents probeToken if we have one
+   *  for forward-compat with a future authed health endpoint. */
+  private async probeTcpOccupant(port: number): Promise<"kongcode-daemon" | "foreign"> {
+    const timeoutMs = this.opts.probeTimeoutMs ?? 1_500;
+    return new Promise<"kongcode-daemon" | "foreign">((resolve) => {
+      let settled = false;
+      const done = (verdict: "kongcode-daemon" | "foreign") => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        try { sock.destroy(); } catch {}
+        resolve(verdict);
+      };
+      const timer = setTimeout(() => done("foreign"), timeoutMs);
+      timer.unref?.();
+      const sock = netConnect({ host: "127.0.0.1", port });
+      let buffer = "";
+      sock.on("connect", () => {
+        const req: Record<string, unknown> = { jsonrpc: "2.0", id: 1, method: "meta.health", params: {} };
+        if (this.opts.probeToken) (req.params as Record<string, unknown>).handshake = this.opts.probeToken;
+        try { sock.write(JSON.stringify(req) + "\n"); } catch { done("foreign"); }
+      });
+      sock.on("data", (chunk) => {
+        buffer += chunk.toString("utf8");
+        const nl = buffer.indexOf("\n");
+        if (nl === -1) {
+          if (buffer.length > 64 * 1024) done("foreign"); // never a kongcode health line
+          return;
+        }
+        try {
+          const resp = JSON.parse(buffer.slice(0, nl)) as { jsonrpc?: string; result?: { ok?: boolean }; error?: unknown };
+          // A kongcode daemon answers meta.health with jsonrpc:"2.0" and either
+          // a result (ok:true + stats) or a structured JSON-RPC error. Either is
+          // proof it speaks our protocol — a foreign squatter cannot produce
+          // this shape. We don't require result.ok specifically because a daemon
+          // mid-bootstrap could in principle error; the protocol marker is enough.
+          if (resp && resp.jsonrpc === "2.0" && (resp.result !== undefined || resp.error !== undefined)) {
+            done("kongcode-daemon");
+          } else {
+            done("foreign");
+          }
+        } catch {
+          done("foreign");
+        }
+      });
+      // ECONNREFUSED (port freed between EADDRINUSE and probe), reset, etc. ⇒
+      // not a reachable kongcode daemon. Treat as foreign so the caller surfaces
+      // a clear "couldn't bind and couldn't confirm a kongcode daemon" message
+      // rather than silently adopting.
+      sock.on("error", () => done("foreign"));
+      sock.on("close", () => done("foreign"));
+    });
+  }
+
   /** Start listening. Throws if the socket can't be bound (e.g. another
    *  daemon already running on the same path — caller should detect via
-   *  the spawn lock + PID file probe before calling listen()). */
+   *  the spawn lock + PID file probe before calling listen()).
+   *
+   *  E10: the TCP path catches EADDRINUSE explicitly and probes the occupant
+   *  (probeTcpOccupant) so the failure is DISTINGUISHABLE — a sibling kongcode
+   *  daemon vs a foreign squatter — rather than a generic raw bind error. */
   async listen(): Promise<void> {
     if (this.opts.socketPath) {
       // Stale socket from a previous crashed daemon would prevent bind.
@@ -186,19 +310,63 @@ export class DaemonServer {
     }
     if (this.opts.tcpPort !== null && this.opts.tcpPort !== undefined) {
       this.tcpServer = createServer((sock) => this.onConnection(sock));
-      await new Promise<void>((resolve, reject) => {
-        this.tcpServer!.once("error", reject);
-        // Bind 127.0.0.1 only — never expose the daemon to the network.
-        // tcpPort=0 lets the OS pick an available ephemeral port, which is
-        // robust against win32 CI sandboxed runners that randomly restrict
-        // permissions on individual ports inside the IANA dynamic range
-        // (49152-65535). Read the assigned port via getTcpPort() after
-        // listen() resolves.
-        this.tcpServer!.listen(this.opts.tcpPort!, "127.0.0.1", () => {
-          this.tcpServer!.removeListener("error", reject);
-          resolve();
+      try {
+        await new Promise<void>((resolve, reject) => {
+          // Capture the bind error (incl. EADDRINUSE) so the catch below can
+          // probe the occupant instead of letting a raw Error('listen
+          // EADDRINUSE') bubble with no diagnosis of WHO holds the port.
+          this.tcpServer!.once("error", reject);
+          // Bind 127.0.0.1 only — never expose the daemon to the network.
+          // tcpPort=0 lets the OS pick an available ephemeral port, which is
+          // robust against win32 CI sandboxed runners that randomly restrict
+          // permissions on individual ports inside the IANA dynamic range
+          // (49152-65535). Read the assigned port via getTcpPort() after
+          // listen() resolves.
+          this.tcpServer!.listen(this.opts.tcpPort!, "127.0.0.1", () => {
+            this.tcpServer!.removeListener("error", reject);
+            resolve();
+          });
         });
-      });
+      } catch (e) {
+        const code = (e as NodeJS.ErrnoException).code;
+        if (code !== "EADDRINUSE") throw e; // unrelated bind failure — surface as-is
+        // E10: the port is taken. Mirror the UDS path's stale-handling intent
+        // (which unlinks a dead socket and re-binds): figure out WHO holds the
+        // port and fail with a distinguishable diagnostic. The spawn lock +
+        // PID-file probe in daemon main should normally have detected a live
+        // sibling and made the client REUSE it before we ever reached listen();
+        // arriving here means that guard was bypassed (lock stolen as
+        // "stale" while the daemon was actually alive, a race, or a foreign
+        // process grabbing the per-user port).
+        const port = this.opts.tcpPort!;
+        // The half-bound server object can't be reused — drop it before the
+        // throw so close() doesn't later try to tear down a server that never
+        // listened.
+        try { this.tcpServer!.close(); } catch {}
+        this.tcpServer = null;
+        const occupant = await this.probeTcpOccupant(port);
+        if (occupant === "kongcode-daemon") {
+          // A real kongcode daemon already owns the port. We can't (and must
+          // not) double-bind — the singleton invariant means that daemon should
+          // serve this user. The spawn lock should have caused adoption
+          // upstream; surface a clear, ACTIONABLE error distinct from a generic
+          // bind failure so the operator/log shows the singleton collision.
+          throw new TcpPortInUseError(
+            "kongcode-daemon",
+            port,
+            `TCP 127.0.0.1:${port} is already served by another kongcode daemon (singleton already running for this user). ` +
+              `This daemon will not start a second instance; the existing daemon should be reused. ` +
+              `If it is actually stale, stop it (or remove ${"~/.kongcode-daemon.pid"}) and retry.`,
+          );
+        }
+        // Foreign squatter — a non-kongcode process holds the per-user port.
+        throw new TcpPortInUseError(
+          "foreign",
+          port,
+          `TCP 127.0.0.1:${port} is in use by a FOREIGN (non-kongcode) process — it did not answer a meta.health probe. ` +
+            `kongcode cannot bind its daemon endpoint. Free the port, or set KONGCODE_DAEMON_PORT to an unused port.`,
+        );
+      }
       const addr = this.tcpServer!.address();
       const actualPort = (addr && typeof addr === "object") ? addr.port : this.opts.tcpPort;
       this.opts.log.info(`[daemon] listening on TCP 127.0.0.1:${actualPort}`);
@@ -332,6 +500,10 @@ export class DaemonServer {
   async close(): Promise<void> {
     this.disarmIdleTimer();
     this.stopPruneTimer();
+    // E8: cancel the supersede grace timer — once close() is running the daemon
+    // is already exiting, so the upper-bound deadline must not fire a second
+    // exit path mid-shutdown.
+    this.disarmSupersedeGraceTimer();
 
     // (1) Stop accepting NEW connections first. Existing sockets stay open so
     // in-flight handlers can still write their responses. Server.close()
@@ -489,18 +661,59 @@ export class DaemonServer {
   }
 
   /** Mark daemon for supersede: it will exit when the last attached client
-   *  disconnects. Idempotent. Safe to call from a handler thread. */
+   *  disconnects. Idempotent. Safe to call from a handler thread.
+   *
+   *  E8: also arms a BOUNDED grace timer (opts.supersedeGraceMs). The
+   *  graceful path (onSupersedeReady at last-client-disconnect) is preferred —
+   *  it never disrupts a still-attached older sibling session — but on a busy
+   *  single-host install whose client count never reaches zero it would wait
+   *  forever, leaving the daemon running stale dist/ code after `npm upgrade`.
+   *  The grace timer is the upper bound: if clients haven't drained to zero by
+   *  the time it fires, onSupersedeDeadline runs and the daemon exits anyway
+   *  (after draining in-flight RPCs in daemon main's cleanup) so a fresh-dist
+   *  daemon can spawn. Idempotent: a second markPendingSupersede call does NOT
+   *  re-arm or extend the window — the deadline is anchored to the FIRST flag. */
   markPendingSupersede(): void {
+    if (this.pendingSupersede) return; // already flagged — don't re-arm the grace timer
     this.pendingSupersede = true;
+    const graceMs = this.opts.supersedeGraceMs ?? 0;
+    if (graceMs > 0 && this.opts.onSupersedeDeadline && !this.supersedeGraceTimer) {
+      this.opts.log.info(`[daemon] supersede flagged — graceful exit on last-client-disconnect, bounded by a ${Math.round(graceMs / 1000)}s grace window`);
+      this.supersedeGraceTimer = setTimeout(() => {
+        this.supersedeGraceTimer = null;
+        // Re-check at fire time: the graceful path may have already exited the
+        // daemon between arming and firing. supersedeFired is the single guard
+        // shared with checkSupersedeReady, so we never double-fire the exit.
+        if (this.supersedeFired) return;
+        this.pruneDeadClients();
+        this.supersedeFired = true;
+        this.opts.log.info(`[daemon] supersede grace window (${graceMs}ms) elapsed with ${this.clients.size} client(s) still attached — draining and exiting for code refresh`);
+        try { this.opts.onSupersedeDeadline!(); } catch (e) {
+          this.opts.log.warn(`[daemon] onSupersedeDeadline callback threw: ${(e as Error).message}`);
+        }
+      }, graceMs);
+      this.supersedeGraceTimer.unref?.();
+    }
   }
 
   isPendingSupersede(): boolean {
     return this.pendingSupersede;
   }
 
+  /** Cancel the supersede grace timer (graceful path completed, or daemon is
+   *  shutting down). Safe to call repeatedly. */
+  private disarmSupersedeGraceTimer(): void {
+    if (this.supersedeGraceTimer) {
+      clearTimeout(this.supersedeGraceTimer);
+      this.supersedeGraceTimer = null;
+    }
+  }
+
   /** When supersede is flagged AND the last client just disconnected, fire
    *  the registered callback so daemon main can shut down cleanly. The
-   *  callback is invoked exactly once per supersede cycle. */
+   *  callback is invoked exactly once per supersede cycle — supersedeFired is
+   *  shared with the E8 grace-timer path so only ONE of {onSupersedeReady,
+   *  onSupersedeDeadline} ever runs. */
   private supersedeFired = false;
   private checkSupersedeReady(): void {
     // Prune phantoms before checking — otherwise stale Map entries block
@@ -513,6 +726,9 @@ export class DaemonServer {
       this.opts.onSupersedeReady
     ) {
       this.supersedeFired = true;
+      // E8: graceful path won the race — cancel the upper-bound grace timer so
+      // onSupersedeDeadline can't also fire later.
+      this.disarmSupersedeGraceTimer();
       this.opts.log.info("[daemon] last client disconnected with supersede flag set — exiting for code refresh");
       try { this.opts.onSupersedeReady(); } catch (e) {
         this.opts.log.warn(`[daemon] onSupersedeReady callback threw: ${(e as Error).message}`);

@@ -129,6 +129,16 @@ DEFINE INDEX IF NOT EXISTS turn_session_idx ON turn FIELDS session_id;
 -- with `turn` already at thousands of rows and growing this is the only
 -- on-write path that justifies an index here.
 DEFINE INDEX IF NOT EXISTS turn_timestamp_idx ON turn FIELDS timestamp;
+-- E17: archiveOldTurns (surreal.ts ~2728) selects
+--   WHERE timestamp < now()-7d AND pruned_at IS NONE AND <string>id NOT IN (...)
+-- every weekly cycle. The lone timestamp index above can't also serve the
+-- `pruned_at IS NONE` predicate, so once a graph accumulates archived rows the
+-- scan re-reads every already-pruned turn. A composite (pruned_at, timestamp)
+-- lets the planner seek the live + old slice directly. `turn` is SCHEMALESS and
+-- pruned_at is set by archiveOldTurns (not declared as a field), which is fine —
+-- SurrealDB indexes the field wherever present and treats absent as NONE, which
+-- is exactly the `pruned_at IS NONE` partition we filter on.
+DEFINE INDEX IF NOT EXISTS turn_pruned_timestamp_idx ON turn FIELDS pruned_at, timestamp;
 
 -- Identity chunks (agent persona / identity)
 DEFINE TABLE IF NOT EXISTS identity_chunk SCHEMALESS;
@@ -221,6 +231,13 @@ DEFINE INDEX IF NOT EXISTS memory_importance_idx ON memory FIELDS importance;
 -- getSessionRetrievedMemories (surreal.ts:1774). Without this, the
 -- archive pass does a full retrieval_outcome scan every run.
 DEFINE INDEX IF NOT EXISTS ro_memtable_idx ON retrieval_outcome FIELDS memory_table;
+-- E17: archiveOldTurns' anti-join subquery is exactly
+--   SELECT VALUE memory_id FROM retrieval_outcome WHERE memory_table = 'turn'
+-- The single-column ro_memtable_idx above finds the matching rows but then
+-- fetches each to read memory_id. A composite (memory_table, memory_id) makes
+-- it an index-only scan — the planner reads memory_id straight off the index,
+-- which is the hot input to the NOT-IN set the archive pass builds every cycle.
+DEFINE INDEX IF NOT EXISTS ro_memtable_memid_idx ON retrieval_outcome FIELDS memory_table, memory_id;
 
 -- Maintenance runs — observability for the 4 bootstrap maintenance jobs.
 -- One row per (job, run). Used by time-relative threshold gates so new
@@ -311,6 +328,22 @@ DEFINE TABLE OVERWRITE supersedes TYPE RELATION IN memory OUT concept|memory;
 -- Cross-pillar links
 DEFINE TABLE IF NOT EXISTS about_concept TYPE RELATION IN memory OUT concept;
 DEFINE TABLE IF NOT EXISTS artifact_mentions TYPE RELATION IN artifact OUT concept;
+
+-- E17: garbageCollectConcepts (surreal.ts ~2504) evaluates FOUR per-row graph
+-- fan-outs on every candidate concept, every weekly cycle:
+--   array::len(<-about_concept<-memory)  -- about_concept WHERE out = <concept>
+--   array::len(<-mentions<-turn)         -- mentions      WHERE out = <concept>
+--   array::len(->narrower->?)            -- narrower      WHERE in  = <concept>
+--   array::len(->broader->?)             -- broader       WHERE in  = <concept>
+-- SurrealDB RELATION tables do NOT auto-index in/out, so each traversal is a
+-- full edge-table scan. On a large single-install graph these dominate the GC
+-- pass. Endpoint indexes turn each fan-out into a seek. Direction matters: the
+-- `<-edge<-` (reverse) probes filter on `out`; the `->edge->` (forward) probes
+-- filter on `in`.
+DEFINE INDEX IF NOT EXISTS about_concept_out_idx ON about_concept FIELDS out;
+DEFINE INDEX IF NOT EXISTS mentions_out_idx ON mentions FIELDS out;
+DEFINE INDEX IF NOT EXISTS narrower_in_idx ON narrower FIELDS in;
+DEFINE INDEX IF NOT EXISTS broader_in_idx ON broader FIELDS in;
 
 -- ============================================================
 -- RETRIEVAL QUALITY TRACKING

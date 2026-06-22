@@ -56,6 +56,25 @@ export interface DaemonServerOpts {
      *  exit at the natural disconnect boundary, without disrupting other
      *  still-attached older-version clients. */
     onSupersedeReady?: () => void;
+    /** E8: bounded grace window for the supersede path. onSupersedeReady alone
+     *  only fires at the LAST-client-disconnect boundary — so on a busy
+     *  single-host install whose client count never reaches zero, a daemon
+     *  flagged superseded by a newer client keeps running OLD dist/ code
+     *  indefinitely after `npm upgrade`. This is the upper bound: once the
+     *  supersede flag is set, the daemon waits at most this long for clients to
+     *  drain to zero on their own (the graceful onSupersedeReady path); if they
+     *  haven't, onSupersedeDeadline fires so daemon main can drain in-flight
+     *  RPCs and exit ANYWAY, letting a fresh daemon (new dist) spawn on the next
+     *  client connect. Set 0/undefined to disable the bound (legacy
+     *  wait-for-last-disconnect-only behavior). Default wired in daemon/index.ts. */
+    supersedeGraceMs?: number;
+    /** E8: fired once when the supersede grace window (supersedeGraceMs) elapses
+     *  and clients are STILL attached. Daemon main wires this to the same
+     *  drain-and-exit path as onSupersedeReady / onIdleReap. Never fires if the
+     *  graceful onSupersedeReady path already fired first (last client
+     *  disconnected inside the window) — the two are mutually exclusive per
+     *  supersede cycle. */
+    onSupersedeDeadline?: () => void;
     /** Idle-reaper: when clients.size === 0 for this many ms, fire onIdleReap.
      *  Set to 0 to disable. Default wired in daemon/index.ts (0.7.11+) is
      *  60s; users can override via KONGCODE_DAEMON_IDLE_TIMEOUT_MS env var.
@@ -76,6 +95,31 @@ export interface DaemonServerOpts {
      *  already isolate OS users, so no per-socket gate is needed and the existing
      *  handshake-optional Unix-socket path is unchanged. */
     requireHandshakeAuth?: boolean;
+    /** E10: token presented when probing an EADDRINUSE occupant on the TCP listen
+     *  path. meta.health needs no auth so the probe works without it, but if a
+     *  future health gate is added this lets the probe still identify a sibling
+     *  kongcode daemon. Daemon main passes the current per-user token-file
+     *  contents (readDaemonToken). Optional — null/undefined means "probe
+     *  unauthenticated", which is sufficient to classify the occupant. */
+    probeToken?: string | null;
+    /** E10: how long the EADDRINUSE occupant probe waits for a meta.health reply
+     *  before giving up and classifying the occupant as foreign/unresponsive.
+     *  Small by design — a live local kongcode daemon answers meta.health in
+     *  single-digit ms. Default 1500ms; tests override to keep the suite fast. */
+    probeTimeoutMs?: number;
+}
+/** E10: thrown by listen() when the TCP port is already bound (EADDRINUSE) and
+ *  the daemon couldn't take it over. `kind` makes the failure DISTINGUISHABLE —
+ *  callers (and tests) can tell a sibling kongcode daemon already owning the
+ *  port ("kongcode-daemon") from an unrelated foreign process squatting it
+ *  ("foreign"), instead of seeing a generic Error('listen EADDRINUSE'). This is
+ *  the asymmetry E10 fixes: the UDS path already unlinks a stale socket and
+ *  re-binds; the TCP path used to just rethrow the raw bind error with no
+ *  diagnosis of WHO holds the port. */
+export declare class TcpPortInUseError extends Error {
+    readonly kind: "kongcode-daemon" | "foreign";
+    readonly port: number;
+    constructor(kind: "kongcode-daemon" | "foreign", port: number, message: string);
 }
 export declare class DaemonServer {
     private readonly opts;
@@ -101,6 +145,13 @@ export declare class DaemonServer {
     private rpcsInFlight;
     private startedAt;
     private pendingSupersede;
+    /** E8: upper-bound timer armed by markPendingSupersede. When it fires (and
+     *  the supersede path hasn't already completed via last-client-disconnect),
+     *  onSupersedeDeadline runs so the daemon exits even with clients attached,
+     *  freeing the endpoint for a fresh-dist daemon. Cleared on graceful
+     *  supersede completion and in close(). Unref'd so it never keeps the loop
+     *  alive on its own. */
+    private supersedeGraceTimer;
     private idleTimer;
     private idleSince;
     /** Periodic phantom-client reaper. Agent E flagged that pruneDeadClients
@@ -127,9 +178,25 @@ export declare class DaemonServer {
      *  here (runtime) — covers the case where the constants list outpaces
      *  actual implementations during incremental rollout. */
     register(method: IpcMethod, handler: IpcHandler): void;
+    /** E10: probe whoever holds an in-use TCP port by opening a short-lived
+     *  connection and asking meta.health (which needs no auth — the token gate is
+     *  only on meta.handshake and non-meta methods, so any kongcode daemon
+     *  answers it). A well-formed JSON-RPC health reply ⇒ the occupant IS a
+     *  kongcode daemon (this OS user's sibling, or — on a hash-collided shared
+     *  loopback port — another user's; either way a real daemon, not a squatter).
+     *  No reply / connection refused / unparseable bytes ⇒ a FOREIGN process.
+     *  This is what lets listen() throw a DISTINGUISHABLE TcpPortInUseError
+     *  instead of a generic bind failure. Best-effort and bounded; never throws —
+     *  returns "kongcode-daemon" | "foreign". Presents probeToken if we have one
+     *  for forward-compat with a future authed health endpoint. */
+    private probeTcpOccupant;
     /** Start listening. Throws if the socket can't be bound (e.g. another
      *  daemon already running on the same path — caller should detect via
-     *  the spawn lock + PID file probe before calling listen()). */
+     *  the spawn lock + PID file probe before calling listen()).
+     *
+     *  E10: the TCP path catches EADDRINUSE explicitly and probes the occupant
+     *  (probeTcpOccupant) so the failure is DISTINGUISHABLE — a sibling kongcode
+     *  daemon vs a foreign squatter — rather than a generic raw bind error. */
     listen(): Promise<void>;
     /** Start the periodic phantom-client reaper. Idempotent — replaces any
      *  existing timer. Called from listen() and safe to call again from tests
@@ -233,12 +300,28 @@ export declare class DaemonServer {
      */
     _testInjectPhantomClient(): Socket;
     /** Mark daemon for supersede: it will exit when the last attached client
-     *  disconnects. Idempotent. Safe to call from a handler thread. */
+     *  disconnects. Idempotent. Safe to call from a handler thread.
+     *
+     *  E8: also arms a BOUNDED grace timer (opts.supersedeGraceMs). The
+     *  graceful path (onSupersedeReady at last-client-disconnect) is preferred —
+     *  it never disrupts a still-attached older sibling session — but on a busy
+     *  single-host install whose client count never reaches zero it would wait
+     *  forever, leaving the daemon running stale dist/ code after `npm upgrade`.
+     *  The grace timer is the upper bound: if clients haven't drained to zero by
+     *  the time it fires, onSupersedeDeadline runs and the daemon exits anyway
+     *  (after draining in-flight RPCs in daemon main's cleanup) so a fresh-dist
+     *  daemon can spawn. Idempotent: a second markPendingSupersede call does NOT
+     *  re-arm or extend the window — the deadline is anchored to the FIRST flag. */
     markPendingSupersede(): void;
     isPendingSupersede(): boolean;
+    /** Cancel the supersede grace timer (graceful path completed, or daemon is
+     *  shutting down). Safe to call repeatedly. */
+    private disarmSupersedeGraceTimer;
     /** When supersede is flagged AND the last client just disconnected, fire
      *  the registered callback so daemon main can shut down cleanly. The
-     *  callback is invoked exactly once per supersede cycle. */
+     *  callback is invoked exactly once per supersede cycle — supersedeFired is
+     *  shared with the E8 grace-timer path so only ONE of {onSupersedeReady,
+     *  onSupersedeDeadline} ever runs. */
     private supersedeFired;
     private checkSupersedeReady;
     private onConnection;

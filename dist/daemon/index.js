@@ -31,7 +31,7 @@ import { resolveTcpPort, resolveDaemonTokenPath } from "../mcp-client/daemon-spa
 import { ensureEdgeIndexes } from "../engine/edge-indexes.js";
 import { runBootstrapMaintenance } from "../engine/maintenance.js";
 import { PROTOCOL_VERSION, DEFAULT_DAEMON_SOCKET_PATH, DAEMON_PID_FILE, } from "../shared/ipc-types.js";
-import { DaemonServer } from "./server.js";
+import { DaemonServer, TcpPortInUseError } from "./server.js";
 import { log } from "../engine/log.js";
 import { parsePluginConfig } from "../engine/config.js";
 import { bootstrap, resolvePluginDir, shutdownManagedSurreal } from "../engine/bootstrap.js";
@@ -763,6 +763,25 @@ async function main() {
         }
         return resourceProfile.idleTimeoutMs;
     })();
+    // E8: bounded grace window for the supersede self-restart. When a newer
+    // mcp-client flags this (older) daemon via meta.requestSupersede, the
+    // graceful path exits at the next last-client-disconnect — but a busy
+    // single-host install whose client count never reaches zero would keep
+    // running stale dist/ code forever after `npm upgrade`. This is the upper
+    // bound: after the flag is set, wait at most this long for a clean drain,
+    // then exit ANYWAY so a fresh-dist daemon spawns on the next connect. 3min
+    // default — long enough that an in-progress agentic turn almost always
+    // finishes (and disconnects, taking the graceful path) first, short enough
+    // that the code refresh actually lands the same working session. Set 0 to
+    // disable the bound (legacy wait-for-last-disconnect-only behavior).
+    const supersedeGraceMs = (() => {
+        const env = process.env.KONGCODE_DAEMON_SUPERSEDE_GRACE_MS;
+        if (env !== undefined) {
+            const n = Number(env);
+            return Number.isFinite(n) && n >= 0 ? n : 3 * 60_000;
+        }
+        return 3 * 60_000;
+    })();
     let shuttingDown = false;
     const gracefulCleanup = async (reason) => {
         if (shuttingDown)
@@ -863,6 +882,14 @@ async function main() {
         // letting older still-attached clients keep working until they finish
         // before we hand control over to fresh daemon code on the next spawn.
         onSupersedeReady: reaperExit("supersede flag set + last client disconnected"),
+        // E8: upper bound on the above. If clients never drain to zero (busy
+        // single-host install), exit anyway after this window so the stale-dist
+        // daemon doesn't run indefinitely post-upgrade. gracefulCleanup → server
+        // .close() still drains in-flight RPCs before the process exits, so no
+        // in-progress request is severed; the deadline only overrides the
+        // "wait for last disconnect" condition, not the drain.
+        supersedeGraceMs,
+        onSupersedeDeadline: reaperExit(`supersede grace window (${Math.round(supersedeGraceMs / 1000)}s) elapsed with clients still attached`),
         // Fires when the idle timer expires (configurable via
         // KONGCODE_DAEMON_IDLE_TIMEOUT_MS, default 30min). Daemon has had zero
         // attached clients for the duration. Frees BGE-M3 + SurrealDB
@@ -1061,7 +1088,40 @@ async function main() {
     process.on("unhandledRejection", (reason) => {
         log.error(`[daemon] unhandledRejection — continuing:`, reason);
     });
-    await server.listen();
+    // E10: listen() now throws a distinguishable TcpPortInUseError on EADDRINUSE
+    // (TCP transport) after probing the occupant. Surface each kind with the
+    // right semantics instead of a generic "fatal error":
+    //   - kongcode: a sibling daemon already serves this user's port. Not a
+    //     crash — the singleton is already up, so release our just-acquired lock
+    //     + token and exit 0; the client reuses the existing daemon. (The spawn
+    //     lock should normally prevent reaching here; this is the belt-and-braces
+    //     recovery for a stolen-as-stale-but-actually-alive race.)
+    //   - foreign: a non-kongcode process squats the port. A real failure the
+    //     operator must fix (free the port / set KONGCODE_DAEMON_PORT) — exit 1
+    //     with the clear message rather than a raw bind stack trace.
+    try {
+        await server.listen();
+    }
+    catch (e) {
+        if (e instanceof TcpPortInUseError) {
+            if (e.kind === "kongcode-daemon") {
+                log.warn(`[daemon] ${e.message}`);
+                log.warn(`[daemon] deferring to the existing kongcode daemon — not starting a second instance`);
+                // Release OUR pid lock (truthful: we're not running). Deliberately do
+                // NOT touch the handshake token file here — the live sibling's TCP auth
+                // reads it, and we can't restore its original secret, so leaving the
+                // file in place is strictly safer than deleting it on our way out.
+                removeOwnPidFile();
+                process.exit(0);
+            }
+            // foreign
+            log.error(`[daemon] ${e.message}`);
+            removeOwnPidFile();
+            removeOwnTokenFile();
+            process.exit(1);
+        }
+        throw e;
+    }
     writeOwnPidFile();
     // Server is up and serving meta.* immediately. Stack initialization runs
     // async — clients that connect during this window see bootstrapPhase
