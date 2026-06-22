@@ -6,6 +6,7 @@
  * Claude Code hook payloads. The server processes them using the
  * shared GlobalPluginState and returns hook response JSON.
  */
+import { type Server as HttpServer } from "node:http";
 import type { GlobalPluginState } from "./engine/state.js";
 interface HealthCacheSnapshot {
     /** Last refresh timestamp (Date.now()). null = never refreshed yet. */
@@ -17,6 +18,26 @@ interface HealthCacheSnapshot {
     /** Aggregate embedding-gap percentage across concept/memory/turn/artifact. -1 = not yet measured. */
     embeddingGapPct: number;
 }
+/** H5(http): mirror the daemon's applyConnectionPolicy onto the hook listener.
+ *
+ *  (1) maxConnections — Node stops accepting past this count (queued at the
+ *      kernel backlog) so a runaway hook-client count can't exhaust the shared
+ *      process fd table and take down the JSON-RPC listener + every session.
+ *
+ *  (2) a PERSISTENT 'error' handler for accept-time fd exhaustion
+ *      (EMFILE/ENFILE). Node emits these on the SERVER (not a socket) when
+ *      accept() fails for lack of fds; the default is to THROW, and an uncaught
+ *      http.Server 'error' crashes the daemon (then crash-loops on respawn into
+ *      the same starved state). Instead we pause accepting (server.close()) and
+ *      schedule a re-listen once fds have had a chance to free — the same
+ *      "degrade, don't crash" boundary as server.ts. Any OTHER steady-state
+ *      error is logged and swallowed (never rethrown) so a transient listener
+ *      hiccup can't crash the per-host singleton.
+ *
+ *  This handler is attached for the server's whole lifetime — distinct from the
+ *  one-shot bind-error listener listen() uses to detect EADDRINUSE/bind failure
+ *  (that one is removed the moment listen succeeds). Exported via __testing. */
+declare function applyHookConnectionPolicy(srv: HttpServer): void;
 /** Record a daemon-side error timestamp, exposed via /health's last_error_ms_ago.
  *  Internal — called from the request error catch and any future error path
  *  that wants to be surfaced through /health. The optional `message` arg is
@@ -167,6 +188,10 @@ export declare const __testing: {
     cmdlineLooksLikeKongcodeMcp: typeof cmdlineLooksLikeKongcodeMcp;
     dispatchHookWithDeadline: typeof dispatchHookWithDeadline;
     HOOK_HANDLER_DEADLINE_MS: number;
+    applyHookConnectionPolicy: typeof applyHookConnectionPolicy;
+    HOOK_MAX_CONNECTIONS: number;
+    HOOK_ACCEPT_PAUSE_MS: number;
+    acceptResumeTimers: Set<NodeJS.Timeout>;
     resetHealthCache(): void;
 };
 export {};

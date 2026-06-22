@@ -120,6 +120,22 @@ export declare class SurrealStore {
      *  Kept separate from runSchema() so the reconnect path can re-arm the schema
      *  (and thus isAvailable()) without duplicating the retry logic. */
     private applySchemaWithRetry;
+    /** SCHEMA-UPGRADE-WEDGE recovery record (C2 pattern). A UNIQUE DEFINE INDEX in
+     *  schema.surql was rejected because pre-existing duplicate rows violate it
+     *  (subagent / retrieval_outcome / turn_score / identity_chunk / maturity_stage
+     *  / causal_chain / artifact.path). The fix is data-PRESERVING dedup
+     *  (keep-oldest) which scripts/predeploy-dedup.mjs performs — but for the
+     *  CONTENT table `artifact` that delete MUST route through the gcHardDelete
+     *  keystone, so we do NOT auto-run it from schema apply. We instead persist a
+     *  LOUD maintenance_runs error row that memory_health surfaces as RED, naming
+     *  the exact recovery command, so an operator (or an enterprise fleet monitor
+     *  polling memory_health) gets an unambiguous, copy-pasteable remediation
+     *  rather than a silent degraded daemon. Best-effort: the write itself is
+     *  guarded so a failure to record never masks the original schema error.
+     *  Uses queryExec directly (not recordMaintenanceRun) because the schema has
+     *  NOT applied — but maintenance_runs is plain SCHEMALESS-compatible CONTENT,
+     *  and queryExec routes through ensureConnected/withRetry like every write. */
+    private recordSchemaWedgeRecovery;
     markShutdown(): void;
     private ensureConnected;
     private runSchema;

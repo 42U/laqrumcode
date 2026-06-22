@@ -51,6 +51,27 @@ export interface HandlerContext {
  *  so a bare TCP reconnect that drops the authed socket self-heals. */
 const RPC_UNAUTHORIZED = IpcErrorCode.UNAUTHORIZED;
 
+/** E2-META-DOS: the ONLY methods admitted on an unauthenticated socket when
+ *  handshake auth is required (TCP transport). An explicit allow-set, NOT a
+ *  `startsWith("meta.")` prefix — the other meta methods do no token check of
+ *  their own (meta.shutdown schedules gracefulCleanup; meta.requestSupersede
+ *  arms the E8 grace-exit), so a prefix exemption would let an unauthed
+ *  cross-OS-user kill or supersede the daemon (an availability DoS) as their
+ *  first line. Both members are legitimately pre-auth:
+ *    - meta.handshake ESTABLISHES auth (verifies the 0600 per-user token, then
+ *      calls ctx.markAuthed); gating it would make TCP auth impossible.
+ *    - meta.health is the probeTcpOccupant liveness path (server.ts ~441) used
+ *      to tell a kongcode daemon from a foreign squatter on an in-use port,
+ *      before any client could have handshook; it returns only liveness/stats,
+ *      no graph data.
+ *  Every OTHER meta.* (meta.shutdown, meta.requestSupersede, and any future
+ *  meta method) then falls under the same token gate as tool.* / hook.*. Typed
+ *  as IpcMethod so a renamed/removed method is a compile error here. */
+const PRE_AUTH_METHODS: ReadonlySet<IpcMethod> = new Set<IpcMethod>([
+  "meta.handshake",
+  "meta.health",
+]);
+
 /** M2(a): the JSON-RPC error codes the mcp-client actually retries on
  *  (src/mcp-client/index.ts ~271: DAEMON_RESTARTING / DAEMON_BOOTSTRAPPING /
  *  UNAUTHORIZED). When a handler throws an error carrying one of these as its
@@ -1085,19 +1106,33 @@ export class DaemonServer {
     // E2 (TCP auth bypass fix): when handshake auth is required (TCP transport
     // with a per-user token), a socket must complete meta.handshake — which
     // verifies the 0600 per-user token and then calls ctx.markAuthed() — BEFORE
-    // it may invoke any non-meta method. Reject tool.* / hook.* on an unauthed
-    // socket with UNAUTHORIZED. meta.* stays exempt so pre-auth bootstrap works:
-    // a client must always be able to handshake (to authenticate), health-check,
-    // or shut down. Without this gate, a different OS user who reached the shared
-    // loopback port could send tool.recall as their FIRST line and read/write
-    // this user's private graph, never having presented the token. The check is
-    // a no-op when requireHandshakeAuth is false (UDS-only / no token): the Unix
-    // socket's 0600 perms already isolate OS users, so all sockets are allowed.
-    // Mirrors the K12 backpressure gate's placement (after isKnownMethod, before
-    // handler dispatch) and its meta.* exemption.
+    // it may invoke any other method. Reject everything outside an explicit
+    // pre-auth allow-set on an unauthed socket with UNAUTHORIZED.
+    //
+    // E2-META-DOS (HIGH): the allow-set is EXACTLY {meta.handshake, meta.health}
+    // — NOT every method that happens to start with "meta.". An earlier blanket
+    // `!req.method.startsWith("meta.")` exemption let the OTHER meta methods
+    // through pre-auth: meta.shutdown does no token check (it just schedules
+    // gracefulCleanup) and meta.requestSupersede does no token check (it just
+    // arms the E8 grace-exit), so a hash-collided cross-OS-user on the shared
+    // loopback port could send meta.shutdown as their FIRST line and kill this
+    // user's daemon — an availability DoS. (Graph access stays blocked either
+    // way: tool.* never matched the prefix.) Only handshake (which ESTABLISHES
+    // auth) and health (the probeTcpOccupant liveness path at server.ts:441,
+    // which must answer before any client could possibly have handshook) are
+    // legitimately pre-auth. Every other meta.* now falls under the same token
+    // gate as tool.* / hook.*.
+    //
+    // The check is a no-op when requireHandshakeAuth is false (UDS-only / no
+    // token): the Unix socket's 0600 perms already isolate OS users, so all
+    // sockets — including meta.shutdown — are allowed. Mirrors the K12
+    // backpressure gate's placement (after isKnownMethod, before handler
+    // dispatch); note the BACKPRESSURE gates below keep the broad meta.*
+    // exemption on purpose (lifecycle ops must never be shed under load), which
+    // is a different concern from auth.
     if (
       this.opts.requireHandshakeAuth &&
-      !req.method.startsWith("meta.") &&
+      !PRE_AUTH_METHODS.has(req.method) &&
       !this.authedSockets.has(sock)
     ) {
       this.opts.log.warn(`[daemon] REJECTED ${req.method} on unauthenticated socket — handshake required first (possible cross-OS-user access attempt on shared loopback port)`);

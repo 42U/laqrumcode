@@ -111,6 +111,135 @@ const HOOK_HANDLER_DEADLINE_MS = (() => {
   return Number.isFinite(n) && n > 0 ? Math.min(Math.max(Math.round(n), 1_000), 600_000) : 50_000;
 })();
 
+// ── HTTP-HOOK-FD-ASYMMETRY: H5-equivalent accept policy for THIS listener ──
+//
+// The JSON-RPC DaemonServer got H5 (maxConnections + a persistent EMFILE/ENFILE
+// accept-pause handler — server.ts applyConnectionPolicy). This HTTP hook
+// listener is the OTHER transport in the SAME process (the two share the
+// process fd table), yet it set no maxConnections and attached no steady-state
+// 'error' handler. An accept-time EMFILE/ENFILE here emits an UNHANDLED 'error'
+// on the http.Server — which crashes the per-host daemon and takes down EVERY
+// session's hooks. The fix mirrors the H5 boundary: bound the open-socket count
+// and degrade-don't-crash on fd exhaustion (pause accepting, then re-listen).
+
+/** H5(http): hard ceiling on concurrently-OPEN hook-client sockets. Hooks are
+ *  short-lived request/response (the proxy opens, POSTs, reads, closes), so the
+ *  realistic concurrency is far below the JSON-RPC socket count — a smaller cap
+ *  than the daemon's 512 leaves more of the shared fd budget for the daemon's
+ *  own DB/embedder/log fds and the JSON-RPC listener. Past this, Node stops
+ *  accepting and queues at the kernel backlog until sockets free.
+ *  Override via KONGCODE_HOOK_MAX_CONNECTIONS. */
+const HOOK_MAX_CONNECTIONS = (() => {
+  const n = Number(process.env.KONGCODE_HOOK_MAX_CONNECTIONS);
+  return Number.isFinite(n) && n > 0 ? Math.round(n) : 256;
+})();
+
+/** H5(http): how long to pause accepting after an EMFILE/ENFILE accept error
+ *  before re-listening, instead of crash-looping on the same starved state.
+ *  Mirrors the daemon's acceptPauseMs default. Override via
+ *  KONGCODE_HOOK_ACCEPT_PAUSE_MS. */
+const HOOK_ACCEPT_PAUSE_MS = (() => {
+  const n = Number(process.env.KONGCODE_HOOK_ACCEPT_PAUSE_MS);
+  return Number.isFinite(n) && n > 0 ? Math.round(n) : 1_000;
+})();
+
+/** H5(http): timers that resume accepting after an fd-exhaustion pause — tracked
+ *  so stopHttpApi() can clear them. unref'd so they never keep the loop alive. */
+const acceptResumeTimers = new Set<NodeJS.Timeout>();
+
+/** H5(http): re-arm the hook listener on the SAME endpoint after an EMFILE/ENFILE
+ *  accept pause. The hook server binds EITHER a UDS path (socketPath) OR a
+ *  fallback TCP port (we recover the port from the bound address before close).
+ *  Best-effort and never throws into the caller — a daemon that truly can't
+ *  re-listen is left to the supervisor; the fail-open hook boundary already
+ *  keeps user turns unblocked. Re-applies the connection policy on re-listen so
+ *  the resumed server carries the same ceiling + 'error' handler. */
+function relistenHookAfterPause(srv: HttpServer, fallbackPort: number | null): void {
+  if (srv.listening) return; // already accepting again
+  const onErr = (e: NodeJS.ErrnoException) => {
+    log.error(`[http-api] re-listen error after accept pause: ${e.message}`);
+  };
+  srv.once("error", onErr);
+  const onListening = () => {
+    srv.removeListener("error", onErr);
+    log.info("[http-api] resumed accepting after fd-exhaustion pause");
+  };
+  if (socketPath) {
+    // Re-unlink any stale socket file left by the close() above before re-bind.
+    if (existsSync(socketPath)) {
+      try { unlinkSync(socketPath); } catch { /* ignore */ }
+    }
+    srv.listen(socketPath, () => {
+      try { chmodSync(socketPath!, 0o600); } catch { /* ignore */ }
+      onListening();
+    });
+  } else if (fallbackPort != null) {
+    srv.listen(fallbackPort, "127.0.0.1", onListening);
+  } else {
+    // No known endpoint to re-bind (shouldn't happen — listen always set one).
+    srv.removeListener("error", onErr);
+  }
+}
+
+/** H5(http): mirror the daemon's applyConnectionPolicy onto the hook listener.
+ *
+ *  (1) maxConnections — Node stops accepting past this count (queued at the
+ *      kernel backlog) so a runaway hook-client count can't exhaust the shared
+ *      process fd table and take down the JSON-RPC listener + every session.
+ *
+ *  (2) a PERSISTENT 'error' handler for accept-time fd exhaustion
+ *      (EMFILE/ENFILE). Node emits these on the SERVER (not a socket) when
+ *      accept() fails for lack of fds; the default is to THROW, and an uncaught
+ *      http.Server 'error' crashes the daemon (then crash-loops on respawn into
+ *      the same starved state). Instead we pause accepting (server.close()) and
+ *      schedule a re-listen once fds have had a chance to free — the same
+ *      "degrade, don't crash" boundary as server.ts. Any OTHER steady-state
+ *      error is logged and swallowed (never rethrown) so a transient listener
+ *      hiccup can't crash the per-host singleton.
+ *
+ *  This handler is attached for the server's whole lifetime — distinct from the
+ *  one-shot bind-error listener listen() uses to detect EADDRINUSE/bind failure
+ *  (that one is removed the moment listen succeeds). Exported via __testing. */
+function applyHookConnectionPolicy(srv: HttpServer): void {
+  srv.maxConnections = HOOK_MAX_CONNECTIONS;
+  srv.on("error", (err: NodeJS.ErrnoException) => {
+    const code = err.code;
+    if (code === "EMFILE" || code === "ENFILE") {
+      // Capture the bound TCP port (if any) BEFORE close() drops the address —
+      // relisten needs it to re-bind the fallback path. UDS re-binds via the
+      // module-level socketPath, so the port is only relevant when socketPath is
+      // null. address() is { port } for TCP, a string for UDS, or null.
+      let fallbackPort: number | null = null;
+      if (!socketPath) {
+        const addr = srv.address();
+        if (addr && typeof addr === "object") fallbackPort = addr.port;
+      }
+      let resumed = false;
+      try { srv.close(); } catch { /* may already be closing */ }
+      recordLastError(`accept ${code}`);
+      log.error(`[http-api] hook listener accept error ${code} (fd exhaustion) — pausing accept for ${HOOK_ACCEPT_PAUSE_MS}ms instead of crashing`);
+      const timer = setTimeout(() => {
+        acceptResumeTimers.delete(timer);
+        if (resumed) return;
+        resumed = true;
+        try {
+          relistenHookAfterPause(srv, fallbackPort);
+        } catch (e) {
+          log.error(`[http-api] re-listen after accept pause failed: ${(e as Error).message}`);
+        }
+      }, HOOK_ACCEPT_PAUSE_MS);
+      timer.unref?.();
+      acceptResumeTimers.add(timer);
+      return;
+    }
+    // Any other steady-state server error: log, don't rethrow — an uncaught
+    // http.Server 'error' crashes the daemon, and the per-host singleton must
+    // survive transient listener hiccups to keep serving other sessions' hooks.
+    recordLastError(err.message);
+    log.error(`[http-api] hook listener server error: ${err.message}`);
+  });
+}
+
 /** Record a daemon-side error timestamp, exposed via /health's last_error_ms_ago.
  *  Internal — called from the request error catch and any future error path
  *  that wants to be surfaced through /health. The optional `message` arg is
@@ -656,6 +785,13 @@ export async function startHttpApi(
     });
   });
 
+  // H5(http): mirror the daemon's accept-policy onto the hook listener — bound
+  // the open-socket count and attach a persistent EMFILE/ENFILE handler so an
+  // accept-time fd exhaustion degrades (pause→resume) instead of crashing the
+  // per-host daemon via an unhandled 'error'. Attached BEFORE listen() so the
+  // ceiling is live the instant the server binds.
+  applyHookConnectionPolicy(server);
+
   // Start background /health cache refresher. Runs cheap COUNT queries off
   // the request path so the /health endpoint stays synchronous and won't
   // block on a hung DB. Fire one immediately so the first /health call
@@ -693,11 +829,16 @@ export async function startHttpApi(
     socketPath = sock;
     try {
       await new Promise<void>((resolve, reject) => {
+        // One-shot bind-error listener (EADDRINUSE / bind failure). Removed on
+        // success so the persistent H5 accept-policy 'error' handler attached by
+        // applyHookConnectionPolicy becomes the sole steady-state error path.
+        const onBindError = (err: NodeJS.ErrnoException) => reject(err);
+        server!.once("error", onBindError);
         server!.listen(sock, () => {
+          server!.removeListener("error", onBindError);
           log.info(`HTTP API listening on Unix socket: ${sock}`);
           resolve();
         });
-        server!.once("error", reject);
       });
       try { chmodSync(sock, 0o600); } catch {}
       return;
@@ -709,7 +850,12 @@ export async function startHttpApi(
 
   // Fallback: random port — write port file so hook proxy can discover us
   await new Promise<void>((resolve, reject) => {
+    // One-shot bind-error listener; removed on success so the persistent H5
+    // accept-policy handler is the sole steady-state error path (see UDS branch).
+    const onBindError = (err: NodeJS.ErrnoException) => reject(err);
+    server!.once("error", onBindError);
     server!.listen(0, "127.0.0.1", () => {
+      server!.removeListener("error", onBindError);
       const addr = server!.address();
       if (addr && typeof addr === "object") {
         log.info(`HTTP API listening on port ${addr.port}`);
@@ -724,7 +870,6 @@ export async function startHttpApi(
       }
       resolve();
     });
-    server!.once("error", reject);
   });
 }
 
@@ -735,6 +880,10 @@ export async function stopHttpApi(): Promise<void> {
     clearInterval(healthRefreshTimer);
     healthRefreshTimer = null;
   }
+  // H5(http): cancel any pending accept-resume timers — a daemon shutting down
+  // must not re-listen on its endpoint after an fd-exhaustion pause.
+  for (const t of acceptResumeTimers) clearTimeout(t);
+  acceptResumeTimers.clear();
   if (server) {
     server.closeAllConnections();
     await new Promise<void>((resolve) => {
@@ -774,6 +923,14 @@ export const __testing = {
   // without standing up the full HTTP listener.
   dispatchHookWithDeadline,
   HOOK_HANDLER_DEADLINE_MS,
+  // H5(http) / HTTP-HOOK-FD-ASYMMETRY: the accept-policy applier + its config,
+  // so the regression test can prove the hook listener carries a maxConnections
+  // ceiling AND that an emitted EMFILE/ENFILE 'error' does NOT crash (a handler
+  // is attached) and schedules a resume — without standing up the real listener.
+  applyHookConnectionPolicy,
+  HOOK_MAX_CONNECTIONS,
+  HOOK_ACCEPT_PAUSE_MS,
+  acceptResumeTimers,
   resetHealthCache(): void {
     healthCache.refreshedAt = null;
     healthCache.dbConnected = false;

@@ -353,6 +353,25 @@ export class SurrealStore {
                 // regression that latched a healthy store permanently unavailable. It
                 // starts false (field init) and only the success branch above sets true.
                 lastErr = e;
+                // SCHEMA-UPGRADE-WEDGE (part b): if the apply was REJECTED by a UNIQUE
+                // DEFINE INDEX landing on pre-existing duplicate rows (the signature
+                // isUniqueViolation matches), retrying the SAME apply will fail
+                // identically forever — the daemon wedges in degraded mode and a human
+                // has to run scripts/predeploy-dedup.mjs. Auto-deduping the affected
+                // tables in-band is too risky to do unconditionally here: `artifact` is
+                // a CONTENT table whose only sanctioned row-delete is the gcHardDelete
+                // keystone (the C2/D4 invariant), so a blind DELETE from schema-apply
+                // would violate it. Instead, surface a LOUD, actionable diagnostic via a
+                // maintenance_runs error row (memory_health RED) carrying the EXACT
+                // recovery command. The pending_work.status case does NOT reach here —
+                // it is normalized in-band by schema.surql before its ASSERT evaluates
+                // (the unambiguously-safe move-to-'failed' migration). This recovery
+                // record is written once per failing apply; it does not retry the apply
+                // (no point — the dups persist), so we break to the rethrow immediately.
+                if (isUniqueViolation(e)) {
+                    await this.recordSchemaWedgeRecovery(e);
+                    break;
+                }
                 if (attempt < MAX_ATTEMPTS) {
                     log.warn(`[surreal] schema apply failed (attempt ${attempt}/${MAX_ATTEMPTS}); retrying: ${e.message}`);
                     await new Promise((r) => setTimeout(r, BACKOFF_MS[attempt - 1]));
@@ -363,6 +382,48 @@ export class SurrealStore {
             }
         }
         throw lastErr;
+    }
+    /** SCHEMA-UPGRADE-WEDGE recovery record (C2 pattern). A UNIQUE DEFINE INDEX in
+     *  schema.surql was rejected because pre-existing duplicate rows violate it
+     *  (subagent / retrieval_outcome / turn_score / identity_chunk / maturity_stage
+     *  / causal_chain / artifact.path). The fix is data-PRESERVING dedup
+     *  (keep-oldest) which scripts/predeploy-dedup.mjs performs — but for the
+     *  CONTENT table `artifact` that delete MUST route through the gcHardDelete
+     *  keystone, so we do NOT auto-run it from schema apply. We instead persist a
+     *  LOUD maintenance_runs error row that memory_health surfaces as RED, naming
+     *  the exact recovery command, so an operator (or an enterprise fleet monitor
+     *  polling memory_health) gets an unambiguous, copy-pasteable remediation
+     *  rather than a silent degraded daemon. Best-effort: the write itself is
+     *  guarded so a failure to record never masks the original schema error.
+     *  Uses queryExec directly (not recordMaintenanceRun) because the schema has
+     *  NOT applied — but maintenance_runs is plain SCHEMALESS-compatible CONTENT,
+     *  and queryExec routes through ensureConnected/withRetry like every write. */
+    async recordSchemaWedgeRecovery(e) {
+        const msg = String(e?.message ?? e).slice(0, 300);
+        const recoveryCmd = "node scripts/predeploy-dedup.mjs --apply";
+        log.error(`[surreal] SCHEMA-UPGRADE-WEDGE: schema apply REJECTED by a UNIQUE index on ` +
+            `pre-existing duplicate rows. The daemon stays DEGRADED until the duplicates ` +
+            `are removed (data-preserving, keep-oldest). RUN: \`${recoveryCmd}\` then ` +
+            `restart the daemon. Underlying error: ${msg}`);
+        try {
+            await this.queryExec(`CREATE maintenance_runs CONTENT $data`, {
+                data: {
+                    job: "schema_apply_wedge",
+                    status: "error",
+                    rows_affected: 0,
+                    duration_ms: 0,
+                    error: `Schema apply rejected by UNIQUE index on duplicate rows (upgrade across <0.7.70 with legacy data). ` +
+                        `RECOVERY (data-preserving, keep-oldest): ${recoveryCmd} — then restart the daemon. ` +
+                        `Detail: ${msg}`,
+                },
+            });
+        }
+        catch (writeErr) {
+            // Never let the diagnostic write mask the real failure. The log.error above
+            // already carries the recovery command even if the row write fails (e.g.
+            // the connection is the very thing that's wedged).
+            swallow.warn("surreal:recordSchemaWedgeRecovery", writeErr);
+        }
     }
     markShutdown() {
         this.shutdownFlag = true;

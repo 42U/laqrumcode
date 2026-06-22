@@ -417,6 +417,31 @@ MEDIUM gaps are now closed.** Residual: LOW tier L1–L4 (non-transactional sche
 idempotent DEFINEs + retry], per-session in-memory counter race [benign], client fd-leak window [slow],
 graduation_event retention [rare]) — documented scale-hardening follow-ups.
 
+### Hardened — Phase 3 Wave 5: second-pass critic gaps (auth DoS, upgrade self-heal, hook fd)
+
+A second completeness pass re-verified the 4 CRITICAL fixes correct as-shipped (tested, dist==src,
+reranker degrades, cold-start sound) and found 3 new material gaps — all fixed here:
+
+- **E2-META-DoS (HIGH)** — the E2 auth gate exempted ALL `meta.*`, but `meta.shutdown` /
+  `meta.requestSupersede` do no token check, so on TCP a cross-OS-user could kill/supersede another
+  user's daemon (availability DoS; not a data breach). Tightened the pre-auth exemption to EXACTLY
+  `{meta.handshake, meta.health}` (typed `Set<IpcMethod>` so a future meta method is gated-by-default).
+  Lifecycle meta ops now fall under the token gate on TCP; UDS + the probeTcpOccupant health path
+  unchanged.
+- **SCHEMA-UPGRADE-WEDGE (MEDIUM)** — a `<0.7.70`→current upgrade with legacy data could be REJECTED by
+  the pending_work.status ASSERT / UNIQUE indexes → daemon wedged needing a human. Added an in-band,
+  data-preserving normalize (LET+IF, zero-cost on clean installs) that moves out-of-enum/NULL queue rows
+  to the benign terminal `'failed'` bucket **before** the ASSERT (using the live 5-value enum incl.
+  `committing` — caught + recorded a latent enum-drift in `predeploy-dedup.mjs`); and `applySchemaWithRetry`
+  now breaks the futile retry on a UNIQUE violation and surfaces a LOUD `memory_health` RED naming the
+  exact recovery command — it does NOT auto-dedup content (that delete must route through the
+  gcHardDelete keystone). No content destroyed.
+- **HTTP-HOOK-FD-ASYMMETRY (MEDIUM)** — mirrored H5 onto the HTTP hook server (maxConnections + an
+  EMFILE/ENFILE accept-pause) so an fd-exhaustion event degrades instead of crashing the daemon;
+  the H4 deadline + fail-open boundary unchanged.
+
+Full suite green (1650; sole failure is the pre-existing environmental R6 TCP-spawn timeout).
+
 ## [0.7.130] — 2026-06-19
 
 ### Added — `update_skill` MCP tool

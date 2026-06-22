@@ -827,6 +827,31 @@ DEFINE FIELD IF NOT EXISTS payload ON pending_work TYPE option<object>;
 -- CLOSURE: safe to demote to IF NOT EXISTS once `predeploy-dedup.mjs --apply`
 -- has been run on every install for two consecutive release cycles, at which
 -- point the legacy status-normalize pass becomes redundant.
+--
+-- SCHEMA-UPGRADE-WEDGE FIX (in-band, data-PRESERVING): rather than REQUIRE the
+-- operator to pre-run predeploy-dedup.mjs (which wedges the daemon in degraded
+-- mode until a human runs it), normalize legacy/out-of-enum/NULL statuses HERE,
+-- before the OVERWRITE+ASSERT below evaluates against existing rows. Any row
+-- whose status is not in the five-value enum (or IS NONE) is moved to the safe
+-- terminal bucket 'failed' — pending_work is the daemon work QUEUE (telemetry-
+-- ish), and 'failed' is a benign terminal state, so NO content is lost (the C2
+-- principle: data-preserving, never a content DELETE). This mirrors the
+-- concept-rename in-band migration idiom above (LET + IF/THEN/END so a clean
+-- install with no violators is a zero-cost no-op and never table-scans).
+-- The enum here MUST stay in lockstep with the ASSERT enum immediately below;
+-- the schema-upgrade-wedge regression test asserts both the presence and the
+-- ordering (normalize strictly before the ASSERT).
+-- CLOSURE: delete this LET+IF once `SELECT count() FROM pending_work WHERE
+-- status NOT IN [...] OR status IS NONE` returns 0 across production installs
+-- for two release cycles (same closure horizon as the predeploy script).
+LET $pw_bad_status_count = (SELECT count() FROM pending_work
+  WHERE status NOT IN ['pending', 'processing', 'committing', 'completed', 'failed']
+     OR status IS NONE GROUP ALL)[0].count ?? 0;
+IF $pw_bad_status_count > 0 THEN
+  UPDATE pending_work SET status = 'failed'
+    WHERE status NOT IN ['pending', 'processing', 'committing', 'completed', 'failed']
+       OR status IS NONE;
+END;
 DEFINE FIELD OVERWRITE status ON pending_work TYPE string
   ASSERT $value IN ['pending', 'processing', 'committing', 'completed', 'failed']
   DEFAULT 'pending';
