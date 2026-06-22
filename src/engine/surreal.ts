@@ -2744,6 +2744,54 @@ export class SurrealStore {
     }
   }
 
+  /** M4: bound compaction_checkpoint (telemetry — one row per compaction per
+   *  session, written forever by the compaction path; src/engine/surreal.ts
+   *  CREATE compaction_checkpoint). It was the one checkpoint/telemetry table
+   *  with NO retention: on a long-lived per-host daemon it grows without bound,
+   *  one row per compaction. Mirror purgeOldMaintenanceRuns: keep the
+   *  most-recent RETAIN rows by created_at, hard-delete older.
+   *
+   *  DELETE OK: compaction_checkpoint is TELEMETRY, NOT a content table — it is
+   *  absent from the D4 no-DELETE-content-tables lint's CONTENT_TABLES list and
+   *  from gc.ts GC_CONTENT_TABLES, exactly like turn_score / maintenance_runs.
+   *  Nothing points AT a checkpoint row (its only cross-ref is the OUTBOUND
+   *  memory_id string back-pointer, which gc.ts NULLs when a memory is deleted),
+   *  so deleting old rows dangles nothing. Uses cc_created_idx for the ORDER BY
+   *  and the DELETE predicate. The pending/failed-checkpoint reader
+   *  (getPendingCompactionCheckpoints) is unaffected: those are the freshest
+   *  rows and are always retained well within RETAIN. */
+  async purgeOldCompactionCheckpoints(): Promise<number> {
+    const RETAIN = 10_000;
+    const started = Date.now();
+    try {
+      const countRows = await this.queryFirst<{ count: number }>(
+        `SELECT count() AS count FROM compaction_checkpoint GROUP ALL`,
+      );
+      const count = countRows[0]?.count ?? 0;
+      // Only act when meaningfully over target (avoid churn right at the bound).
+      if (count <= RETAIN + 5_000) return 0;
+      if (!(await this.shouldRunMaintenance("purgeOldCompactionCheckpoints", 60, 1, count))) return 0;
+      // created_at of the RETAIN-th most-recent row → delete everything older
+      // (uses cc_created_idx for the ORDER BY and the DELETE predicate).
+      const cutoffRows = await this.queryFirst<{ created_at: string }>(
+        `SELECT created_at FROM compaction_checkpoint ORDER BY created_at DESC LIMIT 1 START ${RETAIN}`,
+      );
+      const cutoff = cutoffRows[0]?.created_at;
+      if (!cutoff) return 0;
+      // DELETE OK on compaction_checkpoint (telemetry, not content — D4 exempt).
+      await this.queryExec(`DELETE compaction_checkpoint WHERE created_at < $cutoff`, { cutoff });
+      const afterRows = await this.queryFirst<{ count: number }>(
+        `SELECT count() AS count FROM compaction_checkpoint GROUP ALL`,
+      );
+      const n = count - (afterRows[0]?.count ?? count);
+      await this.recordMaintenanceRun("purgeOldCompactionCheckpoints", n, Date.now() - started);
+      return n;
+    } catch (e) {
+      swallow.warn("surreal:purgeOldCompactionCheckpoints", e);
+      return 0;
+    }
+  }
+
   async archiveOldTurns(): Promise<number> {
     const started = Date.now();
     try {

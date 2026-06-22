@@ -172,7 +172,88 @@ export declare class DaemonServer {
      *  meta.* (handshake/health/shutdown/supersede) is always exempt so
      *  lifecycle never wedges under load. Override via KONGCODE_DAEMON_MAX_INFLIGHT. */
     private readonly maxInFlight;
+    /** M2(b): per-connection in-flight RPC counts. The K12 global ceiling
+     *  (maxInFlight) is whole-daemon and UNFAIR — one heavy session firing a
+     *  burst of tool calls can occupy the global budget and starve every OTHER
+     *  session's userPromptSubmit. This sub-cap bounds how many concurrent
+     *  non-meta RPCs a SINGLE socket may hold so one client can't monopolize the
+     *  daemon; a socket past its own cap gets the same retryable busy code while
+     *  other sockets keep flowing. Entries are created lazily on first non-meta
+     *  RPC and pruned to zero in decInFlightForSocket. */
+    private perSocketInFlight;
+    /** M2(b): the per-connection sub-cap. A quarter of the global ceiling by
+     *  default (256/4 = 64) — generous enough that a normal session never trips
+     *  it (hooks + tool calls are nowhere near 64 concurrent), tight enough that
+     *  a single runaway socket can occupy at most ~25% of the daemon before it
+     *  starts shedding its OWN excess. Always ≥1 so the cap can never wedge a
+     *  socket out entirely. meta.* is exempt (lifecycle must never be starved).
+     *  Override via KONGCODE_DAEMON_MAX_INFLIGHT_PER_SOCKET. */
+    private readonly maxInFlightPerSocket;
+    /** H5: hard ceiling on concurrently-OPEN client sockets (server.maxConnections).
+     *  Without it, nothing bounds accepted connections: a fork-bomb of mcp-clients
+     *  (or a leak that never closes sockets) exhausts the daemon's file descriptors
+     *  (EMFILE) and the per-host daemon stops serving EVERY session. 512 is far
+     *  above any realistic single-host client count (a handful of Claude Code
+     *  windows) yet leaves headroom under the default 1024 fd soft limit for the
+     *  daemon's own DB/embedder/log fds. Past this, Node stops accepting and
+     *  queues at the kernel backlog until sockets free up. Override via
+     *  KONGCODE_DAEMON_MAX_CONNECTIONS. */
+    private readonly maxConnections;
+    /** H5: explicit listen() backlog (kernel SYN/accept queue depth). Node's
+     *  default (511) is fine, but pinning it makes the ceiling explicit and
+     *  tunable for constrained hosts. Override via KONGCODE_DAEMON_BACKLOG. */
+    private readonly listenBacklog;
+    /** H5: how long to pause accepting after an EMFILE/ENFILE (fd exhaustion)
+     *  accept error before resuming, instead of crash-looping on a tight accept
+     *  retry. Short enough to recover quickly once fds free, long enough to stop
+     *  burning CPU re-hitting the same limit. Override via
+     *  KONGCODE_DAEMON_ACCEPT_PAUSE_MS. */
+    private readonly acceptPauseMs;
+    /** H5: timers that resume accepting after an fd-exhaustion pause — tracked so
+     *  close() can clear them (unref'd so they never keep the loop alive). One per
+     *  server that paused. */
+    private acceptResumeTimers;
     constructor(opts: DaemonServerOpts);
+    /** M2(b): current in-flight non-meta RPC count for a socket (0 if none). */
+    private inFlightForSocket;
+    /** M2(b): increment a socket's in-flight count (called when a non-meta RPC is
+     *  admitted past both caps). */
+    private incInFlightForSocket;
+    /** M2(b): decrement a socket's in-flight count in the dispatch finally. Only
+     *  decrements when an entry exists — meta.* calls never incremented, so a
+     *  meta.* finally is a no-op. Drops the map entry at zero so the map can't
+     *  accrete dead sockets (close/error handlers also delete it; this keeps it
+     *  tidy between those events). */
+    private decInFlightForSocket;
+    /** H5: apply the connection ceiling and an accept-error policy to a freshly
+     *  created server. Two pieces:
+     *
+     *  (1) maxConnections — Node stops accepting new sockets past this count
+     *      (queued at the kernel backlog) so a runaway client count can't exhaust
+     *      the daemon's file descriptors and take down EVERY session on the host.
+     *
+     *  (2) a PERSISTENT 'error' handler for accept-time fd exhaustion
+     *      (EMFILE/ENFILE). Node emits these on the SERVER (not a socket) when
+     *      accept() fails for lack of fds. The default behavior throws — an
+     *      uncaught server 'error' would crash the daemon, and a process that
+     *      respawns into the same fd-starved state just crash-loops. Instead we
+     *      pause accepting (server.close-less: we can't easily un-accept, but we
+     *      can stop the tight retry) by briefly suspending and then resuming via
+     *      a timer once fds have had a chance to free. This is the
+     *      "degrade, don't crash" boundary for the accept path, mirroring the
+     *      fail-open philosophy of the hook boundary.
+     *
+     *  NOTE: this 'error' listener is attached for the SERVER's whole lifetime and
+     *  is distinct from the one-shot bind-error listener listen() uses to detect
+     *  EADDRINUSE — that one is removed the moment listen succeeds, leaving this
+     *  one as the steady-state accept-error handler. */
+    private applyConnectionPolicy;
+    /** H5: re-arm a server's listener on the same endpoint after an
+     *  EMFILE/ENFILE accept pause. Re-binds UDS (re-unlinking a stale socket
+     *  file) or TCP (loopback, same port). Best-effort and never throws into the
+     *  caller — failures are logged; a daemon that truly can't re-listen is left
+     *  to the idle reaper / external supervisor. */
+    private relistenAfterPause;
     /** Register a handler for an IPC method. The dispatcher rejects calls to
      *  methods that aren't both in IPC_METHODS (compile-time) AND registered
      *  here (runtime) — covers the case where the constants list outpaces
@@ -284,6 +365,34 @@ export declare class DaemonServer {
      * @internal
      */
     _testHasPruneTimer(): boolean;
+    /**
+     * Test-only (H5): the configured connection ceiling, per-socket in-flight
+     * sub-cap, and accept backlog — so a test can assert they're set without
+     * reaching into private fields.
+     * @internal
+     */
+    _testLimits(): {
+        maxConnections: number;
+        maxInFlightPerSocket: number;
+        backlog: number;
+    };
+    /**
+     * Test-only (H5): the live `maxConnections` actually applied to the bound
+     * server object(s). Returns the UDS server's value when present, else the
+     * TCP server's, else null (not listening). Proves applyConnectionPolicy ran.
+     * @internal
+     */
+    _testLiveMaxConnections(): number | null;
+    /**
+     * Test-only (H5): synthetically emit an EMFILE accept error on the live
+     * server to exercise the persistent fd-exhaustion handler WITHOUT actually
+     * exhausting file descriptors. Returns true if the daemon survived (the
+     * 'error' listener swallowed it — an unhandled 'error' on an EventEmitter
+     * throws, so a true here proves the handler is attached) and a resume timer
+     * was scheduled. The caller should follow with close() to clear the timer.
+     * @internal
+     */
+    _testEmitAcceptError(code?: "EMFILE" | "ENFILE"): boolean;
     /**
      * Test-only: synchronously fire one round of prune logic identical to
      * what the periodic timer does (prune + maybe-arm-idle). Lets tests

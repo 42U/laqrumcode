@@ -45,6 +45,10 @@ describe("backfillSessionTurnCounts (via runBootstrapMaintenance)", () => {
         // missing function (same pattern as purgeOldRetrievalOutcomes).
         purgeOldTurnScores: async () => 0,
         purgeOldMaintenanceRuns: async () => 0,
+        // M4: runBootstrapMaintenance's Group-1 Promise.all now also calls
+        // purgeOldCompactionCheckpoints — stub it like the sibling purges so the
+        // fire-and-forget chain doesn't reject on a missing function.
+        purgeOldCompactionCheckpoints: async () => 0,
       } as any,
       embeddings: { embed: async () => [] } as any,
       config: {
@@ -101,6 +105,10 @@ describe("backfillSessionTurnCounts (via runBootstrapMaintenance)", () => {
         // missing function (same pattern as purgeOldRetrievalOutcomes).
         purgeOldTurnScores: async () => 0,
         purgeOldMaintenanceRuns: async () => 0,
+        // M4: runBootstrapMaintenance's Group-1 Promise.all now also calls
+        // purgeOldCompactionCheckpoints — stub it like the sibling purges so the
+        // fire-and-forget chain doesn't reject on a missing function.
+        purgeOldCompactionCheckpoints: async () => 0,
       } as any,
       embeddings: { embed: async () => [] } as any,
       config: { thresholds: { acanTrainingThreshold: 1 } } as any,
@@ -145,6 +153,10 @@ describe("backfillSessionTurnCounts (via runBootstrapMaintenance)", () => {
         // missing function (same pattern as purgeOldRetrievalOutcomes).
         purgeOldTurnScores: async () => 0,
         purgeOldMaintenanceRuns: async () => 0,
+        // M4: runBootstrapMaintenance's Group-1 Promise.all now also calls
+        // purgeOldCompactionCheckpoints — stub it like the sibling purges so the
+        // fire-and-forget chain doesn't reject on a missing function.
+        purgeOldCompactionCheckpoints: async () => 0,
       } as any,
       embeddings: { embed: async () => [] } as any,
       config: { thresholds: { acanTrainingThreshold: 1 } } as any,

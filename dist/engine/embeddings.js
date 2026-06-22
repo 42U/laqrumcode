@@ -2,6 +2,23 @@ import { existsSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { swallow } from "./errors.js";
 import { log } from "./log.js";
+/** M2(a): thrown by embed() when the bounded embed FIFO is full (backpressure).
+ *  Carries a JSON-RPC error `code` in the RETRYABLE family (DAEMON_RESTARTING,
+ *  -32002) so the daemon dispatcher maps it to a retryable wire error instead
+ *  of the blanket HANDLER_ERROR — which is NON-retryable and would fail the
+ *  user's turn outright. With a retryable code the mcp-client backs off and
+ *  re-tries (the embedder is transiently underwater, not broken), absorbing the
+ *  burst rather than surfacing it as a turn failure. `retryable` is a redundant
+ *  boolean for any caller that prefers to duck-type the intent without coupling
+ *  to the IpcErrorCode enum. */
+export class EmbedBusyError extends Error {
+    code = -32002 /* IpcErrorCode.DAEMON_RESTARTING */;
+    retryable = true;
+    constructor(message) {
+        super(message);
+        this.name = "EmbedBusyError";
+    }
+}
 export class EmbeddingService {
     config;
     resourceProfile;
@@ -187,7 +204,11 @@ export class EmbeddingService {
         // (unbounded push) turns a slow/wedged embedder into an OOM on a
         // long-lived per-host daemon.
         if (this.embedQueue.length >= this.maxQueueDepth) {
-            throw new Error(`Embedding queue full (${this.embedQueue.length}/${this.maxQueueDepth}) — embedder is underwater; retry shortly`);
+            // M2(a): throw a RETRYABLE-coded error, not a plain Error. A plain Error
+            // is wrapped by the dispatcher as HANDLER_ERROR (non-retryable) and fails
+            // the user's turn; EmbedBusyError carries DAEMON_RESTARTING so the client
+            // backs off and retries the transiently-underwater embedder instead.
+            throw new EmbedBusyError(`Embedding queue full (${this.embedQueue.length}/${this.maxQueueDepth}) — embedder is underwater; retry shortly`);
         }
         return new Promise((resolve, reject) => {
             this.embedQueue.push({ text, hash, enqueuedAt: Date.now(), resolve, reject });

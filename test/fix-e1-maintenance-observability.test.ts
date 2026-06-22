@@ -160,6 +160,8 @@ describe("E6/E7 — monologue + turn_archive retention via gcHardDelete keystone
         purgeOldRetrievalOutcomes: async () => 0,
         purgeOldTurnScores: async () => 0,
         purgeOldMaintenanceRuns: async () => 0,
+        // M4: Group-1 Promise.all now also calls purgeOldCompactionCheckpoints.
+        purgeOldCompactionCheckpoints: async () => 0,
         archiveOldTurns: async () => 0,
         garbageCollectMemories: async () => 0,
         garbageCollectConcepts: async () => 0,
@@ -224,6 +226,8 @@ describe("E6/E7 — monologue + turn_archive retention via gcHardDelete keystone
         purgeOldRetrievalOutcomes: async () => 0,
         purgeOldTurnScores: async () => 0,
         purgeOldMaintenanceRuns: async () => 0,
+        // M4: Group-1 Promise.all now also calls purgeOldCompactionCheckpoints.
+        purgeOldCompactionCheckpoints: async () => 0,
         archiveOldTurns: async () => 0,
         garbageCollectMemories: async () => 0,
         garbageCollectConcepts: async () => 0,

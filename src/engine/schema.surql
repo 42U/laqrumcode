@@ -464,6 +464,13 @@ DEFINE FIELD IF NOT EXISTS msg_range_end ON compaction_checkpoint TYPE int;
 DEFINE FIELD IF NOT EXISTS status ON compaction_checkpoint TYPE string; -- pending | complete | failed
 DEFINE FIELD IF NOT EXISTS memory_id ON compaction_checkpoint TYPE option<string>;
 DEFINE FIELD IF NOT EXISTS created_at ON compaction_checkpoint TYPE datetime DEFAULT time::now();
+-- created_at index (M4): compaction_checkpoint grows one row per compaction per
+-- session FOREVER (one of the per-host telemetry tables with no retention).
+-- purgeOldCompactionCheckpoints (surreal.ts) sorts by created_at to find the
+-- retention cutoff and DELETEs older rows by created_at; without this index both
+-- the ORDER BY and the DELETE predicate are unindexed full scans over a
+-- long-lived, per-compaction-growing table. Mirrors ts_created_idx / om_created_idx.
+DEFINE INDEX IF NOT EXISTS cc_created_idx ON compaction_checkpoint FIELDS created_at;
 
 -- ============================================================
 -- MEMORY SUBSTRATE: Utility Cache (fast historical utility lookups)

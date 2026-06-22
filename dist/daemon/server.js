@@ -24,6 +24,26 @@ import { PROTOCOL_VERSION, isKnownMethod, } from "../shared/ipc-types.js";
  *  mcp-client retry path treats this code as "reconnect + re-handshake + retry"
  *  so a bare TCP reconnect that drops the authed socket self-heals. */
 const RPC_UNAUTHORIZED = -32006 /* IpcErrorCode.UNAUTHORIZED */;
+/** M2(a): the JSON-RPC error codes the mcp-client actually retries on
+ *  (src/mcp-client/index.ts ~271: DAEMON_RESTARTING / DAEMON_BOOTSTRAPPING /
+ *  UNAUTHORIZED). When a handler throws an error carrying one of these as its
+ *  `.code` (e.g. EmbedBusyError → DAEMON_RESTARTING on embed-queue-full), the
+ *  dispatcher passes the code through instead of flattening it to the
+ *  non-retryable HANDLER_ERROR — so transient backpressure becomes a
+ *  back-off-and-retry on the client, not a failed user turn. const enum members
+ *  are inlined at compile time, so this is a plain number Set. */
+const RETRYABLE_ERROR_CODES = new Set([
+    -32002 /* IpcErrorCode.DAEMON_RESTARTING */,
+    -32001 /* IpcErrorCode.DAEMON_BOOTSTRAPPING */,
+    -32006 /* IpcErrorCode.UNAUTHORIZED */,
+]);
+/** True when `code` is a number in the client-retryable family. Tolerant of
+ *  unknown input (handlers throw arbitrary values) — only an exact numeric
+ *  match passes, so a stray string/undefined `.code` falls through to
+ *  HANDLER_ERROR. */
+function isRetryableErrorCode(code) {
+    return typeof code === "number" && RETRYABLE_ERROR_CODES.has(code);
+}
 /** E10: thrown by listen() when the TCP port is already bound (EADDRINUSE) and
  *  the daemon couldn't take it over. `kind` makes the failure DISTINGUISHABLE —
  *  callers (and tests) can tell a sibling kongcode daemon already owning the
@@ -95,8 +115,182 @@ export class DaemonServer {
     maxInFlight = Number(process.env.KONGCODE_DAEMON_MAX_INFLIGHT) > 0
         ? Number(process.env.KONGCODE_DAEMON_MAX_INFLIGHT)
         : 256;
+    /** M2(b): per-connection in-flight RPC counts. The K12 global ceiling
+     *  (maxInFlight) is whole-daemon and UNFAIR — one heavy session firing a
+     *  burst of tool calls can occupy the global budget and starve every OTHER
+     *  session's userPromptSubmit. This sub-cap bounds how many concurrent
+     *  non-meta RPCs a SINGLE socket may hold so one client can't monopolize the
+     *  daemon; a socket past its own cap gets the same retryable busy code while
+     *  other sockets keep flowing. Entries are created lazily on first non-meta
+     *  RPC and pruned to zero in decInFlightForSocket. */
+    perSocketInFlight = new Map();
+    /** M2(b): the per-connection sub-cap. A quarter of the global ceiling by
+     *  default (256/4 = 64) — generous enough that a normal session never trips
+     *  it (hooks + tool calls are nowhere near 64 concurrent), tight enough that
+     *  a single runaway socket can occupy at most ~25% of the daemon before it
+     *  starts shedding its OWN excess. Always ≥1 so the cap can never wedge a
+     *  socket out entirely. meta.* is exempt (lifecycle must never be starved).
+     *  Override via KONGCODE_DAEMON_MAX_INFLIGHT_PER_SOCKET. */
+    maxInFlightPerSocket = (() => {
+        const explicit = Number(process.env.KONGCODE_DAEMON_MAX_INFLIGHT_PER_SOCKET);
+        if (Number.isFinite(explicit) && explicit > 0)
+            return Math.max(1, Math.round(explicit));
+        return Math.max(1, Math.floor(this.maxInFlight / 4));
+    })();
+    /** H5: hard ceiling on concurrently-OPEN client sockets (server.maxConnections).
+     *  Without it, nothing bounds accepted connections: a fork-bomb of mcp-clients
+     *  (or a leak that never closes sockets) exhausts the daemon's file descriptors
+     *  (EMFILE) and the per-host daemon stops serving EVERY session. 512 is far
+     *  above any realistic single-host client count (a handful of Claude Code
+     *  windows) yet leaves headroom under the default 1024 fd soft limit for the
+     *  daemon's own DB/embedder/log fds. Past this, Node stops accepting and
+     *  queues at the kernel backlog until sockets free up. Override via
+     *  KONGCODE_DAEMON_MAX_CONNECTIONS. */
+    maxConnections = Number(process.env.KONGCODE_DAEMON_MAX_CONNECTIONS) > 0
+        ? Number(process.env.KONGCODE_DAEMON_MAX_CONNECTIONS)
+        : 512;
+    /** H5: explicit listen() backlog (kernel SYN/accept queue depth). Node's
+     *  default (511) is fine, but pinning it makes the ceiling explicit and
+     *  tunable for constrained hosts. Override via KONGCODE_DAEMON_BACKLOG. */
+    listenBacklog = Number(process.env.KONGCODE_DAEMON_BACKLOG) > 0
+        ? Number(process.env.KONGCODE_DAEMON_BACKLOG)
+        : 511;
+    /** H5: how long to pause accepting after an EMFILE/ENFILE (fd exhaustion)
+     *  accept error before resuming, instead of crash-looping on a tight accept
+     *  retry. Short enough to recover quickly once fds free, long enough to stop
+     *  burning CPU re-hitting the same limit. Override via
+     *  KONGCODE_DAEMON_ACCEPT_PAUSE_MS. */
+    acceptPauseMs = Number(process.env.KONGCODE_DAEMON_ACCEPT_PAUSE_MS) > 0
+        ? Number(process.env.KONGCODE_DAEMON_ACCEPT_PAUSE_MS)
+        : 1_000;
+    /** H5: timers that resume accepting after an fd-exhaustion pause — tracked so
+     *  close() can clear them (unref'd so they never keep the loop alive). One per
+     *  server that paused. */
+    acceptResumeTimers = new Set();
     constructor(opts) {
         this.opts = opts;
+    }
+    /** M2(b): current in-flight non-meta RPC count for a socket (0 if none). */
+    inFlightForSocket(sock) {
+        return this.perSocketInFlight.get(sock) ?? 0;
+    }
+    /** M2(b): increment a socket's in-flight count (called when a non-meta RPC is
+     *  admitted past both caps). */
+    incInFlightForSocket(sock) {
+        this.perSocketInFlight.set(sock, this.inFlightForSocket(sock) + 1);
+    }
+    /** M2(b): decrement a socket's in-flight count in the dispatch finally. Only
+     *  decrements when an entry exists — meta.* calls never incremented, so a
+     *  meta.* finally is a no-op. Drops the map entry at zero so the map can't
+     *  accrete dead sockets (close/error handlers also delete it; this keeps it
+     *  tidy between those events). */
+    decInFlightForSocket(sock) {
+        const n = this.perSocketInFlight.get(sock);
+        if (n === undefined)
+            return;
+        if (n <= 1)
+            this.perSocketInFlight.delete(sock);
+        else
+            this.perSocketInFlight.set(sock, n - 1);
+    }
+    /** H5: apply the connection ceiling and an accept-error policy to a freshly
+     *  created server. Two pieces:
+     *
+     *  (1) maxConnections — Node stops accepting new sockets past this count
+     *      (queued at the kernel backlog) so a runaway client count can't exhaust
+     *      the daemon's file descriptors and take down EVERY session on the host.
+     *
+     *  (2) a PERSISTENT 'error' handler for accept-time fd exhaustion
+     *      (EMFILE/ENFILE). Node emits these on the SERVER (not a socket) when
+     *      accept() fails for lack of fds. The default behavior throws — an
+     *      uncaught server 'error' would crash the daemon, and a process that
+     *      respawns into the same fd-starved state just crash-loops. Instead we
+     *      pause accepting (server.close-less: we can't easily un-accept, but we
+     *      can stop the tight retry) by briefly suspending and then resuming via
+     *      a timer once fds have had a chance to free. This is the
+     *      "degrade, don't crash" boundary for the accept path, mirroring the
+     *      fail-open philosophy of the hook boundary.
+     *
+     *  NOTE: this 'error' listener is attached for the SERVER's whole lifetime and
+     *  is distinct from the one-shot bind-error listener listen() uses to detect
+     *  EADDRINUSE — that one is removed the moment listen succeeds, leaving this
+     *  one as the steady-state accept-error handler. */
+    applyConnectionPolicy(server, label) {
+        server.maxConnections = this.maxConnections;
+        server.on("error", (err) => {
+            const code = err.code;
+            if (code === "EMFILE" || code === "ENFILE") {
+                // fd exhaustion at accept(). Stop accepting briefly instead of letting
+                // the error crash the daemon (and crash-loop on respawn into the same
+                // starved state). maxConnections should normally keep us clear of this;
+                // arriving here means the daemon's own fds (DB/embedder/logs) plus
+                // sockets crossed the OS limit. Pause → resume gives fds time to free.
+                let resumed = false;
+                try {
+                    server.close();
+                }
+                catch { /* may already be closing */ }
+                this.opts.log.error(`[daemon] ${label} accept error ${code} (fd exhaustion) — pausing accept for ${this.acceptPauseMs}ms instead of crashing`);
+                const timer = setTimeout(() => {
+                    this.acceptResumeTimers.delete(timer);
+                    if (resumed)
+                        return;
+                    resumed = true;
+                    // Re-listen on the same endpoint. Best-effort: if re-listen fails
+                    // (still starved, or endpoint taken) we log and leave it — the idle
+                    // reaper / supervisor handles a truly wedged daemon. We do NOT rethrow
+                    // from here (it would be an uncaught async throw).
+                    try {
+                        this.relistenAfterPause(server, label);
+                    }
+                    catch (e) {
+                        this.opts.log.error(`[daemon] ${label} re-listen after accept pause failed: ${e.message}`);
+                    }
+                }, this.acceptPauseMs);
+                timer.unref?.();
+                this.acceptResumeTimers.add(timer);
+                return;
+            }
+            // Any other steady-state server error: log it. Don't rethrow — an uncaught
+            // server 'error' crashes the daemon, and the per-host singleton must
+            // survive transient listener hiccups to keep serving other sessions.
+            this.opts.log.error(`[daemon] ${label} server error: ${err.message}`);
+        });
+    }
+    /** H5: re-arm a server's listener on the same endpoint after an
+     *  EMFILE/ENFILE accept pause. Re-binds UDS (re-unlinking a stale socket
+     *  file) or TCP (loopback, same port). Best-effort and never throws into the
+     *  caller — failures are logged; a daemon that truly can't re-listen is left
+     *  to the idle reaper / external supervisor. */
+    relistenAfterPause(server, label) {
+        if (server.listening)
+            return; // already accepting again
+        const onErr = (e) => {
+            this.opts.log.error(`[daemon] ${label} re-listen error after accept pause: ${e.message}`);
+        };
+        server.once("error", onErr);
+        if (server === this.udsServer && this.opts.socketPath) {
+            if (existsSync(this.opts.socketPath)) {
+                try {
+                    unlinkSync(this.opts.socketPath);
+                }
+                catch { /* ignore */ }
+            }
+            server.listen(this.opts.socketPath, this.listenBacklog, () => {
+                server.removeListener("error", onErr);
+                try {
+                    chmodSync(this.opts.socketPath, 0o600);
+                }
+                catch { /* ignore */ }
+                this.opts.log.info(`[daemon] ${label} resumed accepting after fd-exhaustion pause`);
+            });
+        }
+        else if (server === this.tcpServer && this.opts.tcpPort != null) {
+            server.listen(this.opts.tcpPort, "127.0.0.1", this.listenBacklog, () => {
+                server.removeListener("error", onErr);
+                this.opts.log.info(`[daemon] ${label} resumed accepting after fd-exhaustion pause`);
+            });
+        }
     }
     /** Register a handler for an IPC method. The dispatcher rejects calls to
      *  methods that aren't both in IPC_METHODS (compile-time) AND registered
@@ -201,7 +395,9 @@ export class DaemonServer {
             this.udsServer = createServer((sock) => this.onConnection(sock));
             await new Promise((resolve, reject) => {
                 this.udsServer.once("error", reject);
-                this.udsServer.listen(this.opts.socketPath, () => {
+                // H5: pass an explicit backlog (kernel accept-queue depth) instead of
+                // relying on Node's default — makes the ceiling explicit + tunable.
+                this.udsServer.listen(this.opts.socketPath, this.listenBacklog, () => {
                     this.udsServer.removeListener("error", reject);
                     resolve();
                 });
@@ -210,7 +406,11 @@ export class DaemonServer {
                 chmodSync(this.opts.socketPath, 0o600);
             }
             catch { }
-            this.opts.log.info(`[daemon] listening on Unix socket ${this.opts.socketPath}`);
+            // H5: install the steady-state connection ceiling + EMFILE/ENFILE accept
+            // policy AFTER bind, so the persistent 'error' listener never intercepts
+            // the one-shot bind-error reject above.
+            this.applyConnectionPolicy(this.udsServer, "UDS");
+            this.opts.log.info(`[daemon] listening on Unix socket ${this.opts.socketPath} (maxConnections=${this.maxConnections}, backlog=${this.listenBacklog})`);
         }
         if (this.opts.tcpPort !== null && this.opts.tcpPort !== undefined) {
             this.tcpServer = createServer((sock) => this.onConnection(sock));
@@ -226,7 +426,7 @@ export class DaemonServer {
                     // permissions on individual ports inside the IANA dynamic range
                     // (49152-65535). Read the assigned port via getTcpPort() after
                     // listen() resolves.
-                    this.tcpServer.listen(this.opts.tcpPort, "127.0.0.1", () => {
+                    this.tcpServer.listen(this.opts.tcpPort, "127.0.0.1", this.listenBacklog, () => {
                         this.tcpServer.removeListener("error", reject);
                         resolve();
                     });
@@ -268,9 +468,14 @@ export class DaemonServer {
                 throw new TcpPortInUseError("foreign", port, `TCP 127.0.0.1:${port} is in use by a FOREIGN (non-kongcode) process — it did not answer a meta.health probe. ` +
                     `kongcode cannot bind its daemon endpoint. Free the port, or set KONGCODE_DAEMON_PORT to an unused port.`);
             }
+            // H5: install the steady-state connection ceiling + EMFILE/ENFILE accept
+            // policy AFTER the bind succeeded (and after the EADDRINUSE catch above),
+            // so the persistent 'error' listener never intercepts a bind-time error
+            // that the one-shot reject / EADDRINUSE handling must see.
+            this.applyConnectionPolicy(this.tcpServer, "TCP");
             const addr = this.tcpServer.address();
             const actualPort = (addr && typeof addr === "object") ? addr.port : this.opts.tcpPort;
-            this.opts.log.info(`[daemon] listening on TCP 127.0.0.1:${actualPort}`);
+            this.opts.log.info(`[daemon] listening on TCP 127.0.0.1:${actualPort} (maxConnections=${this.maxConnections}, backlog=${this.listenBacklog})`);
         }
         // Daemon just started listening with zero clients. Start the idle timer
         // immediately — covers the case where mcp-client crashed before
@@ -367,6 +572,7 @@ export class DaemonServer {
             if (sock.destroyed || !sock.writable) {
                 this.clients.delete(sock);
                 this.authedSockets.delete(sock); // E2: drop auth state with the socket
+                this.perSocketInFlight.delete(sock); // M2(b): drop in-flight count with the socket
                 pruned++;
                 if (info) {
                     this.opts.log.info(`[daemon] pruned phantom client: pid=${info.pid} v${info.version} session=${info.sessionId} (close event never fired)`);
@@ -407,6 +613,11 @@ export class DaemonServer {
         // is already exiting, so the upper-bound deadline must not fire a second
         // exit path mid-shutdown.
         this.disarmSupersedeGraceTimer();
+        // H5: cancel any pending accept-resume timers — a daemon that's shutting
+        // down must not re-listen on its endpoint after an fd-exhaustion pause.
+        for (const t of this.acceptResumeTimers)
+            clearTimeout(t);
+        this.acceptResumeTimers.clear();
         // (1) Stop accepting NEW connections first. Existing sockets stay open so
         // in-flight handlers can still write their responses. Server.close()
         // resolves its callback only once all existing connections have ended, so
@@ -444,6 +655,7 @@ export class DaemonServer {
         }
         this.clients.clear();
         this.authedSockets.clear(); // E2: clear auth state on full shutdown
+        this.perSocketInFlight.clear(); // M2(b): clear per-socket in-flight counts on full shutdown
         await udsClosed;
         if (this.udsServer && this.opts.socketPath && existsSync(this.opts.socketPath)) {
             try {
@@ -531,6 +743,53 @@ export class DaemonServer {
      */
     _testHasPruneTimer() {
         return this.pruneTimer !== null;
+    }
+    /**
+     * Test-only (H5): the configured connection ceiling, per-socket in-flight
+     * sub-cap, and accept backlog — so a test can assert they're set without
+     * reaching into private fields.
+     * @internal
+     */
+    _testLimits() {
+        return {
+            maxConnections: this.maxConnections,
+            maxInFlightPerSocket: this.maxInFlightPerSocket,
+            backlog: this.listenBacklog,
+        };
+    }
+    /**
+     * Test-only (H5): the live `maxConnections` actually applied to the bound
+     * server object(s). Returns the UDS server's value when present, else the
+     * TCP server's, else null (not listening). Proves applyConnectionPolicy ran.
+     * @internal
+     */
+    _testLiveMaxConnections() {
+        if (this.udsServer)
+            return this.udsServer.maxConnections;
+        if (this.tcpServer)
+            return this.tcpServer.maxConnections;
+        return null;
+    }
+    /**
+     * Test-only (H5): synthetically emit an EMFILE accept error on the live
+     * server to exercise the persistent fd-exhaustion handler WITHOUT actually
+     * exhausting file descriptors. Returns true if the daemon survived (the
+     * 'error' listener swallowed it — an unhandled 'error' on an EventEmitter
+     * throws, so a true here proves the handler is attached) and a resume timer
+     * was scheduled. The caller should follow with close() to clear the timer.
+     * @internal
+     */
+    _testEmitAcceptError(code = "EMFILE") {
+        const server = this.tcpServer ?? this.udsServer;
+        if (!server)
+            return false;
+        const before = this.acceptResumeTimers.size;
+        const err = Object.assign(new Error(`accept ${code}`), { code });
+        // If no 'error' listener were attached this would throw (Node's default
+        // for an unhandled 'error' event) and fail the test — which is exactly the
+        // pre-fix behavior we're guarding against.
+        server.emit("error", err);
+        return this.acceptResumeTimers.size > before;
     }
     /**
      * Test-only: synchronously fire one round of prune logic identical to
@@ -672,6 +931,7 @@ export class DaemonServer {
             const info = this.clients.get(sock);
             this.clients.delete(sock);
             this.authedSockets.delete(sock); // E2: drop auth state with the socket
+            this.perSocketInFlight.delete(sock); // M2(b): drop in-flight count with the socket
             if (info) {
                 this.opts.log.info(`[daemon] client disconnected: pid=${info.pid} v${info.version} session=${info.sessionId}`);
             }
@@ -691,6 +951,7 @@ export class DaemonServer {
             }
             this.clients.delete(sock);
             this.authedSockets.delete(sock); // E2: drop auth state with the socket
+            this.perSocketInFlight.delete(sock); // M2(b): drop in-flight count with the socket
             this.checkSupersedeReady();
             if (this.clients.size === 0)
                 this.armIdleTimer();
@@ -785,7 +1046,33 @@ export class DaemonServer {
             });
             return;
         }
+        // M2(b): per-connection fairness sub-cap. The global K12 ceiling above is
+        // whole-daemon and lets ONE heavy session occupy the budget and starve
+        // others. This rejects a non-meta call when THIS socket already holds its
+        // own in-flight quota — with the SAME retryable code, so the offending
+        // client backs off while every other socket keeps flowing well under the
+        // global cap. meta.* exempt for the same reason the global gate exempts it:
+        // lifecycle (handshake/health/shutdown) must never be shed under load.
+        if (!req.method.startsWith("meta.") &&
+            this.inFlightForSocket(sock) >= this.maxInFlightPerSocket) {
+            this.opts.log.warn(`[daemon] per-socket in-flight cap hit (${this.inFlightForSocket(sock)}/${this.maxInFlightPerSocket}) — rejecting ${req.method} as busy (one session can't starve others)`);
+            this.sendResponse(sock, {
+                jsonrpc: "2.0",
+                id: req.id,
+                error: {
+                    code: -32002 /* IpcErrorCode.DAEMON_RESTARTING */,
+                    message: `connection busy (${this.inFlightForSocket(sock)} in-flight on this session) — retry shortly`,
+                },
+            });
+            return;
+        }
         this.rpcsInFlight++;
+        // M2(b): only non-meta RPCs count against the per-socket sub-cap (meta.*
+        // is exempt above, so it must not increment either — otherwise a meta.*
+        // finally would decrement a count it never raised). Mirrors the gate's
+        // meta.* exemption.
+        if (!req.method.startsWith("meta."))
+            this.incInFlightForSocket(sock);
         const ctx = {
             registerIdentity: (info) => {
                 const stamped = { ...info, attachedAt: info.attachedAt ?? Date.now() };
@@ -805,15 +1092,30 @@ export class DaemonServer {
         }
         catch (e) {
             const err = e;
-            this.opts.log.warn(`[daemon] handler ${req.method} threw: ${err.message}`);
+            // M2(a): a handler may throw an error that already carries a JSON-RPC
+            // error code in the RETRYABLE family — notably EmbedBusyError
+            // (DAEMON_RESTARTING) when the embed FIFO is full (backpressure). Honor
+            // that code so the client backs off and RETRIES, instead of blanket-
+            // wrapping every throw as HANDLER_ERROR (non-retryable), which would fail
+            // the user's turn on a transient embed-queue overflow. Only the retryable
+            // codes the client actually re-tries are passed through; anything else
+            // (a genuine handler bug) stays HANDLER_ERROR so it surfaces to the user.
+            const passthroughCode = isRetryableErrorCode(err.code) ? err.code : null;
+            if (passthroughCode !== null) {
+                this.opts.log.warn(`[daemon] handler ${req.method} threw retryable (${passthroughCode}): ${err.message}`);
+            }
+            else {
+                this.opts.log.warn(`[daemon] handler ${req.method} threw: ${err.message}`);
+            }
             this.sendResponse(sock, {
                 jsonrpc: "2.0",
                 id: req.id,
-                error: { code: -32003 /* IpcErrorCode.HANDLER_ERROR */, message: err.message },
+                error: { code: passthroughCode ?? -32003 /* IpcErrorCode.HANDLER_ERROR */, message: err.message },
             });
         }
         finally {
             this.rpcsInFlight--;
+            this.decInFlightForSocket(sock);
         }
     }
     sendResponse(sock, resp) {

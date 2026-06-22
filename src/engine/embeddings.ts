@@ -5,6 +5,25 @@ import type { ResourceProfile } from "./resource-tier.js";
 import type { SurrealStore } from "./surreal.js";
 import { swallow } from "./errors.js";
 import { log } from "./log.js";
+import { IpcErrorCode } from "../shared/ipc-types.js";
+
+/** M2(a): thrown by embed() when the bounded embed FIFO is full (backpressure).
+ *  Carries a JSON-RPC error `code` in the RETRYABLE family (DAEMON_RESTARTING,
+ *  -32002) so the daemon dispatcher maps it to a retryable wire error instead
+ *  of the blanket HANDLER_ERROR — which is NON-retryable and would fail the
+ *  user's turn outright. With a retryable code the mcp-client backs off and
+ *  re-tries (the embedder is transiently underwater, not broken), absorbing the
+ *  burst rather than surfacing it as a turn failure. `retryable` is a redundant
+ *  boolean for any caller that prefers to duck-type the intent without coupling
+ *  to the IpcErrorCode enum. */
+export class EmbedBusyError extends Error {
+  readonly code = IpcErrorCode.DAEMON_RESTARTING;
+  readonly retryable = true;
+  constructor(message: string) {
+    super(message);
+    this.name = "EmbedBusyError";
+  }
+}
 
 type LlamaEmbeddingContext = import("node-llama-cpp").LlamaEmbeddingContext;
 type LlamaModel = import("node-llama-cpp").LlamaModel;
@@ -232,7 +251,11 @@ export class EmbeddingService {
     // (unbounded push) turns a slow/wedged embedder into an OOM on a
     // long-lived per-host daemon.
     if (this.embedQueue.length >= this.maxQueueDepth) {
-      throw new Error(
+      // M2(a): throw a RETRYABLE-coded error, not a plain Error. A plain Error
+      // is wrapped by the dispatcher as HANDLER_ERROR (non-retryable) and fails
+      // the user's turn; EmbedBusyError carries DAEMON_RESTARTING so the client
+      // backs off and retries the transiently-underwater embedder instead.
+      throw new EmbedBusyError(
         `Embedding queue full (${this.embedQueue.length}/${this.maxQueueDepth}) — embedder is underwater; retry shortly`,
       );
     }

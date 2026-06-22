@@ -1,6 +1,21 @@
 import type { EmbeddingConfig } from "./config.js";
 import type { ResourceProfile } from "./resource-tier.js";
 import type { SurrealStore } from "./surreal.js";
+import { IpcErrorCode } from "../shared/ipc-types.js";
+/** M2(a): thrown by embed() when the bounded embed FIFO is full (backpressure).
+ *  Carries a JSON-RPC error `code` in the RETRYABLE family (DAEMON_RESTARTING,
+ *  -32002) so the daemon dispatcher maps it to a retryable wire error instead
+ *  of the blanket HANDLER_ERROR — which is NON-retryable and would fail the
+ *  user's turn outright. With a retryable code the mcp-client backs off and
+ *  re-tries (the embedder is transiently underwater, not broken), absorbing the
+ *  burst rather than surfacing it as a turn failure. `retryable` is a redundant
+ *  boolean for any caller that prefers to duck-type the intent without coupling
+ *  to the IpcErrorCode enum. */
+export declare class EmbedBusyError extends Error {
+    readonly code = IpcErrorCode.DAEMON_RESTARTING;
+    readonly retryable = true;
+    constructor(message: string);
+}
 export interface EmbeddingDiagnostics {
     ready: boolean;
     modelPath: string;

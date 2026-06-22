@@ -13,6 +13,7 @@ import { randomBytes, timingSafeEqual } from "node:crypto";
 import { dirname, join, resolve as resolvePath } from "node:path";
 import { platform } from "node:os";
 import { log } from "./engine/log.js";
+import { raceWithDeadline } from "./engine/surreal.js";
 import { startUiServer, stopUiServer } from "./ui-server.js";
 let server = null;
 let socketPath = null;
@@ -62,6 +63,31 @@ let healthRefreshTimer = null;
 /** How often to refresh the DB-derived cached fields. 30s is cheap relative
  *  to typical poll cadences and keeps `/health` numbers fresh enough for ops. */
 const HEALTH_REFRESH_INTERVAL_MS = 30_000;
+/** H4: daemon-side execution deadline for a single hook handler dispatch.
+ *
+ *  The handler runs INSIDE the daemon's single event loop. The hook proxy has
+ *  its own per-event budget (hook-proxy.cjs EVENT_TIMEOUTS_MS: 3s..55s) and on
+ *  expiry calls req.destroy() — but that only closes the CLIENT socket; it does
+ *  NOT abort the daemon-side handler. Under DB degradation a handler can keep
+ *  the loop busy long after the proxy gave up (a 60s QUERY_DEADLINE_MS query
+ *  plus a withRetry re-run ≈ 120s), starving every other session's hooks on
+ *  the shared per-host daemon.
+ *
+ *  This is a SAFETY NET above the legitimate inner work, not the user-facing
+ *  fail-open boundary (that stays the proxy's job). It must sit:
+ *    - ABOVE the longest legitimate inner deadline (the UserPromptSubmit
+ *      transform may run to 45s on a CPU tier — graph-context
+ *      resolveTransformTimeoutMs), so healthy-but-slow work is never abandoned;
+ *    - BELOW the largest proxy budget (55s) so on timeout we still return a
+ *      response on THIS request and free the loop before the proxy would.
+ *  50s threads that needle. On timeout we resolve the request fail-open ({})
+ *  exactly like the catch path; the orphaned handler's own query deadline
+ *  (QUERY_DEADLINE_MS) settles it in the background without blocking the loop
+ *  on a bare un-raced await. Env-overridable; clamped to [1s, 10min]. */
+const HOOK_HANDLER_DEADLINE_MS = (() => {
+    const n = Number(process.env.KONGCODE_HOOK_HANDLER_TIMEOUT_MS);
+    return Number.isFinite(n) && n > 0 ? Math.min(Math.max(Math.round(n), 1_000), 600_000) : 50_000;
+})();
 /** Record a daemon-side error timestamp, exposed via /health's last_error_ms_ago.
  *  Internal — called from the request error catch and any future error path
  *  that wants to be surfaced through /health. The optional `message` arg is
@@ -228,6 +254,50 @@ const handlers = new Map();
 export function registerHookHandler(event, handler) {
     handlers.set(event, handler);
 }
+/** H4: run a hook handler under a daemon-side execution deadline and ALWAYS
+ *  resolve to a HookResponse (never reject).
+ *
+ *  A bare `await handler(...)` pins the daemon's single event loop for the
+ *  full handler duration. Under DB degradation that can be ~120s (a 60s
+ *  QUERY_DEADLINE_MS query + a withRetry re-run) — long after the hook proxy
+ *  already timed out and called req.destroy(). req.destroy only closes the
+ *  CLIENT socket; it does NOT abort this handler, so the orphaned handler keeps
+ *  burning the shared loop and starves every other session's hooks.
+ *
+ *  Racing the handler against HOOK_HANDLER_DEADLINE_MS lets us return a
+ *  response on THIS request and free the loop. The orphaned handler is left to
+ *  settle in the background bounded by its own per-query deadline — we cannot
+ *  truly abort it, but we stop AWAITING it, which is what unblocks the loop.
+ *  The deadline sits ABOVE the longest legitimate inner work (the 45s
+ *  UserPromptSubmit transform) and BELOW the largest proxy budget (55s), so a
+ *  healthy-but-slow handler completes normally and only a genuinely-wedged one
+ *  trips the net.
+ *
+ *  Fail-open is mandatory: on EITHER a deadline timeout OR a handler throw we
+ *  return {} (the same response the pre-extraction catch produced), keeping the
+ *  user's turn unblocked — the known-good hook fail-open boundary. The deadline
+ *  case is logged distinctly so ops can name "the loop was held and we cut it
+ *  loose" when other sessions report slow hooks. Exported via __testing. */
+async function dispatchHookWithDeadline(handler, state, payload, event, deadlineMs = HOOK_HANDLER_DEADLINE_MS) {
+    try {
+        return await raceWithDeadline(handler(state, payload), deadlineMs, `hook handler ${event}`);
+    }
+    catch (err) {
+        // Surface the failure through /health/detailed's last_error_ms_ago BEFORE
+        // logging. The proxy fail-opens with {}, so without this the only signal of
+        // a broken/wedged handler is the daemon log — ops probes would see clean
+        // state otherwise.
+        const msg = err instanceof Error ? err.message : String(err);
+        recordLastError(msg);
+        if (err instanceof Error && /deadline exceeded/.test(msg)) {
+            log.error(`Hook handler [${event}] exceeded daemon deadline (${deadlineMs}ms) — failing open and freeing the event loop; handler continues in background, bounded by its own query deadline`);
+        }
+        else {
+            log.error(`Hook handler error [${event}]: ${msg || "unknown"}`);
+        }
+        return {}; // Fail open — never block the user's turn on a kongcode problem.
+    }
+}
 async function handleRequest(state, req, res) {
     // Public /health: auth-free, minimal shape. Just status+db_connection.
     // Synchronous: reads cached snapshot, no DB round-trip on the request path,
@@ -297,21 +367,11 @@ async function handleRequest(state, req, res) {
             res.end("{}");
             return;
         }
-        try {
-            const response = await handler(state, payload);
-            res.writeHead(200, { "Content-Type": "application/json" });
-            res.end(JSON.stringify(response));
-        }
-        catch (err) {
-            // Surface the failure through /health/detailed's last_error_ms_ago BEFORE
-            // logging and replying. The hook proxy fail-opens with `{}`, so without
-            // this the only signal of a broken hook handler is the daemon log file —
-            // ops probes hitting /health/detailed would otherwise see clean state.
-            recordLastError(err instanceof Error ? err.message : String(err));
-            log.error(`Hook handler error [${event}]: ${err instanceof Error ? err.message : "unknown"}`);
-            res.writeHead(200, { "Content-Type": "application/json" });
-            res.end("{}"); // Fail open
-        }
+        // H4: dispatch under a daemon-side deadline; always fail-open to {} on
+        // timeout or throw so the request completes and the event loop is freed.
+        const response = await dispatchHookWithDeadline(handler, state, payload, event);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(response));
         return;
     }
     // Unknown route
@@ -672,6 +732,11 @@ export const __testing = {
     healthCache,
     recordLastError,
     cmdlineLooksLikeKongcodeMcp,
+    // H4: the deadline-wrapped hook dispatcher + its configured budget, so the
+    // regression test can prove a slow handler fails open fast (loop freed)
+    // without standing up the full HTTP listener.
+    dispatchHookWithDeadline,
+    HOOK_HANDLER_DEADLINE_MS,
     resetHealthCache() {
         healthCache.refreshedAt = null;
         healthCache.dbConnected = false;

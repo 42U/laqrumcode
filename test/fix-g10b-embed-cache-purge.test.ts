@@ -68,6 +68,9 @@ function makeState(opts: { available: boolean; deleteBatchCounts: number[] }): {
     purgeOldRetrievalOutcomes: async () => 0,
     purgeOldTurnScores: async () => 0,
     purgeOldMaintenanceRuns: async () => 0,
+    // M4: Group-1 Promise.all now also calls purgeOldCompactionCheckpoints —
+    // stub it like the sibling purges so the fire-and-forget chain doesn't reject.
+    purgeOldCompactionCheckpoints: async () => 0,
   } as any;
 
   const state: Partial<GlobalPluginState> = {

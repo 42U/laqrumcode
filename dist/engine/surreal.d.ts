@@ -452,6 +452,23 @@ export declare class SurrealStore {
      *  uses maintenance_runs_ran_at_idx). The newest-row-per-job memory_health
      *  reader is unaffected (latest rows are always retained). */
     purgeOldMaintenanceRuns(): Promise<number>;
+    /** M4: bound compaction_checkpoint (telemetry — one row per compaction per
+     *  session, written forever by the compaction path; src/engine/surreal.ts
+     *  CREATE compaction_checkpoint). It was the one checkpoint/telemetry table
+     *  with NO retention: on a long-lived per-host daemon it grows without bound,
+     *  one row per compaction. Mirror purgeOldMaintenanceRuns: keep the
+     *  most-recent RETAIN rows by created_at, hard-delete older.
+     *
+     *  DELETE OK: compaction_checkpoint is TELEMETRY, NOT a content table — it is
+     *  absent from the D4 no-DELETE-content-tables lint's CONTENT_TABLES list and
+     *  from gc.ts GC_CONTENT_TABLES, exactly like turn_score / maintenance_runs.
+     *  Nothing points AT a checkpoint row (its only cross-ref is the OUTBOUND
+     *  memory_id string back-pointer, which gc.ts NULLs when a memory is deleted),
+     *  so deleting old rows dangles nothing. Uses cc_created_idx for the ORDER BY
+     *  and the DELETE predicate. The pending/failed-checkpoint reader
+     *  (getPendingCompactionCheckpoints) is unaffected: those are the freshest
+     *  rows and are always retained well within RETAIN. */
+    purgeOldCompactionCheckpoints(): Promise<number>;
     archiveOldTurns(): Promise<number>;
     consolidateMemories(embedFn: (text: string) => Promise<number[]>): Promise<number>;
     getSessionRetrievedMemories(sessionId: string): Promise<{

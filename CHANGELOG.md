@@ -391,6 +391,32 @@ Full suite green (1607; sole failure is the pre-existing environmental R6 TCP-sp
 critic's verdict these three workstreams close the "self-heals / never needs a human" gap; remaining
 scale-hardening (H4/H5, M1/M2/M4) follows.
 
+### Hardened — Phase 3 Wave 4: final scale-hardening (closes every audit + completeness-critic gap)
+
+- **H4 (HIGH) — daemon-side hook-handler deadline.** `http-api.ts` dispatched `await handler(...)` with
+  no timeout, so under DB degradation an orphaned handler held Node's single event loop ~120s after the
+  proxy already failed open, starving other sessions. Now wrapped in `raceWithDeadline`
+  (~50s — above the 45s inner transform, below the 55s proxy budget): a wedged handler returns a fast
+  fail-open `{}` and frees the loop. The user-turn fail-open boundary (the proxy's job) is unchanged.
+- **H5 (HIGH) — connection ceiling.** `server.maxConnections` (512) + explicit backlog + a persistent
+  `EMFILE/ENFILE` handler that pauses-and-resumes accepting instead of crash-looping; applied after bind
+  so the E10 EADDRINUSE path is untouched.
+- **M2 (MEDIUM) — fair, retryable backpressure.** Embed-queue-full now throws a retryable `EmbedBusyError`
+  (→ client backs off + retries instead of failing the turn); dispatchLine passes through retryable codes
+  rather than flattening to HANDLER_ERROR; a per-socket in-flight sub-cap (maxInFlight/4) stops one
+  session starving all others. Global K12 cap unchanged.
+- **M1 (MEDIUM) — adaptive embedding backfill.** Backfill batch scales with the unembedded backlog
+  (bounded ceiling) so a post-restore 100k backlog drains in hours/days, not months; steady-state stays a
+  small trickle.
+- **M4 (MEDIUM) — compaction_checkpoint retention** + `created_at` index (`purgeOldCompactionCheckpoints`,
+  wired into the 6h cycle).
+
+Full suite green (1627; sole failure is the pre-existing environmental R6 real-daemon-TCP-spawn timeout —
+needs a real Windows/TCP env to validate). **All 16 audit gaps + all completeness-critic CRITICAL/HIGH/
+MEDIUM gaps are now closed.** Residual: LOW tier L1–L4 (non-transactional schema apply [well-mitigated by
+idempotent DEFINEs + retry], per-session in-memory counter race [benign], client fd-leak window [slow],
+graduation_event retention [rare]) — documented scale-hardening follow-ups.
+
 ## [0.7.130] — 2026-06-19
 
 ### Added — `update_skill` MCP tool

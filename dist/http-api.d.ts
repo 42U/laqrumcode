@@ -85,6 +85,31 @@ export declare function makeHookOutput(eventName: string, additionalContext?: st
 type HookHandler = (state: GlobalPluginState, payload: Record<string, unknown>) => Promise<HookResponse>;
 /** Register a hook handler for an event. */
 export declare function registerHookHandler(event: string, handler: HookHandler): void;
+/** H4: run a hook handler under a daemon-side execution deadline and ALWAYS
+ *  resolve to a HookResponse (never reject).
+ *
+ *  A bare `await handler(...)` pins the daemon's single event loop for the
+ *  full handler duration. Under DB degradation that can be ~120s (a 60s
+ *  QUERY_DEADLINE_MS query + a withRetry re-run) — long after the hook proxy
+ *  already timed out and called req.destroy(). req.destroy only closes the
+ *  CLIENT socket; it does NOT abort this handler, so the orphaned handler keeps
+ *  burning the shared loop and starves every other session's hooks.
+ *
+ *  Racing the handler against HOOK_HANDLER_DEADLINE_MS lets us return a
+ *  response on THIS request and free the loop. The orphaned handler is left to
+ *  settle in the background bounded by its own per-query deadline — we cannot
+ *  truly abort it, but we stop AWAITING it, which is what unblocks the loop.
+ *  The deadline sits ABOVE the longest legitimate inner work (the 45s
+ *  UserPromptSubmit transform) and BELOW the largest proxy budget (55s), so a
+ *  healthy-but-slow handler completes normally and only a genuinely-wedged one
+ *  trips the net.
+ *
+ *  Fail-open is mandatory: on EITHER a deadline timeout OR a handler throw we
+ *  return {} (the same response the pre-extraction catch produced), keeping the
+ *  user's turn unblocked — the known-good hook fail-open boundary. The deadline
+ *  case is logged distinctly so ops can name "the loop was held and we cut it
+ *  loose" when other sessions report slow hooks. Exported via __testing. */
+declare function dispatchHookWithDeadline(handler: HookHandler, state: GlobalPluginState, payload: Record<string, unknown>, event: string, deadlineMs?: number): Promise<HookResponse>;
 /** Read /proc/<pid>/cmdline on Linux and check it looks like a kongcode
  *  MCP-client process. Mirrors `cmdlineLooksLikeKongcodeDaemon` in
  *  src/daemon/index.ts (~L371) but matches the per-session MCP relay rather
@@ -140,6 +165,8 @@ export declare const __testing: {
     healthCache: HealthCacheSnapshot;
     recordLastError: typeof recordLastError;
     cmdlineLooksLikeKongcodeMcp: typeof cmdlineLooksLikeKongcodeMcp;
+    dispatchHookWithDeadline: typeof dispatchHookWithDeadline;
+    HOOK_HANDLER_DEADLINE_MS: number;
     resetHealthCache(): void;
 };
 export {};

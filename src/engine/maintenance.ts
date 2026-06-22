@@ -183,6 +183,7 @@ export function runBootstrapMaintenance(state: GlobalPluginState): void {
     store.purgeOldRetrievalOutcomes(),
     store.purgeOldTurnScores(),
     store.purgeOldMaintenanceRuns(), // E1: bound the new runJob audit trail itself
+    store.purgeOldCompactionCheckpoints(), // M4: bound compaction_checkpoint (telemetry, 1 row/compaction, was unbounded)
     runJob(state, "purgeStaleEmbedCache", () => purgeStaleEmbedCache(state)),
     // E6: monologue grows UNBOUNDED (one row per reasoning moment, searched on
     // the hot path). E7: turn_archive grows FOREVER (archiveOldTurns only
@@ -263,6 +264,93 @@ export function runBootstrapMaintenance(state: GlobalPluginState): void {
   heavyTimer.unref?.();
 }
 
+/**
+ * M1 — ADAPTIVE per-cycle backfill batch size.
+ *
+ * Every backfill helper used to hard-code `LIMIT 50`. That is right for the
+ * steady-state trickle (a handful of rows that hit a swallowed embed failure),
+ * but catastrophic after a restore-jsonl / bulk import / embedder-was-down
+ * episode leaves a 100k backlog: at 50 rows/table/6h that drains in
+ * 50 * 4/day = 200 rows/day → ~500 DAYS, and every un-embedded row is invisible
+ * to vector search the whole time.
+ *
+ * Fix: scale the LIMIT to the live unembedded backlog for THIS table. Small
+ * backlog → small batch (no wasted embed calls, no cycle bloat). Large backlog
+ * → large batch so it drains in hours/days, bounded by ADAPTIVE_MAX so a single
+ * cycle never embeds an unbounded slug that would block the 6h cycle (the
+ * embedder is the real throughput ceiling; ADAPTIVE_MAX keeps one cycle's work
+ * finite). When the backlog still exceeds ADAPTIVE_MAX, successive 6h cycles —
+ * and the per-table while-loop in runBackfillBatched — keep draining ADAPTIVE_MAX
+ * each pass until the gap closes, so convergence is hours-to-days not months.
+ *
+ * STEADY_BATCH (50) is the floor and the historical steady-state value, so a
+ * normal cycle with a tiny gap behaves exactly as before.
+ */
+const STEADY_BATCH = 50;
+const ADAPTIVE_MAX = 2_000;
+/** How many passes runBackfillBatched will loop within ONE cycle before yielding
+ *  to the next 6h cycle. Bounds one cycle's total work at
+ *  ADAPTIVE_MAX * MAX_BACKFILL_PASSES rows so a giant backlog can't monopolize
+ *  the cycle, while still draining far faster than one ADAPTIVE_MAX batch/6h. */
+const MAX_BACKFILL_PASSES = 20;
+
+/** Count rows still needing an embedding for a table, using the SAME predicate
+ *  the table's backfill SELECT uses (embedding IS NONE OR len 0), so the batch
+ *  size tracks the real backlog. Returns 0 on any error (caller falls back to
+ *  the steady batch). `extraWhere` carries the table's active/not-pruned filter
+ *  so the count matches what the backfill will actually process. */
+async function countUnembedded(
+  state: GlobalPluginState,
+  table: string,
+  extraWhere = "",
+): Promise<number> {
+  try {
+    const rows = await state.store.queryFirst<{ n: number }>(
+      `SELECT count() AS n FROM ${table}
+         WHERE (embedding IS NONE OR array::len(embedding) = 0)${extraWhere}
+         GROUP ALL`,
+    );
+    return rows[0]?.n ?? 0;
+  } catch {
+    return 0;
+  }
+}
+
+/** M1: map a backlog size to a bounded per-cycle batch LIMIT.
+ *   gap <= STEADY_BATCH  → gap (don't over-fetch a tiny trickle; min 1)
+ *   else                 → min(gap, ADAPTIVE_MAX) (scale up, capped)
+ *  Never exceeds ADAPTIVE_MAX so one batch's embed work stays bounded. */
+function adaptiveBatchLimit(gap: number): number {
+  if (gap <= 0) return STEADY_BATCH; // unknown/zero backlog → behave as before
+  if (gap <= STEADY_BATCH) return Math.max(1, gap);
+  return Math.min(gap, ADAPTIVE_MAX);
+}
+
+/**
+ * M1: run a table's per-row backfill in ADAPTIVE, bounded passes within one
+ * cycle. `processBatch(limit)` embeds up to `limit` rows and returns how many it
+ * actually UPDATEd (0 when the table is drained). We size each pass from the
+ * live backlog (countUnembedded) and loop until drained, a pass makes no
+ * progress, or MAX_BACKFILL_PASSES is hit — so a steady-state cycle does ONE
+ * tiny pass (old behaviour) while a huge backlog drains ADAPTIVE_MAX/pass for up
+ * to MAX_BACKFILL_PASSES, then yields to the next 6h cycle.
+ */
+async function runBackfillBatched(
+  state: GlobalPluginState,
+  table: string,
+  extraWhere: string,
+  processBatch: (limit: number) => Promise<number>,
+): Promise<void> {
+  for (let pass = 0; pass < MAX_BACKFILL_PASSES; pass++) {
+    const gap = await countUnembedded(state, table, extraWhere);
+    if (gap <= 0) return; // drained (or count failed → treat as nothing to do)
+    const limit = adaptiveBatchLimit(gap);
+    const processed = await processBatch(limit);
+    if (processed <= 0) return; // no progress (all rows in this batch failed to embed) — yield
+    if (processed < limit) return; // fewer than asked → backlog drained this cycle
+  }
+}
+
 /** The full unembedded-row sweep, table by table. Boot Group 3 runs it once
  *  (after consolidateMemories proves BGE-M3 is live) and a 6h interval keeps
  *  it running thereafter. Exported for tests. */
@@ -315,31 +403,39 @@ async function sweepOrphanedEdges(state: GlobalPluginState): Promise<void> {
 async function backfillTurnEmbeddings(state: GlobalPluginState): Promise<void> {
   if (!state.store.isAvailable()) return;
   if (!state.embeddings.isAvailable()) return;
-  try {
-    const rows = await state.store.queryFirst<{ id: string; text: string }>(
-      `SELECT id, text FROM turn
-        WHERE (embedding IS NONE OR array::len(embedding) = 0)
-          AND pruned_at IS NONE
-          AND text IS NOT NONE
-          AND text != ""
-        LIMIT 50`,
-    );
-    if (!rows.length) return;
-    log.info(`[maintenance] backfilling turn embeddings: ${rows.length} row(s)`);
-    for (const row of rows) {
-      if (!row?.id || !row?.text) continue;
-      let target = row.text;
-      if (target.length > 6000) target = target.slice(0, 6000);
-      try {
-        const vec = await state.embeddings.embed(target);
-        if (!vec?.length) continue;
-        await state.store.queryExec(
-          `UPDATE ${String(row.id)} SET embedding = $vec WHERE embedding IS NONE OR array::len(embedding) = 0`,
-          { vec },
-        );
-      } catch (e) { swallow(`maintenance:backfillTurn:${String(row.id)}`, e); }
-    }
-  } catch (e) { swallow.warn("maintenance:backfillTurnEmbeddings", e); }
+  // M1: extraWhere mirrors the SELECT's active-row filter so countUnembedded
+  // tracks the true backlog; runBackfillBatched sizes each pass adaptively.
+  const extraWhere = ` AND pruned_at IS NONE AND text IS NOT NONE AND text != ""`;
+  await runBackfillBatched(state, "turn", extraWhere, async (batchSize) => {
+    try {
+      const rows = await state.store.queryFirst<{ id: string; text: string }>(
+        `SELECT id, text FROM turn
+          WHERE (embedding IS NONE OR array::len(embedding) = 0)
+            AND pruned_at IS NONE
+            AND text IS NOT NONE
+            AND text != ""
+          LIMIT ${batchSize}`,
+      );
+      if (!rows.length) return 0;
+      log.info(`[maintenance] backfilling turn embeddings: ${rows.length} row(s)`);
+      let ok = 0;
+      for (const row of rows) {
+        if (!row?.id || !row?.text) continue;
+        let target = row.text;
+        if (target.length > 6000) target = target.slice(0, 6000);
+        try {
+          const vec = await state.embeddings.embed(target);
+          if (!vec?.length) continue;
+          await state.store.queryExec(
+            `UPDATE ${String(row.id)} SET embedding = $vec WHERE embedding IS NONE OR array::len(embedding) = 0`,
+            { vec },
+          );
+          ok++;
+        } catch (e) { swallow(`maintenance:backfillTurn:${String(row.id)}`, e); }
+      }
+      return ok;
+    } catch (e) { swallow.warn("maintenance:backfillTurnEmbeddings", e); return 0; }
+  });
 }
 
 /** 0.7.118: plain unembedded `memory` rows had no backfill either —
@@ -352,31 +448,38 @@ async function backfillTurnEmbeddings(state: GlobalPluginState): Promise<void> {
 async function backfillMemoryEmbeddings(state: GlobalPluginState): Promise<void> {
   if (!state.store.isAvailable()) return;
   if (!state.embeddings.isAvailable()) return;
-  try {
-    const rows = await state.store.queryFirst<{ id: string; text: string; embedding_target?: string }>(
-      `SELECT id, text, embedding_target FROM memory
-        WHERE (embedding IS NONE OR array::len(embedding) = 0)
-          AND (status IS NONE OR status != "archived")
-          AND text IS NOT NONE
-          AND text != ""
-        LIMIT 50`,
-    );
-    if (!rows.length) return;
-    log.info(`[maintenance] backfilling memory embeddings: ${rows.length} row(s)`);
-    for (const row of rows) {
-      if (!row?.id || !row?.text) continue;
-      let target = row.embedding_target ?? row.text;
-      if (target.length > 6000) target = target.slice(0, 6000);
-      try {
-        const vec = await state.embeddings.embed(target);
-        if (!vec?.length) continue;
-        await state.store.queryExec(
-          `UPDATE ${String(row.id)} SET embedding = $vec WHERE embedding IS NONE OR array::len(embedding) = 0`,
-          { vec },
-        );
-      } catch (e) { swallow(`maintenance:backfillMemory:${String(row.id)}`, e); }
-    }
-  } catch (e) { swallow.warn("maintenance:backfillMemoryEmbeddings", e); }
+  // M1: this filter mirrors the SELECT's active-row predicate (see runBackfillBatched).
+  const activeFilter = ` AND (status IS NONE OR status != "archived") AND text IS NOT NONE AND text != ""`;
+  await runBackfillBatched(state, "memory", activeFilter, async (batchSize) => {
+    try {
+      const rows = await state.store.queryFirst<{ id: string; text: string; embedding_target?: string }>(
+        `SELECT id, text, embedding_target FROM memory
+          WHERE (embedding IS NONE OR array::len(embedding) = 0)
+            AND (status IS NONE OR status != "archived")
+            AND text IS NOT NONE
+            AND text != ""
+          LIMIT ${batchSize}`,
+      );
+      if (!rows.length) return 0;
+      log.info(`[maintenance] backfilling memory embeddings: ${rows.length} row(s)`);
+      let ok = 0;
+      for (const row of rows) {
+        if (!row?.id || !row?.text) continue;
+        let target = row.embedding_target ?? row.text;
+        if (target.length > 6000) target = target.slice(0, 6000);
+        try {
+          const vec = await state.embeddings.embed(target);
+          if (!vec?.length) continue;
+          await state.store.queryExec(
+            `UPDATE ${String(row.id)} SET embedding = $vec WHERE embedding IS NONE OR array::len(embedding) = 0`,
+            { vec },
+          );
+          ok++;
+        } catch (e) { swallow(`maintenance:backfillMemory:${String(row.id)}`, e); }
+      }
+      return ok;
+    } catch (e) { swallow.warn("maintenance:backfillMemoryEmbeddings", e); return 0; }
+  });
 }
 
 /** One-shot reconciliation: every session row pre-0.7.12 has turn_count=0
@@ -560,6 +663,9 @@ async function backfillArtifactEmbeddings(state: GlobalPluginState): Promise<voi
     log.info(`[maintenance] backfillArtifactEmbeddings: SKIP — embeddings not yet available (after ${Date.now() - started}ms)`);
     return;
   }
+  // M1: artifact has no active/pruned filter (its SELECT predicate is just the
+  // embedding gap), so extraWhere is empty — countUnembedded matches the SELECT.
+  await runBackfillBatched(state, "artifact", "", async (batchSize) => {
   let ok = 0;
   let total = 0;
   try {
@@ -570,11 +676,11 @@ async function backfillArtifactEmbeddings(state: GlobalPluginState): Promise<voi
     }>(
       `SELECT id, path, description FROM artifact
         WHERE embedding IS NONE OR array::len(embedding) = 0
-        LIMIT 50`,
+        LIMIT ${batchSize}`,
     );
     total = rows.length;
     log.info(`[maintenance] backfillArtifactEmbeddings: SELECT returned ${total} row(s)`);
-    if (!rows.length) return;
+    if (!rows.length) return 0;
     for (const row of rows) {
       if (!row?.id || !row?.path) continue;
       // Match commit.ts:601 hot-path template literal EXACTLY (no .trim(), no
@@ -612,10 +718,13 @@ async function backfillArtifactEmbeddings(state: GlobalPluginState): Promise<voi
       }
     }
     log.info(`[maintenance] backfillArtifactEmbeddings: complete ${ok}/${total} embedded in ${Date.now() - started}ms`);
+    return ok;
   } catch (e) {
     log.warn(`[maintenance] backfillArtifactEmbeddings: TOP-LEVEL FAIL: ${(e as Error)?.message ?? e}`);
     swallow.warn("maintenance:backfillArtifactEmbeddings", e);
+    return 0;
   }
+  });
 }
 
 /** Embedding backfill for concept rows where embedding IS NONE OR len=0.
@@ -627,6 +736,10 @@ async function backfillArtifactEmbeddings(state: GlobalPluginState): Promise<voi
 async function backfillConceptEmbeddings(state: GlobalPluginState): Promise<void> {
   if (!state.store.isAvailable()) return;
   if (!state.embeddings.isAvailable()) return;
+  // M1: this filter mirrors the SELECT's content/name presence predicate so the
+  // adaptive count tracks only rows the backfill can actually heal.
+  const activeFilter = ` AND ((content IS NOT NONE AND content != "") OR (name IS NOT NONE AND name != ""))`;
+  await runBackfillBatched(state, "concept", activeFilter, async (batchSize) => {
   try {
     const rows = await state.store.queryFirst<{
       id: string;
@@ -653,9 +766,9 @@ async function backfillConceptEmbeddings(state: GlobalPluginState): Promise<void
             (content IS NOT NONE AND content != "")
             OR (name IS NOT NONE AND name != "")
           )
-        LIMIT 50`,
+        LIMIT ${batchSize}`,
     );
-    if (!rows.length) return;
+    if (!rows.length) return 0;
     log.info(`[maintenance] backfilling concept embeddings: ${rows.length} row(s)`);
     let ok = 0;
     for (const row of rows) {
@@ -691,9 +804,12 @@ async function backfillConceptEmbeddings(state: GlobalPluginState): Promise<void
       }
     }
     log.info(`[maintenance] concept embedding backfill: ${ok}/${rows.length} embedded`);
+    return ok;
   } catch (e) {
     swallow.warn("maintenance:backfillConceptEmbeddings", e);
+    return 0;
   }
+  });
 }
 
 /** Embedding backfill for reflection rows where embedding IS NONE OR len=0.
@@ -705,6 +821,9 @@ async function backfillConceptEmbeddings(state: GlobalPluginState): Promise<void
 async function backfillReflectionEmbeddings(state: GlobalPluginState): Promise<void> {
   if (!state.store.isAvailable()) return;
   if (!state.embeddings.isAvailable()) return;
+  // M1: extraWhere mirrors the SELECT's active filter (see runBackfillBatched).
+  const extraWhere = ` AND (active = true OR active IS NONE)`;
+  await runBackfillBatched(state, "reflection", extraWhere, async (batchSize) => {
   try {
     const rows = await state.store.queryFirst<{
       id: string;
@@ -713,9 +832,9 @@ async function backfillReflectionEmbeddings(state: GlobalPluginState): Promise<v
       `SELECT id, text FROM reflection
         WHERE (embedding IS NONE OR array::len(embedding) = 0)
           AND (active = true OR active IS NONE)
-        LIMIT 50`,
+        LIMIT ${batchSize}`,
     );
-    if (!rows.length) return;
+    if (!rows.length) return 0;
     log.info(`[maintenance] backfilling reflection embeddings: ${rows.length} row(s)`);
     let ok = 0;
     for (const row of rows) {
@@ -738,9 +857,12 @@ async function backfillReflectionEmbeddings(state: GlobalPluginState): Promise<v
       }
     }
     log.info(`[maintenance] reflection embedding backfill: ${ok}/${rows.length} embedded`);
+    return ok;
   } catch (e) {
     swallow.warn("maintenance:backfillReflectionEmbeddings", e);
+    return 0;
   }
+  });
 }
 
 /** Embedding backfill for monologue rows. Hot-path at memory-daemon.ts:280
@@ -748,6 +870,8 @@ async function backfillReflectionEmbeddings(state: GlobalPluginState): Promise<v
 async function backfillMonologueEmbeddings(state: GlobalPluginState): Promise<void> {
   if (!state.store.isAvailable()) return;
   if (!state.embeddings.isAvailable()) return;
+  // M1: monologue SELECT has only the embedding-gap predicate → empty extraWhere.
+  await runBackfillBatched(state, "monologue", "", async (batchSize) => {
   try {
     const rows = await state.store.queryFirst<{
       id: string;
@@ -755,9 +879,9 @@ async function backfillMonologueEmbeddings(state: GlobalPluginState): Promise<vo
     }>(
       `SELECT id, content FROM monologue
         WHERE embedding IS NONE OR array::len(embedding) = 0
-        LIMIT 50`,
+        LIMIT ${batchSize}`,
     );
-    if (!rows.length) return;
+    if (!rows.length) return 0;
     log.info(`[maintenance] backfilling monologue embeddings: ${rows.length} row(s)`);
     let ok = 0;
     for (const row of rows) {
@@ -780,9 +904,12 @@ async function backfillMonologueEmbeddings(state: GlobalPluginState): Promise<vo
       }
     }
     log.info(`[maintenance] monologue embedding backfill: ${ok}/${rows.length} embedded`);
+    return ok;
   } catch (e) {
     swallow.warn("maintenance:backfillMonologueEmbeddings", e);
+    return 0;
   }
+  });
 }
 
 /** Embedding backfill for turn_archive rows. This heals the 1126 archived
@@ -798,6 +925,11 @@ async function backfillMonologueEmbeddings(state: GlobalPluginState): Promise<vo
 async function backfillTurnArchiveEmbeddings(state: GlobalPluginState): Promise<void> {
   if (!state.store.isAvailable()) return;
   if (!state.embeddings.isAvailable()) return;
+  // M1: the old hand-tuned LIMIT 200 (for the one-time 1126-row heal) is now
+  // subsumed by the adaptive sizer — a large backlog gets up to ADAPTIVE_MAX/pass.
+  // extraWhere mirrors the SELECT's `text != NONE` filter.
+  const extraWhere = ` AND text != NONE`;
+  await runBackfillBatched(state, "turn_archive", extraWhere, async (batchSize) => {
   try {
     const rows = await state.store.queryFirst<{
       id: string;
@@ -806,9 +938,9 @@ async function backfillTurnArchiveEmbeddings(state: GlobalPluginState): Promise<
       `SELECT id, text FROM turn_archive
         WHERE (embedding IS NONE OR array::len(embedding) = 0)
           AND text != NONE
-        LIMIT 200`,
+        LIMIT ${batchSize}`,
     );
-    if (!rows.length) return;
+    if (!rows.length) return 0;
     log.info(`[maintenance] backfilling turn_archive embeddings: ${rows.length} row(s)`);
     let ok = 0;
     for (const row of rows) {
@@ -831,9 +963,12 @@ async function backfillTurnArchiveEmbeddings(state: GlobalPluginState): Promise<
       }
     }
     log.info(`[maintenance] turn_archive embedding backfill: ${ok}/${rows.length} embedded`);
+    return ok;
   } catch (e) {
     swallow.warn("maintenance:backfillTurnArchiveEmbeddings", e);
+    return 0;
   }
+  });
 }
 
 /** embedding_cache retention. embedding_cache is TELEMETRY (not a content
