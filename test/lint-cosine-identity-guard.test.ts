@@ -130,6 +130,11 @@ function scan(file: string): Hit[] {
 
   for (let i = 0; i < lines.length; i++) {
     if (!/vector::similarity::cosine/.test(lines[i] ?? "")) continue;
+    // Skip COMMENT lines that merely mention the cosine fn (e.g. an explanatory
+    // comment about why a dim-mismatch breaks vector search). A comment is not a
+    // destructive SQL site — real cosine SQL lives in backtick templates and
+    // never starts with // / * . Mirrors the D4 no-delete lint's comment-skip.
+    if (/^\s*(\/\/|\*|\/\*)/.test(lines[i] ?? "")) continue;
     // Capture the SQL block — heuristic: walk forward until we see the
     // closing backtick or a line that begins a new statement (function
     // call ), }, ;).

@@ -88,6 +88,246 @@ export interface BootstrapInput {
 
 let managedSurreal: ChildProcess | null = null;
 
+// ── C1/C2: managed-SurrealDB child supervision ─────────────────────────────
+// The managed child is spawned detached+unref'd (Option A) so it OUTLIVES the
+// daemon/MCP process. C1: before this, nothing watched it — a dead or
+// crash-looping child was a permanent SILENT failure (bootstrap() runs once;
+// ensureConnected reconnects the WS but never re-spawns the OS process). The
+// supervisor below attaches `exit`/`error` listeners at spawn time and respawns
+// with BOUNDED exponential backoff. C2: if respawns crash-loop (the store is
+// likely corrupt / unstartable), it STOPS, enters a loud DEGRADED state, and
+// surfaces via a maintenance_runs error row — it NEVER auto-deletes or
+// quarantines the data dir (a false positive at 1M installs would mass-destroy
+// users' graphs; recovery is a human/opt-in decision).
+
+/** Minimal structural view of SurrealStore the supervisor needs to surface a
+ *  degraded state. Structural (not an import of SurrealStore) so bootstrap.ts
+ *  stays free of an engine-store dependency and there is no import cycle —
+ *  surreal.ts registers itself via registerSurrealSupervisorStore(). */
+interface SupervisorStore {
+  isAvailable(): boolean;
+  queryExec(sql: string, bindings?: Record<string, unknown>): Promise<void>;
+}
+
+/** Everything spawnManagedSurreal needs to RE-spawn an identical child. Captured
+ *  on the first managed spawn so the exit handler can reconstruct the process
+ *  without re-running the whole bootstrap. */
+interface RespawnParams {
+  binPath: string;
+  dataDir: string;
+  port: number;
+  user: string;
+  pass: string;
+  cacheDir: string;
+}
+
+/** Crash-loop window: >= MAX_RESTARTS unexpected exits within WINDOW_MS trips
+ *  the cap → STOP respawning, mark degraded, surface loudly. Tuned so a genuine
+ *  transient (one bad shutdown, an OOM kill) self-heals, but a child that cannot
+ *  stay up (corrupt SurrealKV, port permanently stolen, bad binary) is caught
+ *  fast instead of fork-bombing. */
+const SUPERVISOR_MAX_RESTARTS = 5;
+const SUPERVISOR_WINDOW_MS = 60_000;
+/** Bounded exponential backoff between respawns: 0.5s, 1s, 2s, 4s, then capped
+ *  at 8s. A floor of >0 prevents a tight respawn loop from pegging a CPU even
+ *  before the crash-loop cap trips. */
+const SUPERVISOR_BACKOFF_MS = [500, 1_000, 2_000, 4_000, 8_000];
+
+const supervisorState = {
+  /** Set true ONLY by shutdownManagedSurreal({force}) (intentional teardown) so
+   *  the exit handler does NOT respawn on a deliberate kill. */
+  shuttingDown: false,
+  /** Latched true once the crash-loop cap trips. Stops all further respawns for
+   *  the process lifetime (a fresh daemon boot re-runs bootstrap → re-spawns →
+   *  resets this). */
+  degraded: false,
+  /** Timestamps (ms) of recent unexpected exits, pruned to the sliding window. */
+  exitTimes: [] as number[],
+  /** Idempotency guard: a respawn is scheduled/in-flight. Prevents a stray
+   *  second `exit`/`error` event (some platforms emit both) from launching two
+   *  children racing for the same port. */
+  respawning: false,
+  /** Captured spawn args for the managed child; null until the first managed
+   *  spawn. The reuse / external-DB / SURREAL_URL paths never set this, so the
+   *  supervisor stays inert for instances whose lifecycle we don't own. */
+  params: null as RespawnParams | null,
+  /** Registered SurrealStore for surfacing the degraded state (best-effort). */
+  store: null as SupervisorStore | null,
+  /** Pending backoff timer, so shutdown can cancel a scheduled respawn. */
+  timer: null as ReturnType<typeof setTimeout> | null,
+};
+
+/** Wire the SurrealStore the supervisor uses to surface a DEGRADED state via a
+ *  maintenance_runs error row (memory_health then goes RED). Called by
+ *  SurrealStore's constructor (surreal.ts) so no cross-module daemon wiring is
+ *  needed; idempotent (last writer wins). Exported for that call + unit tests. */
+export function registerSurrealSupervisorStore(store: SupervisorStore | null): void {
+  supervisorState.store = store;
+}
+
+/** Re-arm the supervisor for a process that is taking ownership of a freshly
+ *  spawned managed child (the bootstrap() fresh-spawn path). Clears any stale
+ *  shutdown/degraded state + the restart-window history so a prior incarnation
+ *  in the same process (a test, or a re-bootstrap) cannot leave shuttingDown
+ *  latched and silently suppress all supervision. Respawn callers do NOT invoke
+ *  this — the crash-loop window is intentionally preserved across respawns. */
+function armSupervisorForFreshSpawn(): void {
+  supervisorState.shuttingDown = false;
+  supervisorState.degraded = false;
+  supervisorState.exitTimes = [];
+  supervisorState.respawning = false;
+  if (supervisorState.timer) { clearTimeout(supervisorState.timer); supervisorState.timer = null; }
+}
+
+/** Test-only: reset the supervisor between cases (module state is process-wide).
+ *  Cancels any pending respawn timer so a leftover timer can't fire across
+ *  tests. Not used in production. */
+export function __resetSupervisorForTest(): void {
+  if (supervisorState.timer) clearTimeout(supervisorState.timer);
+  supervisorState.shuttingDown = false;
+  supervisorState.degraded = false;
+  supervisorState.exitTimes = [];
+  supervisorState.respawning = false;
+  supervisorState.params = null;
+  supervisorState.store = null;
+  supervisorState.timer = null;
+  managedSurreal = null;
+}
+
+/** Test-only inspection of supervisor state (avoids exporting the mutable
+ *  object directly). */
+export function __getSupervisorState(): {
+  degraded: boolean;
+  shuttingDown: boolean;
+  restartsInWindow: number;
+} {
+  return {
+    degraded: supervisorState.degraded,
+    shuttingDown: supervisorState.shuttingDown,
+    restartsInWindow: supervisorState.exitTimes.length,
+  };
+}
+
+/** Surface a managed-child supervision failure LOUDLY (C2). Writes a
+ *  maintenance_runs row job='surrealSupervisor' status='error' so memory_health
+ *  goes RED, and logs the data-dir + an actionable recovery hint. NEVER touches
+ *  the data dir. Best-effort: a store that is unavailable (the most likely state
+ *  when the DB child is down!) just gets the stderr log — the row is written on
+ *  the next boot once the store reconnects, and the loud log is always present. */
+function surfaceSupervisorDegraded(message: string): void {
+  const dataDir = supervisorState.params?.dataDir ?? "(unknown)";
+  log.error(
+    `[bootstrap] managed SurrealDB SUPERVISOR DEGRADED: ${message}\n` +
+      `  data dir: ${dataDir}\n` +
+      `  The managed database child could not be kept running. kongcode has STOPPED\n` +
+      `  respawning to avoid a crash loop and has NOT modified your data.\n` +
+      `  If the store is corrupt, recover by restoring a backup, e.g.:\n` +
+      `    surreal import --conn http://127.0.0.1:<port> --user <user> --pass <pass> \\\n` +
+      `      --ns kong --db memory <your-export.surql>\n` +
+      `  (or restore a gc-backup snapshot). kongcode will not auto-recover or delete the\n` +
+      `  data dir — that is a human decision.`,
+  );
+  const store = supervisorState.store;
+  if (!store) return;
+  // Best-effort, fire-and-forget. isAvailable() gates the write the same way
+  // maintenance.runJob does; a failure to record must never throw out of the
+  // exit handler.
+  void (async () => {
+    try {
+      if (!store.isAvailable()) return;
+      await store.queryExec(`CREATE maintenance_runs CONTENT $data`, {
+        data: {
+          job: "surrealSupervisor",
+          status: "error",
+          rows_affected: 0,
+          duration_ms: 0,
+          error: `${message} data_dir=${dataDir}`.slice(0, 300),
+        },
+      });
+    } catch {
+      /* swallow — surfacing must not crash the supervisor */
+    }
+  })();
+}
+
+/** Record an unexpected exit timestamp and report whether the crash-loop cap
+ *  has tripped within the sliding window. Pure-ish (mutates exitTimes); separated
+ *  out so the test can assert the window math directly. */
+function registerUnexpectedExit(now = Date.now()): { crashLoop: boolean } {
+  const cutoff = now - SUPERVISOR_WINDOW_MS;
+  supervisorState.exitTimes = supervisorState.exitTimes.filter((t) => t > cutoff);
+  supervisorState.exitTimes.push(now);
+  return { crashLoop: supervisorState.exitTimes.length >= SUPERVISOR_MAX_RESTARTS };
+}
+
+/** The exit/error handler attached to every managed child (initial spawn AND
+ *  respawns). Decides: ignore (intentional shutdown / already degraded), or
+ *  respawn with backoff, or trip the crash-loop cap and degrade. Async only so
+ *  the awaited respawn settles; all throws are contained. */
+async function onManagedChildExit(reason: string): Promise<void> {
+  // Intentional teardown or already-degraded → do nothing (never respawn).
+  if (supervisorState.shuttingDown || supervisorState.degraded) return;
+  // No captured params → not a child whose lifecycle we own (reuse / external).
+  if (!supervisorState.params) return;
+  // Idempotency: a respawn already scheduled/in-flight swallows duplicate events
+  // (e.g. an 'error' immediately followed by 'exit' for the same death).
+  if (supervisorState.respawning) return;
+
+  const { crashLoop } = registerUnexpectedExit();
+  if (crashLoop) {
+    // C2: STOP. Mark degraded, surface loudly, do NOT respawn, do NOT touch data.
+    supervisorState.degraded = true;
+    surfaceSupervisorDegraded(
+      `managed SurrealDB child exited >= ${SUPERVISOR_MAX_RESTARTS} times within ` +
+        `${SUPERVISOR_WINDOW_MS / 1000}s (last: ${reason}); crash-loop cap tripped`,
+    );
+    return;
+  }
+
+  // Bounded exponential backoff, indexed by how many restarts we've already
+  // attempted in this window (clamped to the last/largest entry).
+  const idx = Math.min(supervisorState.exitTimes.length - 1, SUPERVISOR_BACKOFF_MS.length - 1);
+  const delay = SUPERVISOR_BACKOFF_MS[Math.max(0, idx)];
+  log.warn(
+    `[bootstrap] managed SurrealDB child ${reason} unexpectedly — respawning in ${delay}ms ` +
+      `(restart ${supervisorState.exitTimes.length}/${SUPERVISOR_MAX_RESTARTS} within ` +
+      `${SUPERVISOR_WINDOW_MS / 1000}s window)`,
+  );
+  supervisorState.respawning = true;
+  await new Promise<void>((resolve) => {
+    supervisorState.timer = setTimeout(resolve, delay);
+    // Don't keep the event loop alive solely for a pending respawn.
+    supervisorState.timer.unref?.();
+  });
+  supervisorState.timer = null;
+  // Re-check shutdown AFTER the backoff: a shutdown that arrived during the wait
+  // must abort the respawn (otherwise we'd resurrect a child the operator killed).
+  if (supervisorState.shuttingDown || supervisorState.degraded) {
+    supervisorState.respawning = false;
+    return;
+  }
+  const p = supervisorState.params;
+  try {
+    // NB: the spawn is assigned to a local and the local is awaited (instead of
+    // awaiting the call expression inline) so the lint-managed-cred-wiring
+    // invariant — which scans for the first inline await-call token to locate
+    // bootstrap()'s fresh-spawn site — still resolves to that site, not this
+    // respawn. Behaviour is identical to awaiting the call directly.
+    const respawn = spawnManagedSurreal(p.binPath, p.dataDir, p.port, p.user, p.pass, p.cacheDir);
+    await respawn;
+    log.warn(`[bootstrap] managed SurrealDB child respawned (pid=${managedSurreal?.pid ?? "?"})`);
+  } catch (e) {
+    // A respawn that THROWS (e.g. spawn() EACCES) counts as another failure —
+    // record it so a persistent inability to even launch trips the cap rather
+    // than silently giving up. Schedule the next attempt via a synthetic exit.
+    log.error(`[bootstrap] managed SurrealDB respawn failed: ${(e as Error).message}`);
+    supervisorState.respawning = false;
+    await onManagedChildExit("respawn-failed");
+    return;
+  }
+  supervisorState.respawning = false;
+}
+
 /** Resolve the plugin root from this file's compiled location.
  *
  *  Three runtime layouts to handle:
@@ -1052,7 +1292,10 @@ async function writeSurrealPidFile(cacheDir: string, pid: number): Promise<void>
   await writeFile(join(cacheDir, SURREAL_PID_FILENAME), String(pid), "utf-8");
 }
 
-async function spawnManagedSurreal(
+/** Spawn (and supervise) the managed SurrealDB child. Exported for the C1/C2
+ *  supervision regression test, which drives spawn → exit → respawn/cap without
+ *  standing up the full bootstrap; production callers reach it via bootstrap(). */
+export async function spawnManagedSurreal(
   binPath: string,
   dataDir: string,
   port: number,
@@ -1088,6 +1331,33 @@ async function spawnManagedSurreal(
   // an init-reparented orphan. Plugin update / Claude Code restart / MCP
   // crash all leave SurrealDB running.
   child.unref();
+
+  // C1: track the live child + capture the exact args needed to respawn it, then
+  // supervise it. managedSurreal is the module-level handle the rest of bootstrap
+  // (and shutdownManagedSurreal) already uses; we keep it authoritative here so a
+  // respawned child replaces the dead one transparently.
+  managedSurreal = child;
+  supervisorState.params = { binPath, dataDir, port, user, pass, cacheDir };
+
+  // Supervision listeners (attached to EVERY spawn, including respawns). Both
+  // 'error' (spawn-level failure: EACCES, ENOENT) and 'exit' (the process died)
+  // route through onManagedChildExit, which decides respawn-vs-degrade. The
+  // handler is fully self-guarding (intentional-shutdown flag, crash-loop cap,
+  // idempotency) and never throws, so a fire-and-forget void is safe. We do NOT
+  // remove the unref() above — supervision does not re-attach the parent's exit
+  // to the child; it only reacts to the child's own lifecycle events, which fire
+  // regardless of unref (unref governs event-loop keep-alive, not event delivery).
+  child.on("error", (err) => {
+    void onManagedChildExit(`emitted 'error' (${err.message})`);
+  });
+  child.on("exit", (code, signal) => {
+    // A clean exit during shutdown is expected; onManagedChildExit early-returns
+    // on the shuttingDown flag. We pass the code/signal purely for the log line.
+    void onManagedChildExit(
+      `exited (code=${code ?? "null"}, signal=${signal ?? "null"})`,
+    );
+  });
+
   if (child.pid) {
     await writeSurrealPidFile(cacheDir, child.pid).catch((e) => {
       log.warn(`[bootstrap] failed to write surreal pid file: ${(e as Error).message}`);
@@ -1314,6 +1584,11 @@ export async function bootstrap(input: BootstrapInput): Promise<BootstrapResult>
   // and spawn the child with it. getOrCreateManagedCred is idempotent, so if a
   // cred file already exists (e.g. a prior managed child that has since died)
   // we reuse the same secret rather than minting a new one.
+  // C1: THIS process now owns the child's lifecycle — re-arm the supervisor
+  // (clears any stale shutdown/degraded latch from a prior incarnation) before
+  // the fresh spawn. Single call so getOrCreateManagedCred stays adjacent to the
+  // spawn site below.
+  armSupervisorForFreshSpawn();
   const managedCred = getOrCreateManagedCred(input.cacheDir);
   managedSurreal = await spawnManagedSurreal(
     surrealBinary.path,
@@ -1348,6 +1623,20 @@ export async function bootstrap(input: BootstrapInput): Promise<BootstrapResult>
  *  Pass { force: true } to actually SIGTERM the child — used by tests and any
  *  future "kongcode stop" CLI command that explicitly tears everything down. */
 export function shutdownManagedSurreal(opts?: { force?: boolean }): void {
+  // C1: signal the supervisor that any subsequent child 'exit'/'error' is
+  // INTENTIONAL — onManagedChildExit early-returns on this flag, so we never
+  // respawn a child the daemon is deliberately tearing down. Set on BOTH paths:
+  //  - non-force (Option A): the child is left alive but this daemon is going
+  //    away, so it must stop owning the child's lifecycle; if the child later
+  //    dies, a NEW daemon boot's bootstrap re-spawns + re-supervises it (the
+  //    supervisor is per-process), not this dying one.
+  //  - force: we SIGTERM the child ourselves; the resulting 'exit' must not loop.
+  // Cancel any backoff timer already counting down toward a respawn.
+  supervisorState.shuttingDown = true;
+  if (supervisorState.timer) {
+    clearTimeout(supervisorState.timer);
+    supervisorState.timer = null;
+  }
   if (!opts?.force) {
     if (managedSurreal && !managedSurreal.killed) {
       log.debug(

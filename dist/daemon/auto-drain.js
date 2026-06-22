@@ -29,7 +29,7 @@ import { randomUUID } from "node:crypto";
 import { join, resolve, dirname } from "node:path";
 import { homedir, platform } from "node:os";
 import { fileURLToPath } from "node:url";
-import { log } from "../engine/log.js";
+import { log, rotateLogIfOversized } from "../engine/log.js";
 import { swallow } from "../engine/errors.js";
 import { countActionablePendingWork } from "../tools/pending-work.js";
 let schedulerStarted = false;
@@ -801,6 +801,11 @@ async function spawnHeadlessDrainer(state, opts, reason) {
     const drainLogPath = join(opts.cacheDir, "auto-drain.log");
     let drainLogFd = -1;
     try {
+        // H1: single-generation rotate if over the size cap before opening for
+        // append — auto-drain.log is inherited by detached children and otherwise
+        // grows forever on a long-lived daemon. Crash-safe (rotate failure is
+        // swallowed; we still open the log below).
+        rotateLogIfOversized(drainLogPath);
         drainLogFd = openSync(drainLogPath, "a");
         const header = `\n=== auto-drain spawn ${new Date().toISOString()} (queue=${count}, agent=${agentName}, reason=${reason}, plugin_dir=${PLUGIN_DIR}) ===\n`;
         writeSync(drainLogFd, header);

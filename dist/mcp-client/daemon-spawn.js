@@ -384,6 +384,16 @@ export async function ensureDaemon(opts = {}) {
         // nearly impossible. The fd path: stdin ignored, stdout+stderr to logFile.
         const logFilePath = join(cacheDir, "daemon.log");
         const { openSync } = await import("node:fs");
+        // H1: rotate the daemon.log a single generation if it's over the size cap
+        // BEFORE opening for append, so a daemon that never restarts for weeks does
+        // not grow it without bound. Crash-safe: a rotate failure is swallowed inside
+        // rotateLogIfOversized and we still open the (possibly oversized) log — a
+        // rotation problem must never block daemon startup.
+        try {
+            const { rotateLogIfOversized } = await import("../engine/log.js");
+            rotateLogIfOversized(logFilePath);
+        }
+        catch { /* import/rotate failure must not block spawn */ }
         const logFd = openSync(logFilePath, "a"); // append, create if missing
         log.info(`[daemon-spawn] spawning daemon from ${scriptPath} (logs → ${logFilePath})`);
         const child = spawn(process.execPath, [scriptPath], {

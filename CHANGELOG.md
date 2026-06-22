@@ -361,6 +361,36 @@ Closes the rest of the 16-gap audit:
 Full suite green (1577; sole failure is the pre-existing environmental R6 TCP-spawn timeout). All 16
 audited enterprise-readiness gaps are now addressed.
 
+### Hardened — Phase 3 Wave 3: storage-substrate self-healing (the dimension the audit missed)
+
+A completeness critic found the prior audit treated SurrealDB as a reliable black box — the real
+remaining gap was self-healing of the storage substrate itself. Three "never silently corrupts /
+never needs a human" blockers, closed (each surfaced via E1's `maintenance_runs`/`memory_health`):
+
+- **C1 (CRITICAL) — managed SurrealDB child was never supervised.** `spawnManagedSurreal` had no
+  `exit`/`error` handler, so a dead/OOM-killed/crash-looping child = permanent silent failure with no
+  recovery. Added a supervisor: on unexpected child exit it respawns with **bounded exponential
+  backoff** (500ms→8s); ≥5 exits in 60s trips a **crash-loop cap** that stops respawning and latches
+  degraded (no fork-bomb, no port race — one child at a time, idempotent).
+- **C2 (CRITICAL) — corrupt-KV / persistent-failure now detect-and-surface, never auto-destroy.** When
+  the cap trips, it writes a `surrealSupervisor` error row (→ `memory_health` RED) + logs the data-dir
+  and a `surreal import …` recovery command. It **never auto-quarantines or deletes** the data dir — at
+  1M installs a false-positive must not wipe a user's graph; recovery stays a human decision. The win:
+  no more *silent* permanent failure (transient death self-heals via C1; true corruption is loud).
+- **C3 (CRITICAL) — embedding dimension is validated at the write boundary.** A wrong-width vector
+  (mis-set `EMBED_MODEL_PATH`, partial GGUF) used to poison ALL vector search (`cosine` throws DB-wide;
+  manual `repair-vector-dim.mjs`-only fix). Now a non-1024 result is **rejected before any write**
+  (cache/L2/resolve), the row stays un-embedded for backfill to heal, and an `embedDimGuard` error row
+  surfaces it. Never rejects a valid 1024-dim vector.
+- **H1/H2/H3 (HIGH, unbounded-disk class)** — daemon.log + auto-drain.log now **size-rotate** at open;
+  a **gc-backups retention sweep** (age+count+size cap, 24h floor) runs in the 6h cycle; `memory_health`
+  gained a **free-disk RED** below threshold + M3 fix (store-amplification check reads the managed
+  `dataDir` so it actually runs on managed installs).
+
+Full suite green (1607; sole failure is the pre-existing environmental R6 TCP-spawn timeout). Per the
+critic's verdict these three workstreams close the "self-heals / never needs a human" gap; remaining
+scale-hardening (H4/H5, M1/M2/M4) follows.
+
 ## [0.7.130] — 2026-06-19
 
 ### Added — `update_skill` MCP tool

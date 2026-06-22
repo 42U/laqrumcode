@@ -1,3 +1,4 @@
+import { type ChildProcess } from "node:child_process";
 export interface BootstrapResult {
     npmInstall: {
         ran: boolean;
@@ -48,6 +49,30 @@ export interface BootstrapInput {
     surrealUser: string;
     surrealPass: string;
 }
+/** Minimal structural view of SurrealStore the supervisor needs to surface a
+ *  degraded state. Structural (not an import of SurrealStore) so bootstrap.ts
+ *  stays free of an engine-store dependency and there is no import cycle —
+ *  surreal.ts registers itself via registerSurrealSupervisorStore(). */
+interface SupervisorStore {
+    isAvailable(): boolean;
+    queryExec(sql: string, bindings?: Record<string, unknown>): Promise<void>;
+}
+/** Wire the SurrealStore the supervisor uses to surface a DEGRADED state via a
+ *  maintenance_runs error row (memory_health then goes RED). Called by
+ *  SurrealStore's constructor (surreal.ts) so no cross-module daemon wiring is
+ *  needed; idempotent (last writer wins). Exported for that call + unit tests. */
+export declare function registerSurrealSupervisorStore(store: SupervisorStore | null): void;
+/** Test-only: reset the supervisor between cases (module state is process-wide).
+ *  Cancels any pending respawn timer so a leftover timer can't fire across
+ *  tests. Not used in production. */
+export declare function __resetSupervisorForTest(): void;
+/** Test-only inspection of supervisor state (avoids exporting the mutable
+ *  object directly). */
+export declare function __getSupervisorState(): {
+    degraded: boolean;
+    shuttingDown: boolean;
+    restartsInWindow: number;
+};
 /** Resolve the plugin root from this file's compiled location.
  *
  *  Three runtime layouts to handle:
@@ -189,6 +214,10 @@ export declare function findExistingKongcodeSurreal(cacheDir: string, managedPor
     pid: number | null;
     port: number;
 } | null>;
+/** Spawn (and supervise) the managed SurrealDB child. Exported for the C1/C2
+ *  supervision regression test, which drives spawn → exit → respawn/cap without
+ *  standing up the full bootstrap; production callers reach it via bootstrap(). */
+export declare function spawnManagedSurreal(binPath: string, dataDir: string, port: number, user: string, pass: string, cacheDir: string): Promise<ChildProcess>;
 /** The historical single-user managed SurrealDB port. Kept as a named constant
  *  because it's also the legacy candidate that {@link findExistingKongcodeSurreal}
  *  must probe (gated by the owner guard) so an upgrading single-user install's
@@ -246,3 +275,4 @@ export declare function bootstrap(input: BootstrapInput): Promise<BootstrapResul
 export declare function shutdownManagedSurreal(opts?: {
     force?: boolean;
 }): void;
+export {};

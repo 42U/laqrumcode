@@ -154,11 +154,19 @@ export async function handleMemoryHealth(
   // 0.7.121 store-amplification metric: physical store size vs a logical
   // estimate (embedded vectors x 4KB x 1.3 overhead). The 2026-06-12
   // forensics found a 65.7GB store wrapping ~0.3GB of live data (~200x) —
-  // invisible from SQL, so it must be watched from the filesystem. Only runs
-  // when KONGCODE_STORE_PATH points at the surrealkv data dir (external
-  // containers must opt in; the path isn't discoverable from a WS client).
+  // invisible from SQL, so it must be watched from the filesystem.
+  //
+  // M3 fix: the check used to be gated SOLELY on process.env.KONGCODE_STORE_PATH,
+  // which is NEVER set for a managed single-host install (the daemon bootstraps
+  // its own SurrealDB child at config.paths.dataDir and doesn't export that env
+  // var) — so the amplification check silently never ran for the exact 1M-install
+  // population it was built to protect. Read the daemon's known managed dataDir
+  // directly, with the env var kept as an explicit operator override (wins if set,
+  // e.g. an external container pointing at a non-default location).
   try {
-    const storePath = process.env.KONGCODE_STORE_PATH;
+    const storePath =
+      process.env.KONGCODE_STORE_PATH ??
+      (state.config?.paths?.dataDir || undefined);
     if (storePath) {
       const { statSync, readdirSync } = await import("node:fs");
       const { join: joinPath } = await import("node:path");
@@ -184,6 +192,45 @@ export async function handleMemoryHealth(
       }
     }
   } catch (e) { swallow("memoryHealth:storeAmplification", e); }
+
+  // H3 — free-disk preflight/degrade. Nothing in the daemon ever checked free
+  // disk (only the manual scripts/compact-store.mjs ran df), so on the common
+  // single-host install a filling disk would silently corrupt writes
+  // (SurrealKV mid-write, log appends, snapshot writes) with no machine-readable
+  // signal. statfs the daemon's MANAGED dataDir (config.paths.dataDir — the
+  // partition the store actually lives on) and push a RED diagnostic when free
+  // space drops below either an absolute floor (1GB) OR a relative floor (5%),
+  // whichever triggers first. This is the signal bots/hooks consume to back off
+  // before the store breaks. Best-effort: a statfs failure (unsupported FS,
+  // permissions) is swallowed — we never fabricate a RED from a probe error.
+  try {
+    const diskPath = state.config?.paths?.dataDir;
+    if (diskPath) {
+      const { statfs } = await import("node:fs/promises");
+      const st = await statfs(diskPath);
+      // bavail = blocks available to a non-privileged process (the honest figure
+      // for "can the daemon write"); blocks = total. bsize = fragment size.
+      const freeBytes = st.bsize * st.bavail;
+      const totalBytes = st.bsize * st.blocks;
+      const freePct = totalBytes > 0 ? (freeBytes / totalBytes) * 100 : 100;
+      const ABS_FLOOR = 1024 * 1024 * 1024; // 1GB
+      const PCT_FLOOR = 5; // 5%
+      if (freeBytes < ABS_FLOOR || freePct < PCT_FLOOR) {
+        diagnostics.push({
+          severity: "error",
+          area: "disk_free",
+          message:
+            `LOW DISK at ${diskPath}: ${(freeBytes / 1e9).toFixed(2)}GB free ` +
+            `(${freePct.toFixed(1)}% of ${(totalBytes / 1e9).toFixed(1)}GB). ` +
+            `Below the ${(ABS_FLOOR / 1e9).toFixed(0)}GB / ${PCT_FLOOR}% safety floor — ` +
+            `the managed SurrealDB store, daemon.log, and gc-backups snapshots ` +
+            `share this partition and writes may fail/corrupt. Free space now: ` +
+            `run scripts/compact-store.mjs to reclaim store amplification, prune ` +
+            `old gc-backups, or clear other disk usage.`,
+        });
+      }
+    }
+  } catch (e) { swallow("memoryHealth:diskFree", e); }
 
   // 0.7.120 index-sanity differential: SurrealDB 3.x's ASC scan over
   // turn_timestamp_idx silently returned ZERO rows DB-wide while NOINDEX

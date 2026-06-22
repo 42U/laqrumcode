@@ -122,7 +122,19 @@ export class EmbeddingService {
         { hash, mv: this.modelVersion },
       );
       const vec = rows[0]?.embedding;
-      if (Array.isArray(vec) && vec.length > 0 && vec.every(Number.isFinite)) {
+      // C3 (embed-integrity): the L2 cache (embedding_cache.embedding) is a loose
+      // `array` column, not a fixed-width vector, so a wrong-dim vector written by
+      // an OLDER daemon (a dist/ predating the computeAndSettle dim-guard) can
+      // physically live here. Serving it back would re-poison vector search even
+      // though the live compute path now rejects such vectors. Treat a wrong-dim
+      // cache hit as a MISS so the caller recomputes (and the recompute is
+      // re-validated by the guard). Exact-equality to the configured dim so a
+      // valid 1024-dim vector is always served.
+      if (
+        Array.isArray(vec) &&
+        vec.length === this.config.dimensions &&
+        vec.every(Number.isFinite)
+      ) {
         this.l2Hits++;
         return vec;
       }
@@ -145,6 +157,24 @@ export class EmbeddingService {
       `UPSERT embedding_cache SET text_hash = $hash, embedding = $vec, model_version = $mv, pruned_at = NONE, prune_reason = NONE WHERE text_hash = $hash`,
       { hash, vec, mv: this.modelVersion },
     ).catch(e => swallow("embeddings:l2Put", e));
+  }
+
+  /** C3 (embed-integrity): record a maintenance_runs row so memory_health goes
+   *  RED when the embed boundary rejects a wrong-dimension vector. Mirrors the
+   *  E1 runJob audit shape ({job, status:'error', error}) so memory-health.ts
+   *  surfaces it with no edits there. Fire-and-forget + store-guarded: a failure
+   *  to record the audit must never mask or block the rejection that triggered
+   *  it, and we never touch content (this is a telemetry write). */
+  private recordDimGuardFailure(gotDim: number, expectedDim: number): void {
+    if (!this.store?.isAvailable()) return;
+    const data = {
+      job: "embedDimGuard",
+      status: "error",
+      error: `embed produced ${gotDim}-dim vector, expected ${expectedDim} — poison vector rejected (not written); row left un-embedded for backfill`,
+    };
+    this.store
+      .queryExec(`CREATE maintenance_runs CONTENT $data`, { data })
+      .catch(e => swallow("embeddings:recordDimGuardFailure", e));
   }
 
   /** B17 (T5, 2026-06-10): llama serializes embedding computation internally,
@@ -272,6 +302,30 @@ export class EmbeddingService {
       this.breakerOpenedAt = null;
       if (probing) log.warn("[embeddings] half-open probe succeeded — circuit breaker closed");
       const vec = Array.from(result.vector);
+      // C3 (embed-integrity): the HNSW indexes are DIMENSION 1024 (schema.surql,
+      // 10+ tables) and vector::similarity::cosine throws "vectors must be of the
+      // same dimension" DB-wide if even ONE wrong-dim vector lands. A mis-set
+      // EMBED_MODEL_PATH / a partial-or-corrupt GGUF / a model that silently
+      // emits a different width can produce a non-1024 vector here. Validate the
+      // width at the embed boundary BEFORE any write (in-mem cache, L2, resolve).
+      // On mismatch: REJECT the poison vector — do NOT cache it, do NOT persist
+      // it, do NOT resolve with it. Throwing routes the caller through the
+      // EXISTING K5 degrade path (ingestTurn et al. store a null/IS NONE
+      // embedding) so the maintenance embedding-backfill heals the row later
+      // with a correctly-dimensioned vector — no auto-deletion of user data.
+      // Exact-equality to the configured dim guarantees a VALID 1024-dim vector
+      // is never rejected.
+      const expectedDim = this.config.dimensions;
+      if (vec.length !== expectedDim) {
+        // Surface it: a maintenance_runs row job='embedDimGuard' status='error'
+        // makes memory_health go RED automatically (best-effort, fire-and-forget;
+        // a failure to RECORD must not mask the rejection below).
+        this.recordDimGuardFailure(vec.length, expectedDim);
+        throw new Error(
+          `embed() produced a ${vec.length}-dim vector but the index/model dimension is ${expectedDim}` +
+          ` — rejecting poison vector (check EMBED_MODEL_PATH / GGUF integrity). Row left un-embedded for backfill.`,
+        );
+      }
       if (this.cache.size >= this.maxCacheSize) {
         this.cache.delete(this.cache.keys().next().value!);
       }

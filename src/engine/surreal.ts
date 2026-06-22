@@ -5,6 +5,7 @@ import { swallow, isUniqueViolation, safeId, RECORD_ID_RE } from "./errors.js";
 import { log } from "./log.js";
 import { loadSchema } from "./schema-loader.js";
 import { parseDatetimeMs } from "./observability.js";
+import { registerSurrealSupervisorStore } from "./bootstrap.js";
 
 /** SurrealDB transaction-conflict detector. Used to differentiate expected
  *  contention (silent retry/swallow) from real errors that should surface
@@ -352,6 +353,13 @@ export class SurrealStore {
   constructor(config: SurrealConfig) {
     this.config = config;
     this.db = new Surreal();
+    // C2: let the managed-SurrealDB supervisor (bootstrap.ts) surface a DEGRADED
+    // state through this store (writes a maintenance_runs error row →
+    // memory_health RED). Registering from the constructor avoids any cross-module
+    // daemon wiring; the supervisor only calls back when the managed child
+    // crash-loops, and isAvailable()-gates the write. Last store constructed wins
+    // (the daemon builds exactly one for its lifetime).
+    registerSurrealSupervisorStore(this);
   }
 
   /** K32: shared connect timeout for BOTH the first connect (initialize) and

@@ -82,6 +82,47 @@ export interface GcHardDeleteOpts {
     reason: string;
 }
 /**
+ * H2 — gc-backups retention sweep.
+ *
+ * Every destructive keystone op (gcHardDelete + gcSweepOrphanedEdges) writes a
+ * timestamped `.surql` snapshot under <cacheDir>/gc-backups/ for reversibility.
+ * The 6h maintenance cycle's monologue/turn_archive purges fire up to 100
+ * batches each, and each batch is one snapshot — so on a long-lived single-host
+ * install the directory accumulates FOREVER. Nothing pruned it before this.
+ *
+ * These snapshot files are BACKUP ARTIFACTS, NOT graph content (they are not a
+ * content-table row and not swept by the orphaned-edge sweep), so pruning them
+ * is a plain `unlinkSync` — it does NOT and MUST NOT route through the
+ * gcHardDelete keystone (that is for content-table ROWS).
+ *
+ * Retention policy (keep the SMALLER of two windows, then a total-size cap):
+ *   - COUNT cap: keep the newest {@link GC_BACKUP_KEEP_COUNT} (50) snapshots.
+ *   - AGE cap:   keep snapshots newer than {@link GC_BACKUP_KEEP_DAYS} (30d).
+ *   - SIZE cap:  if the surviving set still exceeds {@link GC_BACKUP_MAX_BYTES}
+ *                (500MB), delete oldest-first until under it.
+ * "Whichever is smaller" = a snapshot is a deletion CANDIDATE if it is BOTH
+ * beyond the count window AND older than the age window is NOT required — we
+ * delete a file if it fails EITHER the count test OR the age test (the union of
+ * the two prune sets = the smaller surviving set). Then size trims further.
+ *
+ * SAFETY FLOOR (paramount — never destroy a just-made backup): a snapshot
+ * younger than {@link GC_BACKUP_MIN_AGE_MS} (24h) is NEVER deleted, regardless
+ * of count/size pressure. So the reversibility net for any recent destructive op
+ * is always intact. (If a flood of recent deletes blows past the size cap inside
+ * 24h, we let the dir exceed the cap rather than delete a fresh backup — disk is
+ * cheaper than an un-restorable delete.)
+ *
+ * Returns the number of snapshot files deleted (so runJob records it as
+ * rows_affected). Store-guard is NOT needed (pure filesystem) but we keep the
+ * dir-missing case a clean 0. Errors per-file are swallowed; a single bad stat
+ * never aborts the sweep.
+ */
+export declare const GC_BACKUP_KEEP_COUNT = 50;
+export declare const GC_BACKUP_KEEP_DAYS = 30;
+export declare const GC_BACKUP_MIN_AGE_MS: number;
+export declare const GC_BACKUP_MAX_BYTES: number;
+export declare function sweepGcBackups(state: GlobalPluginState): Promise<number>;
+/**
  * G1 KEYSTONE primitive. Hard-delete `ids` from `table` (a content table)
  * with full QA-gate guarantees. See the file header for the contract.
  *

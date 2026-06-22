@@ -46,7 +46,7 @@
  */
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync, readdirSync, statSync, unlinkSync } from "node:fs";
 import { RECORD_ID_RE, swallow } from "./errors.js";
 import { parseDatetimeMs } from "./observability.js";
 /**
@@ -171,6 +171,121 @@ function slugifyReason(reason) {
         .replace(/^-+|-+$/g, "")
         .slice(0, 60);
     return slug.length > 0 ? slug : "gc";
+}
+/**
+ * H2 — gc-backups retention sweep.
+ *
+ * Every destructive keystone op (gcHardDelete + gcSweepOrphanedEdges) writes a
+ * timestamped `.surql` snapshot under <cacheDir>/gc-backups/ for reversibility.
+ * The 6h maintenance cycle's monologue/turn_archive purges fire up to 100
+ * batches each, and each batch is one snapshot — so on a long-lived single-host
+ * install the directory accumulates FOREVER. Nothing pruned it before this.
+ *
+ * These snapshot files are BACKUP ARTIFACTS, NOT graph content (they are not a
+ * content-table row and not swept by the orphaned-edge sweep), so pruning them
+ * is a plain `unlinkSync` — it does NOT and MUST NOT route through the
+ * gcHardDelete keystone (that is for content-table ROWS).
+ *
+ * Retention policy (keep the SMALLER of two windows, then a total-size cap):
+ *   - COUNT cap: keep the newest {@link GC_BACKUP_KEEP_COUNT} (50) snapshots.
+ *   - AGE cap:   keep snapshots newer than {@link GC_BACKUP_KEEP_DAYS} (30d).
+ *   - SIZE cap:  if the surviving set still exceeds {@link GC_BACKUP_MAX_BYTES}
+ *                (500MB), delete oldest-first until under it.
+ * "Whichever is smaller" = a snapshot is a deletion CANDIDATE if it is BOTH
+ * beyond the count window AND older than the age window is NOT required — we
+ * delete a file if it fails EITHER the count test OR the age test (the union of
+ * the two prune sets = the smaller surviving set). Then size trims further.
+ *
+ * SAFETY FLOOR (paramount — never destroy a just-made backup): a snapshot
+ * younger than {@link GC_BACKUP_MIN_AGE_MS} (24h) is NEVER deleted, regardless
+ * of count/size pressure. So the reversibility net for any recent destructive op
+ * is always intact. (If a flood of recent deletes blows past the size cap inside
+ * 24h, we let the dir exceed the cap rather than delete a fresh backup — disk is
+ * cheaper than an un-restorable delete.)
+ *
+ * Returns the number of snapshot files deleted (so runJob records it as
+ * rows_affected). Store-guard is NOT needed (pure filesystem) but we keep the
+ * dir-missing case a clean 0. Errors per-file are swallowed; a single bad stat
+ * never aborts the sweep.
+ */
+export const GC_BACKUP_KEEP_COUNT = 50;
+export const GC_BACKUP_KEEP_DAYS = 30;
+export const GC_BACKUP_MIN_AGE_MS = 24 * 60 * 60 * 1000; // 24h hard floor
+export const GC_BACKUP_MAX_BYTES = 500 * 1024 * 1024; // 500MB total-size cap
+export async function sweepGcBackups(state) {
+    const dir = gcBackupDir(state);
+    let entries;
+    try {
+        entries = readdirSync(dir);
+    }
+    catch {
+        // Dir doesn't exist yet (no destructive op has ever run) → nothing to prune.
+        return 0;
+    }
+    const now = Date.now();
+    const snaps = [];
+    for (const name of entries) {
+        if (!name.startsWith("gc-") || !name.endsWith(".surql"))
+            continue;
+        const full = join(dir, name);
+        try {
+            const st = statSync(full);
+            if (!st.isFile())
+                continue;
+            snaps.push({ path: full, mtimeMs: st.mtimeMs, size: st.size });
+        }
+        catch { /* vanished/raced — skip */ }
+    }
+    if (snaps.length === 0)
+        return 0;
+    // Newest first so index < KEEP_COUNT == "within the count window".
+    snaps.sort((a, b) => b.mtimeMs - a.mtimeMs);
+    const ageCutoff = now - GC_BACKUP_KEEP_DAYS * 24 * 60 * 60 * 1000;
+    // Phase 1: a file is a delete candidate if it fails the count window OR the
+    // age window — but ONLY if it is also past the 24h safety floor.
+    const toDelete = new Set();
+    snaps.forEach((s, i) => {
+        if (now - s.mtimeMs < GC_BACKUP_MIN_AGE_MS)
+            return; // protected: too fresh
+        const overCount = i >= GC_BACKUP_KEEP_COUNT;
+        const tooOld = s.mtimeMs < ageCutoff;
+        if (overCount || tooOld)
+            toDelete.add(s.path);
+    });
+    // Phase 2: total-size cap on the SURVIVING set. Delete oldest-first (still
+    // respecting the 24h floor) until under GC_BACKUP_MAX_BYTES.
+    let survivingBytes = 0;
+    for (const s of snaps)
+        if (!toDelete.has(s.path))
+            survivingBytes += s.size;
+    if (survivingBytes > GC_BACKUP_MAX_BYTES) {
+        // Oldest-first among survivors that are past the floor.
+        const survivorsOldestFirst = snaps
+            .filter((s) => !toDelete.has(s.path))
+            .sort((a, b) => a.mtimeMs - b.mtimeMs);
+        for (const s of survivorsOldestFirst) {
+            if (survivingBytes <= GC_BACKUP_MAX_BYTES)
+                break;
+            if (now - s.mtimeMs < GC_BACKUP_MIN_AGE_MS)
+                continue; // protected
+            toDelete.add(s.path);
+            survivingBytes -= s.size;
+        }
+    }
+    let removed = 0;
+    for (const path of toDelete) {
+        try {
+            unlinkSync(path);
+            removed++;
+        }
+        catch (e) {
+            swallow("gc:sweepGcBackups:unlink", e);
+        }
+    }
+    // No explicit log line here (gc.ts deliberately doesn't import the logger).
+    // The runJob wrapper in maintenance.ts records `removed` as rows_affected,
+    // which is the observable signal memory_health/operators read.
+    return removed;
 }
 /**
  * Serialize one row to a re-importable `CREATE <table:key> CONTENT { ... }`

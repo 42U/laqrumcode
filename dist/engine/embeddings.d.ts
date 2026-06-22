@@ -48,6 +48,13 @@ export declare class EmbeddingService {
     private textHash;
     private l2Get;
     private l2Put;
+    /** C3 (embed-integrity): record a maintenance_runs row so memory_health goes
+     *  RED when the embed boundary rejects a wrong-dimension vector. Mirrors the
+     *  E1 runJob audit shape ({job, status:'error', error}) so memory-health.ts
+     *  surfaces it with no edits there. Fire-and-forget + store-guarded: a failure
+     *  to record the audit must never mask or block the rejection that triggered
+     *  it, and we never touch content (this is a telemetry write). */
+    private recordDimGuardFailure;
     /** B17 (T5, 2026-06-10): llama serializes embedding computation internally,
      *  so N concurrent embed() calls (embedBatch, parallel hook traffic) used to
      *  start N timeout clocks at SUBMIT time while computing one at a time —

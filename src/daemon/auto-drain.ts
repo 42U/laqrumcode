@@ -31,7 +31,7 @@ import { join, resolve, dirname } from "node:path";
 import { homedir, platform } from "node:os";
 import { fileURLToPath } from "node:url";
 import type { GlobalPluginState } from "../engine/state.js";
-import { log } from "../engine/log.js";
+import { log, rotateLogIfOversized } from "../engine/log.js";
 import { swallow } from "../engine/errors.js";
 import { countActionablePendingWork } from "../tools/pending-work.js";
 // Heuristic in-process drain retired 2026-05-15 (v0.7.74 audit): the `handoff_note`
@@ -858,6 +858,11 @@ async function spawnHeadlessDrainer(
   const drainLogPath = join(opts.cacheDir, "auto-drain.log");
   let drainLogFd = -1;
   try {
+    // H1: single-generation rotate if over the size cap before opening for
+    // append — auto-drain.log is inherited by detached children and otherwise
+    // grows forever on a long-lived daemon. Crash-safe (rotate failure is
+    // swallowed; we still open the log below).
+    rotateLogIfOversized(drainLogPath);
     drainLogFd = openSync(drainLogPath, "a");
     const header = `\n=== auto-drain spawn ${new Date().toISOString()} (queue=${count}, agent=${agentName}, reason=${reason}, plugin_dir=${PLUGIN_DIR}) ===\n`;
     writeSync(drainLogFd, header);

@@ -25,7 +25,7 @@
 
 import type { GlobalPluginState } from "./state.js";
 import { checkACANReadiness } from "./acan.js";
-import { gcSweepOrphanedEdges, gcHardDelete } from "./gc.js";
+import { gcSweepOrphanedEdges, gcHardDelete, sweepGcBackups } from "./gc.js";
 import { swallow, RECORD_ID_RE } from "./errors.js";
 import { copyFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -202,6 +202,11 @@ export function runBootstrapMaintenance(state: GlobalPluginState): void {
     // same cycle. (gcSweepOrphanedEdges also writes its OWN audit row internally,
     // but runJob additionally records an 'error' row if the sweep throws.)
     await runJob(state, "sweepOrphanedEdges", () => sweepOrphanedEdges(state));
+    // H2: prune the gc-backups snapshot dir (age + count + size caps, 24h floor)
+    // so the reversibility snapshots written by every destructive keystone op
+    // don't accumulate forever on a long-lived single-host install. Returns the
+    // number of files deleted so runJob records it as rows_affected.
+    await runJob(state, "sweepGcBackups", () => sweepGcBackups(state));
     await runJob(state, "backfillSessionTurnCounts", () => backfillSessionTurnCounts(state));
     await runJob(state, "seedSkillsFromJson", () => seedSkillsFromJson(state));
     await runJob(state, "backfillSkillEmbeddings", () => backfillSkillEmbeddings(state));
@@ -231,6 +236,9 @@ export function runBootstrapMaintenance(state: GlobalPluginState): void {
       // long-lived daemon keeps the graph clean between restarts. Normally a
       // cheap no-op (see sweepOrphanedEdges' note); self-guarded on store.
       void runJob(state, "sweepOrphanedEdges", () => sweepOrphanedEdges(state));
+      // H2: re-arm the gc-backups snapshot prune on the same 6h cadence — a
+      // daemon up for weeks is exactly where these snapshots would pile up.
+      void runJob(state, "sweepGcBackups", () => sweepGcBackups(state));
     }, 6 * 3_600_000);
     backfillInterval.unref?.();
 
