@@ -65,6 +65,11 @@ export const enum IpcErrorCode {
   PROTOCOL_VERSION_MISMATCH = -32004,
   /** Session id not registered with daemon (race during reconnect). Client should re-register. */
   UNKNOWN_SESSION = -32005,
+  /** TCP socket issued a non-meta method before a successful meta.handshake
+   *  (E2 per-socket auth gate). Client should reconnect + re-handshake then
+   *  retry — connectAndHandshake re-handshakes, so this self-heals after a bare
+   *  TCP reconnect that dropped the authed socket. */
+  UNAUTHORIZED = -32006,
 }
 
 /** Generic tool/hook payload — keys are the args the existing handlers accept.

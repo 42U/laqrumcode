@@ -33,7 +33,23 @@ export interface HandlerContext {
   /** Register or update the calling socket's client identity. Called by
    *  meta.handshake when the client sends clientInfo in its params. */
   registerIdentity(info: ClientInfo): void;
+  /** E2 (TCP auth bypass fix): mark the calling socket as authenticated.
+   *  Called by the meta.handshake handler AFTER it has verified the per-user
+   *  handshake token. Until a socket is authed, dispatchLine rejects every
+   *  non-meta method (tool.* / hook.*) with UNAUTHORIZED — so a TCP client on
+   *  the shared loopback port can't reach another OS user's graph by skipping
+   *  the handshake and sending tool.recall as its first line. No-op (always
+   *  allowed) when the daemon runs without handshake auth (UDS-only / no
+   *  token), since the Unix socket's 0600 perms already isolate OS users. */
+  markAuthed(): void;
 }
+
+/** E2: JSON-RPC error code for a non-meta call on a socket that has not
+ *  completed the handshake when handshake auth is required (TCP transport).
+ *  Aliased to IpcErrorCode.UNAUTHORIZED (-32006) — single source of truth; the
+ *  mcp-client retry path treats this code as "reconnect + re-handshake + retry"
+ *  so a bare TCP reconnect that drops the authed socket self-heals. */
+const RPC_UNAUTHORIZED = IpcErrorCode.UNAUTHORIZED;
 
 /** Handler signature — every IPC method registers one of these. The dispatcher
  *  calls it with the parsed `params` object (already validated as JSON-RPC
@@ -78,6 +94,15 @@ export interface DaemonServerOpts {
    *  duration). Daemon main wires this to the same drain-and-exit path
    *  used by meta.shutdown / onSupersedeReady. */
   onIdleReap?: () => void;
+  /** E2 (TCP auth bypass fix): when true, every socket starts UNauthenticated
+   *  and dispatchLine rejects all non-meta methods (tool.* / hook.*) until the
+   *  socket completes meta.handshake (which calls ctx.markAuthed() after
+   *  verifying the per-user token). Daemon main sets this true exactly when it
+   *  binds TCP and mints a handshake token. When false/omitted (UDS-only / no
+   *  token), all sockets are implicitly authed — the Unix socket's 0600 perms
+   *  already isolate OS users, so no per-socket gate is needed and the existing
+   *  handshake-optional Unix-socket path is unchanged. */
+  requireHandshakeAuth?: boolean;
 }
 
 export class DaemonServer {
@@ -91,6 +116,14 @@ export class DaemonServer {
    *  retain for backward compat but no longer expected in practice). Set
    *  membership doubles as the active-clients count. */
   private clients = new Map<Socket, ClientInfo | null>();
+  /** E2: sockets that have completed meta.handshake (token verified). Only
+   *  consulted when opts.requireHandshakeAuth is true. A socket is added here
+   *  by ctx.markAuthed() from the meta.handshake handler AFTER the token check
+   *  passes, and removed on socket close/error alongside the clients entry. A
+   *  separate set (rather than overloading the ClientInfo|null value) keeps the
+   *  anonymous-vs-identified distinction intact while tracking auth orthogonally:
+   *  a socket can be authed (token OK) yet still anonymous (no clientInfo sent). */
+  private authedSockets = new Set<Socket>();
   private rpcsServedTotal = 0;
   private rpcsInFlight = 0;
   private startedAt = Date.now();
@@ -261,6 +294,7 @@ export class DaemonServer {
     for (const [sock, info] of this.clients) {
       if (sock.destroyed || !sock.writable) {
         this.clients.delete(sock);
+        this.authedSockets.delete(sock); // E2: drop auth state with the socket
         pruned++;
         if (info) {
           this.opts.log.info(`[daemon] pruned phantom client: pid=${info.pid} v${info.version} session=${info.sessionId} (close event never fired)`);
@@ -335,6 +369,7 @@ export class DaemonServer {
       try { sock.end(); } catch {}
     }
     this.clients.clear();
+    this.authedSockets.clear(); // E2: clear auth state on full shutdown
     await udsClosed;
     if (this.udsServer && this.opts.socketPath && existsSync(this.opts.socketPath)) {
       try { unlinkSync(this.opts.socketPath); } catch {}
@@ -518,6 +553,7 @@ export class DaemonServer {
     sock.on("close", () => {
       const info = this.clients.get(sock);
       this.clients.delete(sock);
+      this.authedSockets.delete(sock); // E2: drop auth state with the socket
       if (info) {
         this.opts.log.info(`[daemon] client disconnected: pid=${info.pid} v${info.version} session=${info.sessionId}`);
       }
@@ -536,6 +572,7 @@ export class DaemonServer {
         this.opts.log.warn(`[daemon] client socket error: ${err.message}`);
       }
       this.clients.delete(sock);
+      this.authedSockets.delete(sock); // E2: drop auth state with the socket
       this.checkSupersedeReady();
       if (this.clients.size === 0) this.armIdleTimer();
     });
@@ -568,6 +605,35 @@ export class DaemonServer {
         jsonrpc: "2.0",
         id: req.id,
         error: { code: -32601, message: `Method not found: ${req.method}` },
+      });
+      return;
+    }
+    // E2 (TCP auth bypass fix): when handshake auth is required (TCP transport
+    // with a per-user token), a socket must complete meta.handshake — which
+    // verifies the 0600 per-user token and then calls ctx.markAuthed() — BEFORE
+    // it may invoke any non-meta method. Reject tool.* / hook.* on an unauthed
+    // socket with UNAUTHORIZED. meta.* stays exempt so pre-auth bootstrap works:
+    // a client must always be able to handshake (to authenticate), health-check,
+    // or shut down. Without this gate, a different OS user who reached the shared
+    // loopback port could send tool.recall as their FIRST line and read/write
+    // this user's private graph, never having presented the token. The check is
+    // a no-op when requireHandshakeAuth is false (UDS-only / no token): the Unix
+    // socket's 0600 perms already isolate OS users, so all sockets are allowed.
+    // Mirrors the K12 backpressure gate's placement (after isKnownMethod, before
+    // handler dispatch) and its meta.* exemption.
+    if (
+      this.opts.requireHandshakeAuth &&
+      !req.method.startsWith("meta.") &&
+      !this.authedSockets.has(sock)
+    ) {
+      this.opts.log.warn(`[daemon] REJECTED ${req.method} on unauthenticated socket — handshake required first (possible cross-OS-user access attempt on shared loopback port)`);
+      this.sendResponse(sock, {
+        jsonrpc: "2.0",
+        id: req.id,
+        error: {
+          code: RPC_UNAUTHORIZED,
+          message: "unauthorized — complete meta.handshake before calling this method",
+        },
       });
       return;
     }
@@ -608,6 +674,11 @@ export class DaemonServer {
         const stamped: ClientInfo = { ...info, attachedAt: info.attachedAt ?? Date.now() };
         this.clients.set(sock, stamped);
         this.opts.log.info(`[daemon] client connected: pid=${stamped.pid} v${stamped.version} session=${stamped.sessionId}`);
+      },
+      // E2: the meta.handshake handler calls this AFTER verifying the per-user
+      // token, marking THIS socket as allowed to invoke non-meta methods.
+      markAuthed: () => {
+        this.authedSockets.add(sock);
       },
     };
     try {

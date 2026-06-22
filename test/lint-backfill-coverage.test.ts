@@ -97,8 +97,9 @@ describe("D1 — backfill-coverage invariant", () => {
       .map(m => m[1] as string);
     const uncalled: string[] = [];
     for (const fn of fnDefs) {
-      // Look for "await <fn>(state)" or similar invocation.
-      const callRe = new RegExp(`await\\s+${fn}\\s*\\(`);
+      // Look for an invocation: a direct `await <fn>(` OR the runJob-wrapped
+      // thunk form `() => <fn>(` (E1 wraps backfills in runJob for observability).
+      const callRe = new RegExp(`(await\\s+${fn}|=>\\s*${fn})\\s*\\(`);
       if (!callRe.test(maintenanceSrc)) {
         uncalled.push(fn);
       }

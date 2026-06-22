@@ -191,8 +191,10 @@ describe("K17-maint — embedding_cache prune loops to drain and is periodically
       maintenanceSrc.indexOf("const backfillInterval = setInterval("),
       maintenanceSrc.indexOf("backfillInterval.unref?.()"),
     );
-    expect(interval).toMatch(/void runEmbeddingBackfills\(state\)/);
-    expect(interval).toMatch(/void purgeStaleEmbedCache\(state\)/);
+    // E1 wraps both in runJob(state, "...", () => fn(state)) for observability,
+    // so match the inner invocation rather than the old bare `void fn(state)`.
+    expect(interval).toMatch(/runEmbeddingBackfills\(state\)/);
+    expect(interval).toMatch(/purgeStaleEmbedCache\(state\)/);
   });
 
   it("Phase 1 soft-tags only; Phase 2 (G10B) hard-deletes already-pruned rows", () => {

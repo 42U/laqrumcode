@@ -1962,9 +1962,23 @@ export class SurrealStore {
             return currentCount > countFloor;
         }
     }
-    async recordMaintenanceRun(job, rowsAffected, durationMs) {
+    async recordMaintenanceRun(job, rowsAffected, durationMs, 
+    // E1 (observability): every existing caller fires this as the LAST stmt in
+    // its try block — i.e. only on success — so the default is 'ok'. The runJob
+    // wrapper in maintenance.ts is what records the 'error' rows (in a finally)
+    // for jobs that throw; the optional params let any future in-class caller
+    // record a failure inline too. error is truncated to 300 chars.
+    status = "ok", error) {
         try {
-            await this.queryExec(`CREATE maintenance_runs CONTENT $data`, { data: { job, rows_affected: rowsAffected, duration_ms: durationMs } });
+            const data = {
+                job,
+                rows_affected: rowsAffected,
+                duration_ms: durationMs,
+                status,
+            };
+            if (error)
+                data.error = error.slice(0, 300);
+            await this.queryExec(`CREATE maintenance_runs CONTENT $data`, { data });
         }
         catch (e) {
             swallow("surreal:recordMaintenanceRun", e);
@@ -2272,6 +2286,36 @@ export class SurrealStore {
         }
         catch (e) {
             swallow.warn("surreal:purgeOldTurnScores", e);
+            return 0;
+        }
+    }
+    /** E1: bound maintenance_runs (telemetry — runJob writes a row per job per
+     *  cycle, ~24/day, forever). Mirror purgeOldTurnScores: keep the most-recent
+     *  RETAIN rows by ran_at, hard-delete older. DELETE OK (telemetry, D4-exempt;
+     *  uses maintenance_runs_ran_at_idx). The newest-row-per-job memory_health
+     *  reader is unaffected (latest rows are always retained). */
+    async purgeOldMaintenanceRuns() {
+        const RETAIN = 10_000;
+        const started = Date.now();
+        try {
+            const countRows = await this.queryFirst(`SELECT count() AS count FROM maintenance_runs GROUP ALL`);
+            const count = countRows[0]?.count ?? 0;
+            if (count <= RETAIN + 5_000)
+                return 0;
+            if (!(await this.shouldRunMaintenance("purgeOldMaintenanceRuns", 60, 1, count)))
+                return 0;
+            const cutoffRows = await this.queryFirst(`SELECT ran_at FROM maintenance_runs ORDER BY ran_at DESC LIMIT 1 START ${RETAIN}`);
+            const cutoff = cutoffRows[0]?.ran_at;
+            if (!cutoff)
+                return 0;
+            await this.queryExec(`DELETE maintenance_runs WHERE ran_at < $cutoff`, { cutoff });
+            const afterRows = await this.queryFirst(`SELECT count() AS count FROM maintenance_runs GROUP ALL`);
+            const n = count - (afterRows[0]?.count ?? count);
+            await this.recordMaintenanceRun("purgeOldMaintenanceRuns", n, Date.now() - started);
+            return n;
+        }
+        catch (e) {
+            swallow.warn("surreal:purgeOldMaintenanceRuns", e);
             return 0;
         }
     }

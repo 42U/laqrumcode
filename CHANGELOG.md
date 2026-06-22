@@ -295,6 +295,41 @@ it). Both phases rewritten to the proven keystone idiom: `SELECT id … LIMIT N`
 `DELETE/UPDATE … WHERE id IN [<validated Things>]` (queryExec). `fix-g10b-embed-cache-purge.test.ts`
 + the K17-maint guards in `fix-db4-queue-conn.test.ts` updated to the new shape. Full suite green.
 
+### Hardened — Phase 3 (enterprise readiness) Wave 1: 8 audited gaps across security/observability/ops/cross-platform
+
+A 6-dimension enterprise-readiness audit (adversarially verified, lean-1M) found 16 real gaps;
+Wave 1 fixes the CRITICAL + HIGH ones, each adversarially reviewed + the integration gated live:
+
+- **E2 (CRITICAL, security) — TCP daemon auth bypass.** The S6 handshake token gated only identity,
+  not data access: `dispatchLine` dispatched every method with no per-socket auth state, so a
+  co-located process on the shared loopback port (Windows / `KONGCODE_DAEMON_TRANSPORT=tcp`) could
+  send `tool.*`/`hook.*` as its first line and read/write another OS user's graph. Added a per-socket
+  `authed` flag (set only on a token-matching `meta.handshake`); `dispatchLine` now rejects any
+  non-`meta.*` method on an unauthed socket with `UNAUTHORIZED` (−32006) when a token is enforced.
+  UDS (0600) path unchanged. The mcp-client treats −32006 as reconnect+re-handshake+retry so a bare
+  TCP reconnect self-heals. 8 tests over a real TCP socket.
+- **E1 (HIGH, observability) — maintenance failures were structurally invisible.** `maintenance_runs`
+  had no status/error and recorded success-only; nothing read it. Added `status`/`error` fields, a
+  `runJob()` wrapper that ALWAYS records (ok/error) in a finally, wired the maintenance.ts jobs
+  through it, and a `memory_health` diagnostic that surfaces any job whose latest run errored (or is
+  overdue). **Live-verified**: an injected error row flipped `memory_health` to `red` with an
+  actionable message. Added `purgeOldMaintenanceRuns` + a `ran_at` index so the new audit trail
+  itself stays bounded (no new unbounded growth).
+- **E6 / E7 (HIGH, scale)** — monologue + turn_archive grew unbounded; added count-gated retention
+  routed through the `gcHardDelete` keystone (both are content tables).
+- **E3 (CRITICAL, ops)** — `scripts/backup-jsonl.mjs` + `restore-jsonl.mjs` imported surrealdb from a
+  hardcoded dev path → disaster recovery crashed on 100% of installs; changed to the bare specifier.
+  **E16**: restored `access_stats` to both scripts' table lists.
+- **E5 (HIGH, cross-platform)** — managed-SurrealDB port was flat `18765` for all Windows OS users
+  (collision → 2nd user wedged); now per-user (username-hash offset). **E14**: cred file written
+  `0600` atomically + `~/.kongcode` dir `0700`.
+- **E9 (HIGH, cross-platform)** — auto-drain was POSIX-only (`which`/`spawn`); made `findClaudeBin`
+  Windows-aware (`where`, `.cmd`/`.exe`, `%APPDATA%\npm`) + `shell` on win32.
+
+Full suite green (1546; sole failure is the pre-existing environmental R6 real-daemon-TCP-spawn
+timeout). Wave 2 (E8 stale-daemon-restart, E10 EADDRINUSE, E11/E12 maintenance backoff + drain
+liveness, E13 sweep cadence, E17 hot-table indexes, E20 skill path) follows.
+
 ## [0.7.130] — 2026-06-19
 
 ### Added — `update_skill` MCP tool

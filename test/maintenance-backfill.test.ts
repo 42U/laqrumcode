@@ -44,6 +44,7 @@ describe("backfillSessionTurnCounts (via runBootstrapMaintenance)", () => {
         // purge methods so the fire-and-forget chain doesn't reject on a
         // missing function (same pattern as purgeOldRetrievalOutcomes).
         purgeOldTurnScores: async () => 0,
+        purgeOldMaintenanceRuns: async () => 0,
       } as any,
       embeddings: { embed: async () => [] } as any,
       config: {
@@ -99,6 +100,7 @@ describe("backfillSessionTurnCounts (via runBootstrapMaintenance)", () => {
         // purge methods so the fire-and-forget chain doesn't reject on a
         // missing function (same pattern as purgeOldRetrievalOutcomes).
         purgeOldTurnScores: async () => 0,
+        purgeOldMaintenanceRuns: async () => 0,
       } as any,
       embeddings: { embed: async () => [] } as any,
       config: { thresholds: { acanTrainingThreshold: 1 } } as any,
@@ -142,6 +144,7 @@ describe("backfillSessionTurnCounts (via runBootstrapMaintenance)", () => {
         // purge methods so the fire-and-forget chain doesn't reject on a
         // missing function (same pattern as purgeOldRetrievalOutcomes).
         purgeOldTurnScores: async () => 0,
+        purgeOldMaintenanceRuns: async () => 0,
       } as any,
       embeddings: { embed: async () => [] } as any,
       config: { thresholds: { acanTrainingThreshold: 1 } } as any,

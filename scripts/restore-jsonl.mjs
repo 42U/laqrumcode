@@ -33,7 +33,7 @@
  *   SURREAL_DB    — default memory
  */
 
-import { Surreal, RecordId, DateTime } from "/home/zero/voidorigin/kongcode/node_modules/surrealdb/dist/surrealdb.mjs";
+import { Surreal, RecordId, DateTime } from "surrealdb";
 import { readFile, readdir } from "node:fs/promises";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -46,6 +46,7 @@ const DB = process.env.SURREAL_DB || "memory";
 
 /** Node tables — MUST match scripts/backup-jsonl.mjs NODE_TABLES. Imported FIRST. */
 const NODE_TABLES = [
+  "access_stats",
   "agent", "project", "task", "artifact", "concept",
   "turn", "identity_chunk", "session", "memory", "core_memory",
   "monologue", "skill", "reflection", "retrieval_outcome",
@@ -101,6 +102,7 @@ const COMPUTED_FIELDS = {
  * DateTime, so conversion is gated on this explicit per-table allowlist.
  */
 const DATETIME_FIELDS = {
+  access_stats: ["last_accessed"],
   agent: ["created_at"],
   project: ["created_at"],
   task: ["created_at", "updated_at"],
@@ -141,6 +143,13 @@ const DATETIME_FIELDS = {
  * string value is converted back to a RecordId before write.
  */
 const RECORD_FIELDS = {
+  // access_stats.target is a record link to the counted node (concept|memory|…),
+  // serialized to a "table:id" string by the backup. Convert it back so the
+  // restored counter row carries a real record link, matching how surreal.ts
+  // writes it (UPSERT … SET target = <recordid>). access_stats is SCHEMALESS so
+  // a bare string would not be rejected, but restoring it as a link keeps the
+  // round-trip faithful (and <string>target casts in fetchAccessDeltas stay valid).
+  access_stats: ["target"],
   memory: ["superseded_by"],
   concept: ["superseded_by"],
   reflection: ["superseded_by"],

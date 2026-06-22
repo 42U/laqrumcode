@@ -23,7 +23,7 @@
  * swallow.warn so they're visible without blocking startup.
  */
 import { checkACANReadiness } from "./acan.js";
-import { gcSweepOrphanedEdges } from "./gc.js";
+import { gcSweepOrphanedEdges, gcHardDelete } from "./gc.js";
 import { swallow, RECORD_ID_RE } from "./errors.js";
 import { copyFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -70,6 +70,68 @@ export function __resetBootstrapMaintenanceForTests() {
     bootstrapMaintenanceRan = false;
     maintenanceRetryArmed = false;
 }
+/**
+ * E1 (observability) — run a maintenance job and ALWAYS record a
+ * maintenance_runs row in a finally, so a job that throws is distinguishable
+ * from one that never ran or succeeded.
+ *
+ * Before this, the orchestration jobs in this file (purgeStaleEmbedCache,
+ * the backfills, seedSkillsFromJson, the sweep, consolidate, etc.) recorded
+ * NOTHING — only the surreal.ts in-class jobs wrote a maintenance_runs row,
+ * and they wrote it as the LAST statement in their try block, so any throw
+ * recorded nothing at all. memory_health never read the table, so a job that
+ * always-throws (the purgeStaleEmbedCache class) was invisible and health
+ * stayed green.
+ *
+ * Contract:
+ *   - SUCCESS: writes {job, status:'ok', rows_affected, duration_ms}.
+ *     rows_affected = the fn's numeric return (0 if it returns void).
+ *   - THROW:   writes {job, status:'error', error: msg.slice(0,300),
+ *     duration_ms}, then SWALLOWS the error so the maintenance cycle
+ *     continues (matches the fire-and-forget, never-block-startup contract).
+ *
+ * Store-guarded: if the store is unavailable we cannot record a row, so we run
+ * the fn best-effort (it self-guards on store too) and skip the audit write —
+ * recording is pointless when the store is down and a degraded boot already
+ * leaves the once-guard unlatched for a retry.
+ */
+export async function runJob(state, name, fn) {
+    const started = Date.now();
+    let rowsAffected = 0;
+    let status = "ok";
+    let error;
+    try {
+        const r = await fn();
+        if (typeof r === "number" && Number.isFinite(r))
+            rowsAffected = r;
+    }
+    catch (e) {
+        status = "error";
+        error = (e instanceof Error ? e.message : String(e)).slice(0, 300);
+        // Swallow so the cycle continues — but record it (below) AND log it, so a
+        // chronically-failing job is both visible to memory_health and in stderr.
+        swallow.warn(`maintenance:job:${name}`, e);
+    }
+    finally {
+        if (state.store.isAvailable()) {
+            try {
+                const data = {
+                    job: name,
+                    status,
+                    rows_affected: rowsAffected,
+                    duration_ms: Date.now() - started,
+                };
+                if (error)
+                    data.error = error;
+                await state.store.queryExec(`CREATE maintenance_runs CONTENT $data`, { data });
+            }
+            catch (e) {
+                // A failure to RECORD the run must not itself throw out of runJob.
+                swallow("maintenance:runJob:record", e);
+            }
+        }
+    }
+}
 export function runBootstrapMaintenance(state) {
     // 0.7.118 once-per-process guard. session-start invokes this on EVERY
     // session start (no guard existed), which meant full Group 1–3 re-runs per
@@ -103,25 +165,42 @@ export function runBootstrapMaintenance(state) {
     // Guarded against partial test mocks that omit config.paths.
     const cacheDir = config.paths?.cacheDir ?? join(homedir(), ".kongcode", "cache");
     migrateLegacyACANWeights(cacheDir);
-    // Group 1: cheap DB queries — safe to run immediately in parallel
+    // Group 1: cheap DB queries — safe to run immediately in parallel.
+    // The surreal.ts store methods (runMemoryMaintenance, purgeStalePendingWork,
+    // purgeOldRetrievalOutcomes, purgeOldTurnScores) each write their OWN
+    // maintenance_runs row (status defaults 'ok') and swallow internally, so they
+    // are already observable and must NOT be double-wrapped in runJob. The
+    // maintenance.ts-local jobs below recorded NOTHING pre-E1 — wrap those in
+    // runJob so a chronic failure (the purgeStaleEmbedCache class) becomes visible
+    // to memory_health instead of leaving health green.
     Promise.all([
         store.runMemoryMaintenance(),
         store.purgeStalePendingWork(),
         store.purgeOldRetrievalOutcomes(),
         store.purgeOldTurnScores(),
-        purgeStaleEmbedCache(state),
+        store.purgeOldMaintenanceRuns(), // E1: bound the new runJob audit trail itself
+        runJob(state, "purgeStaleEmbedCache", () => purgeStaleEmbedCache(state)),
+        // E6: monologue grows UNBOUNDED (one row per reasoning moment, searched on
+        // the hot path). E7: turn_archive grows FOREVER (archiveOldTurns only
+        // relocates into it, never trims). Both are bounded count-gated purges
+        // routed through the gcHardDelete keystone (both ARE content tables).
+        runJob(state, "purgeOldMonologue", () => purgeOldMonologue(state)),
+        runJob(state, "purgeOldTurnArchive", () => purgeOldTurnArchive(state)),
     ]).then(async () => {
-        // Group 2: moderate cost — after cheap queries complete
+        // Group 2: moderate cost — after cheap queries complete. The surreal.ts GC
+        // methods self-record + swallow (already observable); the maintenance.ts
+        // local jobs are wrapped in runJob.
         await store.archiveOldTurns().catch(e => swallow.warn("maintenance:archiveOldTurns", e));
         await store.garbageCollectMemories().catch(e => swallow.warn("maintenance:gcMemories", e));
         await store.garbageCollectConcepts().catch(e => swallow.warn("maintenance:gcConcepts", e));
         // G2: sweep orphaned edges (in/out endpoint hard-deleted) once per cycle.
-        // Best-effort, swallow errors like the GC siblings. Runs AFTER the node GCs
-        // so any edges those just orphaned are caught in the same cycle.
-        await sweepOrphanedEdges(state);
-        await backfillSessionTurnCounts(state);
-        await seedSkillsFromJson(state);
-        await backfillSkillEmbeddings(state);
+        // Runs AFTER the node GCs so any edges those just orphaned are caught in the
+        // same cycle. (gcSweepOrphanedEdges also writes its OWN audit row internally,
+        // but runJob additionally records an 'error' row if the sweep throws.)
+        await runJob(state, "sweepOrphanedEdges", () => sweepOrphanedEdges(state));
+        await runJob(state, "backfillSessionTurnCounts", () => backfillSessionTurnCounts(state));
+        await runJob(state, "seedSkillsFromJson", () => seedSkillsFromJson(state));
+        await runJob(state, "backfillSkillEmbeddings", () => backfillSkillEmbeddings(state));
     }).catch(e => swallow.warn("bootstrap:maintenance:group2", e));
     // Group 3: CPU-heavy — deferred so first-turn context assembly is uncontested
     const heavyTimer = setTimeout(async () => {
@@ -130,18 +209,23 @@ export function runBootstrapMaintenance(state) {
         // embeddings availability, so arming unconditionally is safe even if
         // the store dropped between boot and this timer.
         const backfillInterval = setInterval(() => {
-            void runEmbeddingBackfills(state);
+            void runJob(state, "runEmbeddingBackfills", () => runEmbeddingBackfills(state));
             // K17-maint: re-arm the embedding_cache prune on the same 6h cadence. Boot
             // Group 1 runs it once; without this re-arm a long-lived daemon (the
             // common local-first case — one host, never restarts for weeks) would let
             // embedding_cache grow unbounded between the boot run and the next restart.
             // purgeStaleEmbedCache self-guards on store availability and now loops to
             // full drain, so arming it unconditionally here is safe.
-            void purgeStaleEmbedCache(state);
+            void runJob(state, "purgeStaleEmbedCache", () => purgeStaleEmbedCache(state));
+            // E6/E7: re-arm the monologue + turn_archive retention on the same 6h
+            // cadence — a long-lived daemon that never restarts is exactly the case
+            // where these would otherwise grow without bound between boots.
+            void runJob(state, "purgeOldMonologue", () => purgeOldMonologue(state));
+            void runJob(state, "purgeOldTurnArchive", () => purgeOldTurnArchive(state));
             // G2: re-arm the orphaned-edge sweep on the same 6h cadence so a
             // long-lived daemon keeps the graph clean between restarts. Normally a
             // cheap no-op (see sweepOrphanedEdges' note); self-guarded on store.
-            void sweepOrphanedEdges(state);
+            void runJob(state, "sweepOrphanedEdges", () => sweepOrphanedEdges(state));
         }, 6 * 3_600_000);
         backfillInterval.unref?.();
         if (!store.isAvailable())
@@ -152,23 +236,16 @@ export function runBootstrapMaintenance(state) {
         // to vector search for the whole window. The backfills self-guard with
         // embeddings.isAvailable(), and the 6h interval retries if the embedder
         // isn't up yet at boot+30s on slow machines.
-        await runEmbeddingBackfills(state);
-        try {
-            await store.consolidateMemories((text) => embeddings.embed(text));
-        }
-        catch (e) {
-            swallow.warn("maintenance:consolidate", e);
-        }
+        await runJob(state, "runEmbeddingBackfills", () => runEmbeddingBackfills(state));
+        // consolidateMemories self-records a maintenance_runs row on success +
+        // swallows internally, so it is already observable; runJob additionally
+        // records an 'error' row if it throws.
+        await runJob(state, "consolidateMemories", () => store.consolidateMemories((text) => embeddings.embed(text)));
         // (0.7.118: the backfill sweep moved ABOVE consolidateMemories — see the
         // comment there. Historical note kept: Group 2 fires before
         // embeddings.isAvailable() flips true on slow tiers, which is why none
         // of the embed-dependent jobs live in Group 2.)
-        try {
-            await checkACANReadiness(store, config.thresholds.acanTrainingThreshold, cacheDir);
-        }
-        catch (e) {
-            swallow.warn("maintenance:acan", e);
-        }
+        await runJob(state, "checkACANReadiness", () => checkACANReadiness(store, config.thresholds.acanTrainingThreshold, cacheDir));
     }, deferMs);
     heavyTimer.unref?.();
 }
@@ -831,4 +908,93 @@ async function purgeStaleEmbedCache(state) {
     catch (e) {
         swallow.warn("maintenance:purgeEmbedCache", e);
     }
+}
+/**
+ * Generic oldest-first content-table retention through the gcHardDelete
+ * keystone. Shared by E6 (monologue) and E7 (turn_archive) — both ARE content
+ * tables (gc.ts GC_CONTENT_TABLES + the D4 lint), so their hard-delete MUST
+ * flow through the keystone (snapshot + blast-radius edge co-delete +
+ * after-verify), NOT a plain DELETE.
+ *
+ * Bounded the same way as purgeOldTurnScores: only act when count is
+ * meaningfully over `retain` (avoid churn right at the bound), then delete the
+ * OLDEST rows (ORDER BY <tsField> ASC) in capped batches, looping until the
+ * table is back under `retain` or MAX_BATCHES is hit (termination guard). The
+ * per-batch SELECT uses the table's timestamp index.
+ *
+ * Returns the number of rows deleted (so runJob records it as rows_affected).
+ * Store-guarded; per-batch errors propagate to the caller (runJob records an
+ * 'error' row) — but gcHardDelete is transactional per batch, so a throw can
+ * only lose the CURRENT batch, never corrupt prior ones.
+ */
+async function purgeOldContentTable(state, table, tsField, retain, reason) {
+    if (!state.store.isAvailable())
+        return 0;
+    // Per-batch cap is modest because gcHardDelete does heavy per-row work
+    // (snapshot + a 26-relation-table incident-edge sweep + after-verify), so a
+    // huge single batch would be a long transaction. The loop is what drains a
+    // backlog. BATCH * MAX_BATCHES = 100k rows/run ceiling — above any realistic
+    // single-host backlog accrued between 6h cycles, and the loop exits the moment
+    // the table is back under `retain`.
+    const BATCH = 1_000;
+    const MAX_BATCHES = 100;
+    // Only act when meaningfully over target (mirror purgeOldTurnScores' +5k
+    // slack) so we don't churn the keystone for a handful of rows every cycle.
+    const SLACK = 5_000;
+    const idsOf = (rows) => rows.map((r) => String(r.id)).filter((id) => RECORD_ID_RE.test(id));
+    let removed = 0;
+    const countRows = await state.store.queryFirst(`SELECT count() AS n FROM ${table} GROUP ALL`);
+    let count = countRows[0]?.n ?? 0;
+    if (count <= retain + SLACK)
+        return 0;
+    for (let i = 0; i < MAX_BATCHES; i++) {
+        // How many rows over target remain; cap the batch at BATCH.
+        const overage = count - retain;
+        if (overage <= 0)
+            break;
+        const take = Math.min(overage, BATCH);
+        // Oldest-first. ORDER BY <tsField> ASC is served by the table's timestamp
+        // index (monologue_timestamp_idx / turn_archive_timestamp_idx).
+        const rows = await state.store.queryFirst(`SELECT id FROM ${table} ORDER BY ${tsField} ASC LIMIT ${take}`);
+        const ids = idsOf(rows);
+        if (ids.length === 0)
+            break;
+        // E6/E7 KEYSTONE ROUTE: monologue + turn_archive are content tables, so the
+        // hard delete goes through gcHardDelete (snapshot + edge co-delete +
+        // after-verify), never a plain DELETE.
+        const res = await gcHardDelete(state, table, ids, { reason });
+        removed += res.deleted;
+        count -= res.deleted;
+        if (res.deleted < take)
+            break; // fewer deleted than asked — drained / racing
+    }
+    if (removed > 0) {
+        log.info(`[maintenance] ${reason}: hard-deleted ${removed} old ${table} row(s) via keystone (retain ~${retain})`);
+    }
+    return removed;
+}
+/**
+ * E6 — monologue retention. The createMonologue hot path writes one row per
+ * reasoning moment (memory-daemon.ts) and the table is searched on the hot path
+ * via the monologue_vec_idx HNSW index, so left unbounded it grows forever and
+ * inflates both the store and every vector search. monologue IS a content table
+ * (gc.ts GC_CONTENT_TABLES:64), so this routes through the gcHardDelete
+ * keystone. Keep the most-recent ~30k rows (monologue feeds soul generation;
+ * 30k is generous for a single-host install's reasoning history).
+ */
+async function purgeOldMonologue(state) {
+    return purgeOldContentTable(state, "monologue", "timestamp", 30_000, "monologue retention (E6)");
+}
+/**
+ * E7 — turn_archive retention. archiveOldTurns only RELOCATES rows here (INSERT
+ * INTO turn_archive + tag the source turn), so this cold-storage table grew
+ * FOREVER. turn_archive IS a content table (gc.ts GC_CONTENT_TABLES:68), so the
+ * trim routes through the gcHardDelete keystone. Keep the newest ~100k rows
+ * (turn_archive is the largest vector table; 100k is a generous archival depth
+ * for a single host — older archived turns are rarely the recall winner and the
+ * live `turn` table still holds the recent corpus). Rows are copied verbatim
+ * from `turn`, which carries `timestamp`, so we order by that.
+ */
+async function purgeOldTurnArchive(state) {
+    return purgeOldContentTable(state, "turn_archive", "timestamp", 100_000, "turn_archive retention (E7)");
 }

@@ -434,6 +434,12 @@ export declare class SurrealStore {
      * ts_created_idx (K8) for the ORDER BY and the DELETE predicate.
      */
     purgeOldTurnScores(): Promise<number>;
+    /** E1: bound maintenance_runs (telemetry — runJob writes a row per job per
+     *  cycle, ~24/day, forever). Mirror purgeOldTurnScores: keep the most-recent
+     *  RETAIN rows by ran_at, hard-delete older. DELETE OK (telemetry, D4-exempt;
+     *  uses maintenance_runs_ran_at_idx). The newest-row-per-job memory_health
+     *  reader is unaffected (latest rows are always retained). */
+    purgeOldMaintenanceRuns(): Promise<number>;
     archiveOldTurns(): Promise<number>;
     consolidateMemories(embedFn: (text: string) => Promise<number[]>): Promise<number>;
     getSessionRetrievedMemories(sessionId: string): Promise<{

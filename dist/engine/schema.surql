@@ -232,7 +232,19 @@ DEFINE FIELD IF NOT EXISTS job ON maintenance_runs TYPE string;
 DEFINE FIELD IF NOT EXISTS ran_at ON maintenance_runs TYPE datetime DEFAULT time::now();
 DEFINE FIELD IF NOT EXISTS rows_affected ON maintenance_runs TYPE int DEFAULT 0;
 DEFINE FIELD IF NOT EXISTS duration_ms ON maintenance_runs TYPE int DEFAULT 0;
+-- E1 (observability): a job that ALWAYS throws used to be indistinguishable
+-- from never-ran/succeeded because recordMaintenanceRun was the last statement
+-- in each try block (a throw recorded nothing) and nobody READ this table.
+-- `status` ('ok'|'error') + `error` make a failing job visible to memory_health.
+-- DEFAULT 'ok' so legacy rows + the historical recordMaintenanceRun success
+-- path (which now passes status explicitly) read back as healthy.
+DEFINE FIELD IF NOT EXISTS status ON maintenance_runs TYPE string DEFAULT 'ok';
+DEFINE FIELD IF NOT EXISTS error ON maintenance_runs TYPE option<string>;
 DEFINE INDEX IF NOT EXISTS maintenance_runs_job_idx ON maintenance_runs FIELDS job;
+-- E1: memory_health reads newest-per-job (ORDER BY ran_at DESC) and
+-- purgeOldMaintenanceRuns trims by ran_at — index it so neither is a full scan
+-- as the table grows on a long-lived daemon.
+DEFINE INDEX IF NOT EXISTS maintenance_runs_ran_at_idx ON maintenance_runs FIELDS ran_at;
 
 -- ============================================================
 -- GRAPH EDGES: Turn-level
@@ -487,6 +499,12 @@ DEFINE TABLE IF NOT EXISTS turn_archive SCHEMALESS;
 -- archived) and is searched every turn. Without this HNSW index the archive
 -- search was a full linear cosine scan (~1.2s at ~13K rows). Mirrors turn_vec_idx.
 DEFINE INDEX IF NOT EXISTS turn_archive_vec_idx ON turn_archive FIELDS embedding HNSW DIMENSION 1024 DIST COSINE;
+-- E7 (retention): archiveOldTurns only RELOCATES rows here (INSERT INTO
+-- turn_archive + tag source) so this table grew FOREVER. purgeOldTurnArchive
+-- (maintenance.ts) keeps the newest ~100k oldest-first via gcHardDelete; the
+-- ORDER BY timestamp ASC scan needs this index (rows are copied verbatim from
+-- `turn`, which carries `timestamp`). Mirrors turn_timestamp_idx.
+DEFINE INDEX IF NOT EXISTS turn_archive_timestamp_idx ON turn_archive FIELDS timestamp;
 
 -- ============================================================
 -- COGNITIVE: Causal Chain Metadata

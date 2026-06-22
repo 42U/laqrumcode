@@ -837,6 +837,15 @@ async function main(): Promise<void> {
   const server = new DaemonServer({
     socketPath: useUds ? socketPath : null,
     tcpPort: typeof tcpPort === "number" && Number.isFinite(tcpPort) && tcpPort > 0 ? tcpPort : null,
+    // E2 (TCP auth bypass fix): require a completed handshake before any
+    // non-meta method exactly when we bound TCP and minted a per-user token
+    // (tcpBound ⇒ initDaemonHandshakeToken() ran ⇒ daemonHandshakeToken !==
+    // null). Without this, the meta.handshake handler verified the token but
+    // dispatchLine let a TCP client call tool.* / hook.* as its first line and
+    // skip the handshake — reading another OS user's graph on the shared
+    // loopback port. UDS-only daemons (no token) leave this false: the socket's
+    // 0600 perms isolate users and the handshake stays optional there.
+    requireHandshakeAuth: tcpBound,
     log: {
       info: (m) => log.info(m),
       warn: (m) => log.warn(m),
@@ -884,6 +893,13 @@ async function main(): Promise<void> {
         throw new Error("handshake token mismatch — this daemon belongs to a different OS user");
       }
     }
+    // E2 (TCP auth bypass fix): reaching here means either no token is required
+    // (UDS-only — markAuthed is then a no-op since the dispatcher's gate is off)
+    // OR the per-user token matched above (a mismatch threw before this point).
+    // Mark THIS socket authed so dispatchLine will admit its subsequent non-meta
+    // tool.* / hook.* calls. Without this, a TCP client could never get past the
+    // gate; with it, only a client that presented the correct 0600 token can.
+    ctx.markAuthed();
     if (p.clientInfo && typeof p.clientInfo.pid === "number" && p.clientInfo.version && p.clientInfo.sessionId) {
       ctx.registerIdentity(p.clientInfo);
     }

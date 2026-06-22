@@ -134,9 +134,102 @@ function buildDrainEnv() {
     env.KONGCODE_DRAIN_SESSION = "1";
     return env;
 }
+/** Pure, platform-aware claude-binary resolver. Given the platform and a set
+ *  of probes, return the first viable claude path or null. Split out from
+ *  findClaudeBin so the win32 path is unit-testable without mocking
+ *  process.platform / child_process / fs (the repo idiom — cf. resolveTransport,
+ *  computeDrainCooldown).
+ *
+ *  E9 fix: pre-0.7.x this was POSIX-only — it shelled out to `which claude`
+ *  (absent on Windows) and probed ~/.local/bin, /usr/local/bin, /opt/claude/bin
+ *  (POSIX-only paths). On Windows the npm-installed CLI is `claude.cmd` under
+ *  %APPDATA%\npm (or the npm global prefix's node_modules\.bin), so the lookup
+ *  found nothing and background extraction silently self-disabled. */
+export function resolveClaudeBin(plat, probes) {
+    if (plat === "win32") {
+        // `where claude` is the Windows analogue of `which`. It can print several
+        // lines (claude.cmd AND claude.exe AND claude on PATH); take the first
+        // that exists and prefer it as-is — spawn() runs it with shell:true on
+        // win32 so a .cmd is invokable.
+        const where = probes.runLookup("where", ["claude"]);
+        if (where) {
+            for (const line of where.split(/\r?\n/)) {
+                const cand = line.trim();
+                if (cand && probes.fileExists(cand))
+                    return cand;
+            }
+        }
+        // Common Windows install locations. npm's global bin lands in %APPDATA%\npm
+        // (claude.cmd + claude.ps1 + a bash shim named "claude"); a custom npm
+        // prefix puts it under <prefix>\node_modules\.bin. Probe .cmd first (what
+        // shell:true invokes), then .exe, then the extensionless shim.
+        const winRoots = [];
+        if (probes.appData) {
+            winRoots.push(join(probes.appData, "npm"));
+            winRoots.push(join(probes.appData, "npm", "node_modules", ".bin"));
+        }
+        winRoots.push(join(probes.home, "AppData", "Roaming", "npm"));
+        winRoots.push(join(probes.home, ".local", "bin"));
+        for (const root of winRoots) {
+            for (const name of ["claude.cmd", "claude.exe", "claude"]) {
+                const cand = join(root, name);
+                if (probes.fileExists(cand))
+                    return cand;
+            }
+        }
+        return null;
+    }
+    // POSIX: `which claude` first (respects user's PATH), then known locations.
+    const which = probes.runLookup("which", ["claude"]);
+    if (which) {
+        const cand = which.trim();
+        if (cand && probes.fileExists(cand))
+            return cand;
+    }
+    const candidates = [
+        join(probes.home, ".local/bin/claude"),
+        "/usr/local/bin/claude",
+        "/opt/claude/bin/claude",
+    ];
+    for (const c of candidates) {
+        if (probes.fileExists(c))
+            return c;
+    }
+    return null;
+}
+/** Pure: whether the drain subprocess spawn must run under a shell. True only
+ *  on win32, where the resolved binary is claude.cmd and Node's spawn() cannot
+ *  exec a .cmd without the shell (same constraint bootstrap.ts hits with
+ *  npm.cmd). POSIX stays direct-exec (false) to avoid a shell-injection
+ *  surface. Exported so the E9 regression test asserts the exact predicate the
+ *  spawn options use, without mocking child_process. */
+export function drainSpawnNeedsShell(plat) {
+    return plat === "win32";
+}
+/** Production probes — wrap the real syscalls. `runLookup` swallows the
+ *  ENOENT/non-zero-exit throw and returns null so the resolver can fall
+ *  through to the path candidates. */
+function realClaudeBinProbes() {
+    return {
+        runLookup: (cmd, args) => {
+            try {
+                const out = execFileSync(cmd, args, { encoding: "utf8", timeout: 2000 });
+                return out ? out.trim() : null;
+            }
+            catch {
+                return null;
+            }
+        },
+        fileExists: (p) => existsSync(p),
+        home: homedir(),
+        appData: process.env.APPDATA ?? "",
+    };
+}
 /** Look up the claude binary — env override, then PATH, then known locations.
- *  Cached after first lookup. Returns null if not findable; caller should
- *  log once and self-disable. */
+ *  Platform-aware (E9): on win32 uses `where claude` + .cmd/.exe lookup under
+ *  %APPDATA%\npm and the npm prefix; on POSIX uses `which claude` + the
+ *  ~/.local/bin etc. candidates. Cached after first lookup. Returns null if
+ *  not findable; caller should log once and self-disable. */
 function findClaudeBin() {
     if (claudeBinPath)
         return claudeBinPath;
@@ -153,26 +246,10 @@ function findClaudeBin() {
         }
         catch { /* not found or not accessible */ }
     }
-    // Try `which claude` first — fastest and respects user's PATH.
-    try {
-        const which = execFileSync("which", ["claude"], { encoding: "utf8", timeout: 2000 }).trim();
-        if (which && existsSync(which)) {
-            claudeBinPath = which;
-            return claudeBinPath;
-        }
-    }
-    catch { /* fall through */ }
-    // Common installation paths.
-    const candidates = [
-        join(homedir(), ".local/bin/claude"),
-        "/usr/local/bin/claude",
-        "/opt/claude/bin/claude",
-    ];
-    for (const c of candidates) {
-        if (existsSync(c)) {
-            claudeBinPath = c;
-            return claudeBinPath;
-        }
+    const resolved = resolveClaudeBin(platform(), realClaudeBinProbes());
+    if (resolved) {
+        claudeBinPath = resolved;
+        return claudeBinPath;
     }
     claudeBinUnavailable = true;
     return null;
@@ -701,6 +778,16 @@ async function spawnHeadlessDrainer(state, opts, reason) {
             detached: true,
             stdio: stdioConfig,
             env: buildDrainEnv(),
+            // E9: on Windows the resolved binary is claude.cmd (npm shim). Node's
+            // spawn() cannot exec a .cmd directly — it requires the shell to
+            // interpret it (same constraint bootstrap.ts hits with npm.cmd). With
+            // shell:true, spawn quotes the args array for cmd.exe so DRAIN_PROMPT
+            // (which has spaces) is passed as a single argument. POSIX stays
+            // shell:false so we keep direct-exec semantics (no shell injection
+            // surface, args passed verbatim). The args here are all
+            // daemon-controlled constants, but defense-in-depth: only enable shell
+            // where the platform forces it.
+            shell: drainSpawnNeedsShell(platform()),
         });
         // Close the parent's copy of the log fd; child inherits its own.
         if (drainLogFd >= 0) {
@@ -932,6 +1019,8 @@ export function triggerDrainCheck(state, opts, reason = "session-end") {
  */
 export const __testing = {
     findClaudeBin,
+    resolveClaudeBin,
+    drainSpawnNeedsShell,
     resetClaudeBinCache: () => { claudeBinPath = null; claudeBinUnavailable = false; },
     tryAcquireLock,
     releaseLock,

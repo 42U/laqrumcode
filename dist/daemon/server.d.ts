@@ -24,6 +24,15 @@ export interface HandlerContext {
     /** Register or update the calling socket's client identity. Called by
      *  meta.handshake when the client sends clientInfo in its params. */
     registerIdentity(info: ClientInfo): void;
+    /** E2 (TCP auth bypass fix): mark the calling socket as authenticated.
+     *  Called by the meta.handshake handler AFTER it has verified the per-user
+     *  handshake token. Until a socket is authed, dispatchLine rejects every
+     *  non-meta method (tool.* / hook.*) with UNAUTHORIZED — so a TCP client on
+     *  the shared loopback port can't reach another OS user's graph by skipping
+     *  the handshake and sending tool.recall as its first line. No-op (always
+     *  allowed) when the daemon runs without handshake auth (UDS-only / no
+     *  token), since the Unix socket's 0600 perms already isolate OS users. */
+    markAuthed(): void;
 }
 /** Handler signature — every IPC method registers one of these. The dispatcher
  *  calls it with the parsed `params` object (already validated as JSON-RPC
@@ -58,6 +67,15 @@ export interface DaemonServerOpts {
      *  duration). Daemon main wires this to the same drain-and-exit path
      *  used by meta.shutdown / onSupersedeReady. */
     onIdleReap?: () => void;
+    /** E2 (TCP auth bypass fix): when true, every socket starts UNauthenticated
+     *  and dispatchLine rejects all non-meta methods (tool.* / hook.*) until the
+     *  socket completes meta.handshake (which calls ctx.markAuthed() after
+     *  verifying the per-user token). Daemon main sets this true exactly when it
+     *  binds TCP and mints a handshake token. When false/omitted (UDS-only / no
+     *  token), all sockets are implicitly authed — the Unix socket's 0600 perms
+     *  already isolate OS users, so no per-socket gate is needed and the existing
+     *  handshake-optional Unix-socket path is unchanged. */
+    requireHandshakeAuth?: boolean;
 }
 export declare class DaemonServer {
     private readonly opts;
@@ -71,6 +89,14 @@ export declare class DaemonServer {
      *  retain for backward compat but no longer expected in practice). Set
      *  membership doubles as the active-clients count. */
     private clients;
+    /** E2: sockets that have completed meta.handshake (token verified). Only
+     *  consulted when opts.requireHandshakeAuth is true. A socket is added here
+     *  by ctx.markAuthed() from the meta.handshake handler AFTER the token check
+     *  passes, and removed on socket close/error alongside the clients entry. A
+     *  separate set (rather than overloading the ClientInfo|null value) keeps the
+     *  anonymous-vs-identified distinction intact while tracking auth orthogonally:
+     *  a socket can be authed (token OK) yet still anonymous (no clientInfo sent). */
+    private authedSockets;
     private rpcsServedTotal;
     private rpcsInFlight;
     private startedAt;

@@ -82,10 +82,18 @@ describe("pickPort (GH #13 UID-offset managed port)", () => {
     expect(a).not.toBe(b);
   });
 
-  it("falls back to the legacy flat port when getuid is unavailable (Windows)", () => {
+  it("derives a per-user managed port when getuid is unavailable (Windows) — no flat collision (E5)", () => {
     delete process.env.KONGCODE_SURREAL_PORT;
-    // Truly exercise the non-POSIX path: getuid is removed entirely.
-    withGetuid(undefined, () => expect(pickPort()).toBe(LEGACY_MANAGED_SURREAL_PORT));
+    // E5: Windows OS users are NOT isolated by a flat port on loopback TCP, so
+    // pickPort() now offsets the managed-Surreal port by a stable hash of the
+    // username into the [LEGACY, LEGACY+10000) window (mirrors the IPC port
+    // derivation). Assert it lands in-window and is deterministic per user;
+    // cross-user distinctness is covered by fix-e5-e14-bootstrap.test.ts.
+    const a = withGetuid(undefined, () => pickPort());
+    const b = withGetuid(undefined, () => pickPort());
+    expect(a).toBeGreaterThanOrEqual(LEGACY_MANAGED_SURREAL_PORT);
+    expect(a).toBeLessThan(LEGACY_MANAGED_SURREAL_PORT + 10000);
+    expect(a).toBe(b); // deterministic for the same username
   });
 });
 

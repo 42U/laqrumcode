@@ -253,9 +253,13 @@ async function handleToolCall(toolName, args) {
     }
     catch (e) {
         const err = e;
-        if (err.code === -32002 /* IpcErrorCode.DAEMON_RESTARTING */ || err.code === -32001 /* IpcErrorCode.DAEMON_BOOTSTRAPPING */) {
+        if (err.code === -32002 /* IpcErrorCode.DAEMON_RESTARTING */ ||
+            err.code === -32001 /* IpcErrorCode.DAEMON_BOOTSTRAPPING */ ||
+            err.code === -32006 /* IpcErrorCode.UNAUTHORIZED */) {
             // One retry after re-establishing the connection. If the daemon was
-            // mid-restart, this should land cleanly the second time.
+            // mid-restart, this should land cleanly the second time. UNAUTHORIZED
+            // (E2): a bare TCP reconnect can leave the new socket un-handshaked;
+            // getOrConnectIpc()/connectAndHandshake below re-handshakes, re-authing it.
             log.warn(`[mcp-client] daemon transient error, reconnecting and retrying once: ${err.message}`);
             ipc?.close();
             ipc = null;

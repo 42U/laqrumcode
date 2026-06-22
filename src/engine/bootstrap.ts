@@ -12,6 +12,7 @@ import {
 import { mkdir, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { userInfo } from "node:os";
 import { spawn, execFile, execFileSync, type ChildProcess } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { promisify } from "node:util";
@@ -629,11 +630,20 @@ export function getOrCreateManagedCred(cacheDir: string): ManagedSurrealCred {
   const cred: ManagedSurrealCred = { user, pass };
   try {
     // Ensure parent (~/.kongcode) exists; cacheDir's own mkdir happens later,
-    // but the cred sits one level up so we create that level here.
+    // but the cred sits one level up so we create that level here. E14: narrow
+    // the parent dir to 0700 so the cred file is never reachable through a
+    // world-traversable directory (best-effort; no-op / EPERM on Windows).
     mkdirSync(dirname(path), { recursive: true });
+    try { chmodSync(dirname(path), 0o700); } catch { /* best-effort; no-op on Windows */ }
   } catch { /* parent may already exist; writeFileSync will surface real errors */ }
   try {
-    writeFileSync(path, JSON.stringify(cred, null, 2), "utf-8");
+    // E14: pass mode:0o600 so the file is CREATED at 0600 (the mode is applied
+    // at the underlying open(O_CREAT) call), closing the create-then-narrow race
+    // where a plain write left it briefly world-readable before chmod. Mirrors
+    // the auth-token / handoff-file write idiom (handoff-file.ts). The trailing
+    // chmod is a defensive no-op for the rewrite-existing-file case (where the
+    // file already exists at 0600 from our prior write and mode: is ignored).
+    writeFileSync(path, JSON.stringify(cred, null, 2), { encoding: "utf-8", mode: 0o600 });
     try { chmodSync(path, 0o600); } catch { /* best-effort; no-op on Windows */ }
   } catch (e) {
     // If we can't persist, we still return the in-memory cred so the spawn
@@ -1121,24 +1131,69 @@ function loadManifest(pluginDir: string): Manifest {
  *  data is still discovered. */
 export const LEGACY_MANAGED_SURREAL_PORT = 18765;
 
+/** Width of the managed-SurrealDB per-user port window. The window is
+ *  [LEGACY_MANAGED_SURREAL_PORT, LEGACY_MANAGED_SURREAL_PORT + RANGE - 1] =
+ *  [18765, 28764]. This MUST stay in sync with the rest of the system's port
+ *  partitioning: the daemon IPC window (daemon-spawn.ts PORT_OFFSET_BASE=28765)
+ *  and the read-only UI window (ui-server.ts UI_PORT_BASE) both start ABOVE this
+ *  ceiling so the three never collide. Both the POSIX (uid) and the Windows
+ *  (username-hash) derivations below land inside this single window. */
+export const MANAGED_SURREAL_PORT_RANGE = 10000;
+
+/** Tiny deterministic 32-bit string hash (FNV-1a). Not cryptographic — only
+ *  used to scatter different Windows OS users across the managed-SurrealDB port
+ *  window when getuid() is unavailable. Algorithmically identical to
+ *  daemon-spawn.ts's stableHash32 (the IPC-port equivalent) so the two
+ *  derivations are auditable side by side, but kept LOCAL here on purpose:
+ *  src/mcp-client already imports from src/engine (engine/log.js), so importing
+ *  daemon-spawn back into this engine module would form a circular dependency.
+ *  Stable across processes/platforms/Node versions (pure integer arithmetic).
+ *  Returns a non-negative 32-bit int. */
+function fnv1a32(s: string): number {
+  let h = 0x811c9dc5; // FNV offset basis
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 0x01000193); // FNV prime, kept 32-bit via Math.imul
+  }
+  return h >>> 0; // force unsigned 32-bit
+}
+
 /** Pick the port for the bootstrap-managed SurrealDB.
  *
  *  GH #13 (multi-user port collision): on a shared host, every OS user's
  *  bootstrap previously hardcoded 18765, so the 2nd user's managed SurrealDB
- *  collided with the 1st user's. We derive a per-user port by offsetting with
- *  the caller's UID (mod 10000 to stay in a sane range). Two different users
- *  almost never land on the same port; even if they did, the process-owner
+ *  collided with the 1st user's. We derive a per-user port by offsetting into
+ *  the managed-SurrealDB window (MANAGED_SURREAL_PORT_RANGE wide). Two different
+ *  users almost never land on the same port; even if they did, the process-owner
  *  guard in findExistingKongcodeSurreal prevents cross-user adoption.
  *
+ *  E5 (multi-OS-user Windows host): the prior code returned the FLAT legacy
+ *  18765 for EVERY Windows account (getuid===null), so two users on one Windows
+ *  host collided on 18765 — the 2nd user's daemon failed to bind, adopted the
+ *  1st user's DB, was rejected by the per-install cred, and wedged in degraded
+ *  mode. We now derive per-user on Windows too, mirroring the username-hash
+ *  shape resolveTcpPort() (daemon-spawn.ts) uses for the IPC port, but anchored
+ *  on the SAME base+range as the POSIX path so the result stays inside the
+ *  managed-SurrealDB window [18765, 28764].
+ *
  *  - KONGCODE_SURREAL_PORT override always wins (explicit operator intent).
- *  - POSIX: 18765 + (getuid() % 10000).
- *  - Windows / no getuid: falls back to the legacy 18765 (Windows users are
- *    OS-isolated by separate accounts/sessions, not by port). */
+ *  - POSIX: 18765 + (getuid() % RANGE).
+ *  - Windows / no getuid: 18765 + (fnv1a32(os.userInfo().username) % RANGE).
+ *  - Degenerate (no uid AND no username): flat 18765 — the only safe choice;
+ *    isolation then leans on the per-install cred + process-owner guard. */
 export function pickPort(): number {
   const env = Number(process.env.KONGCODE_SURREAL_PORT);
   if (Number.isFinite(env) && env > 0) return env;
   const uid = typeof process.getuid === "function" ? process.getuid() : null;
-  return uid === null ? LEGACY_MANAGED_SURREAL_PORT : LEGACY_MANAGED_SURREAL_PORT + (uid % 10000);
+  if (uid !== null) {
+    return LEGACY_MANAGED_SURREAL_PORT + (uid % MANAGED_SURREAL_PORT_RANGE);
+  }
+  // Windows (no getuid): scatter by a stable hash of the account username so two
+  // accounts on one host don't both land on the flat 18765.
+  let username = "";
+  try { username = userInfo().username ?? ""; } catch { /* fall through */ }
+  if (!username) return LEGACY_MANAGED_SURREAL_PORT;
+  return LEGACY_MANAGED_SURREAL_PORT + (fnv1a32(`user:${username}`) % MANAGED_SURREAL_PORT_RANGE);
 }
 
 /**

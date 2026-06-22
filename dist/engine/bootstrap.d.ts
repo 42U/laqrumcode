@@ -194,19 +194,37 @@ export declare function findExistingKongcodeSurreal(cacheDir: string, managedPor
  *  must probe (gated by the owner guard) so an upgrading single-user install's
  *  data is still discovered. */
 export declare const LEGACY_MANAGED_SURREAL_PORT = 18765;
+/** Width of the managed-SurrealDB per-user port window. The window is
+ *  [LEGACY_MANAGED_SURREAL_PORT, LEGACY_MANAGED_SURREAL_PORT + RANGE - 1] =
+ *  [18765, 28764]. This MUST stay in sync with the rest of the system's port
+ *  partitioning: the daemon IPC window (daemon-spawn.ts PORT_OFFSET_BASE=28765)
+ *  and the read-only UI window (ui-server.ts UI_PORT_BASE) both start ABOVE this
+ *  ceiling so the three never collide. Both the POSIX (uid) and the Windows
+ *  (username-hash) derivations below land inside this single window. */
+export declare const MANAGED_SURREAL_PORT_RANGE = 10000;
 /** Pick the port for the bootstrap-managed SurrealDB.
  *
  *  GH #13 (multi-user port collision): on a shared host, every OS user's
  *  bootstrap previously hardcoded 18765, so the 2nd user's managed SurrealDB
- *  collided with the 1st user's. We derive a per-user port by offsetting with
- *  the caller's UID (mod 10000 to stay in a sane range). Two different users
- *  almost never land on the same port; even if they did, the process-owner
+ *  collided with the 1st user's. We derive a per-user port by offsetting into
+ *  the managed-SurrealDB window (MANAGED_SURREAL_PORT_RANGE wide). Two different
+ *  users almost never land on the same port; even if they did, the process-owner
  *  guard in findExistingKongcodeSurreal prevents cross-user adoption.
  *
+ *  E5 (multi-OS-user Windows host): the prior code returned the FLAT legacy
+ *  18765 for EVERY Windows account (getuid===null), so two users on one Windows
+ *  host collided on 18765 — the 2nd user's daemon failed to bind, adopted the
+ *  1st user's DB, was rejected by the per-install cred, and wedged in degraded
+ *  mode. We now derive per-user on Windows too, mirroring the username-hash
+ *  shape resolveTcpPort() (daemon-spawn.ts) uses for the IPC port, but anchored
+ *  on the SAME base+range as the POSIX path so the result stays inside the
+ *  managed-SurrealDB window [18765, 28764].
+ *
  *  - KONGCODE_SURREAL_PORT override always wins (explicit operator intent).
- *  - POSIX: 18765 + (getuid() % 10000).
- *  - Windows / no getuid: falls back to the legacy 18765 (Windows users are
- *    OS-isolated by separate accounts/sessions, not by port). */
+ *  - POSIX: 18765 + (getuid() % RANGE).
+ *  - Windows / no getuid: 18765 + (fnv1a32(os.userInfo().username) % RANGE).
+ *  - Degenerate (no uid AND no username): flat 18765 — the only safe choice;
+ *    isolation then leans on the per-install cred + process-owner guard. */
 export declare function pickPort(): number;
 /**
  * Idempotent first-run bootstrap. Provisions npm deps, SurrealDB binary, embedding

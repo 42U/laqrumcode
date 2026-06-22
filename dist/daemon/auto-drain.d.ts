@@ -53,9 +53,43 @@ export declare function resetDrainBackoffForTest(): void;
  *  The subprocess talks to the daemon over IPC — it never needs DB
  *  credentials, API keys, or other secrets from the parent. */
 declare function buildDrainEnv(): Record<string, string | undefined>;
+/** Probes injected into the pure resolver so it can be unit-tested without
+ *  mocking node globals. In production these wrap execFileSync/existsSync. */
+export interface ClaudeBinProbes {
+    /** Run a lookup command (`which claude` / `where claude`) and return its
+     *  trimmed stdout, or null if it fails / is unavailable. */
+    runLookup: (cmd: string, args: string[]) => string | null;
+    /** existsSync wrapper. */
+    fileExists: (p: string) => boolean;
+    /** Home directory (homedir()). */
+    home: string;
+    /** %APPDATA% (win32 only; "" elsewhere). */
+    appData: string;
+}
+/** Pure, platform-aware claude-binary resolver. Given the platform and a set
+ *  of probes, return the first viable claude path or null. Split out from
+ *  findClaudeBin so the win32 path is unit-testable without mocking
+ *  process.platform / child_process / fs (the repo idiom — cf. resolveTransport,
+ *  computeDrainCooldown).
+ *
+ *  E9 fix: pre-0.7.x this was POSIX-only — it shelled out to `which claude`
+ *  (absent on Windows) and probed ~/.local/bin, /usr/local/bin, /opt/claude/bin
+ *  (POSIX-only paths). On Windows the npm-installed CLI is `claude.cmd` under
+ *  %APPDATA%\npm (or the npm global prefix's node_modules\.bin), so the lookup
+ *  found nothing and background extraction silently self-disabled. */
+export declare function resolveClaudeBin(plat: NodeJS.Platform, probes: ClaudeBinProbes): string | null;
+/** Pure: whether the drain subprocess spawn must run under a shell. True only
+ *  on win32, where the resolved binary is claude.cmd and Node's spawn() cannot
+ *  exec a .cmd without the shell (same constraint bootstrap.ts hits with
+ *  npm.cmd). POSIX stays direct-exec (false) to avoid a shell-injection
+ *  surface. Exported so the E9 regression test asserts the exact predicate the
+ *  spawn options use, without mocking child_process. */
+export declare function drainSpawnNeedsShell(plat: NodeJS.Platform): boolean;
 /** Look up the claude binary — env override, then PATH, then known locations.
- *  Cached after first lookup. Returns null if not findable; caller should
- *  log once and self-disable. */
+ *  Platform-aware (E9): on win32 uses `where claude` + .cmd/.exe lookup under
+ *  %APPDATA%\npm and the npm prefix; on POSIX uses `which claude` + the
+ *  ~/.local/bin etc. candidates. Cached after first lookup. Returns null if
+ *  not findable; caller should log once and self-disable. */
 declare function findClaudeBin(): string | null;
 declare function pidFilePath(cacheDir: string): string;
 declare function isPidAlive(pid: number): boolean;
@@ -159,6 +193,8 @@ export declare function triggerDrainCheck(state: GlobalPluginState, opts: DrainS
  */
 export declare const __testing: {
     findClaudeBin: typeof findClaudeBin;
+    resolveClaudeBin: typeof resolveClaudeBin;
+    drainSpawnNeedsShell: typeof drainSpawnNeedsShell;
     resetClaudeBinCache: () => void;
     tryAcquireLock: typeof tryAcquireLock;
     releaseLock: typeof releaseLock;

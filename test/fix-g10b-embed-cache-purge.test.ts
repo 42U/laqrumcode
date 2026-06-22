@@ -67,6 +67,7 @@ function makeState(opts: { available: boolean; deleteBatchCounts: number[] }): {
     purgeStalePendingWork: async () => {},
     purgeOldRetrievalOutcomes: async () => 0,
     purgeOldTurnScores: async () => 0,
+    purgeOldMaintenanceRuns: async () => 0,
   } as any;
 
   const state: Partial<GlobalPluginState> = {

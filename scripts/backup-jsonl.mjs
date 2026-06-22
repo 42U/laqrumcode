@@ -14,7 +14,7 @@
  *   KONGCODE_BACKUP_DIR — default ./kongcode-backup-YYYYMMDD-HHMM/
  */
 
-import { Surreal } from "/home/zero/voidorigin/kongcode/node_modules/surrealdb/dist/surrealdb.mjs";
+import { Surreal } from "surrealdb";
 import { mkdir, writeFile, readFile } from "node:fs/promises";
 import { createWriteStream } from "node:fs";
 import { join, resolve, dirname } from "node:path";
@@ -44,6 +44,7 @@ const OUTDIR = resolve(process.env.KONGCODE_BACKUP_DIR || `./kongcode-backup-${S
 
 /** Node tables — keep in sync with src/engine/tools/introspect.ts ALLOWED_TABLES. */
 const NODE_TABLES = [
+  "access_stats",
   "agent", "project", "task", "artifact", "concept",
   "turn", "identity_chunk", "session", "memory", "core_memory",
   "monologue", "skill", "reflection", "retrieval_outcome",

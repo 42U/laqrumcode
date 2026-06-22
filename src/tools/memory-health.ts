@@ -277,6 +277,83 @@ export async function handleMemoryHealth(
     });
   }
 
+  // E1 (observability): READ maintenance_runs and surface job health. Pre-E1
+  // nobody read this table, so a maintenance job that ALWAYS threw (e.g. the
+  // purgeStaleEmbedCache class) was indistinguishable from never-ran/succeeded
+  // and memory_health stayed green while a table grew unbounded. Now: take the
+  // newest row per job; push a RED/error diagnostic for any job whose latest run
+  // is status='error' (with the job + error), and a YELLOW for a known-expected
+  // job whose newest row is older than ~2x its cadence (or absent on a daemon
+  // that has been up long enough to have run it).
+  try {
+    // Newest row per job: ORDER BY ran_at DESC, then keep first-seen per job in JS.
+    // maintenance_runs_job_idx + the small table size keep this cheap. SCHEMALESS
+    // table — gcHardDelete writes rows with extra fields, but job/status/error/
+    // ran_at are the canonical ones (status DEFAULTs 'ok' for legacy rows).
+    const rows = await state.store.queryFirst<{
+      job: string;
+      status?: string;
+      error?: string;
+      ran_at?: string;
+    }>(
+      `SELECT job, status, error, ran_at FROM maintenance_runs ORDER BY ran_at DESC LIMIT 2000`,
+    );
+    const latestByJob = new Map<string, { status?: string; error?: string; ran_at?: string }>();
+    for (const r of rows) {
+      if (!r?.job) continue;
+      if (!latestByJob.has(r.job)) latestByJob.set(r.job, r); // first = newest (DESC)
+    }
+    // Any job whose newest run errored → RED.
+    for (const [job, row] of latestByJob) {
+      if ((row.status ?? "ok") === "error") {
+        diagnostics.push({
+          severity: "error",
+          area: "maintenance",
+          message: `maintenance job "${job}" last run FAILED: ${row.error ?? "(no error message recorded)"}. The job is throwing every cycle; the work it does (retention / backfill / GC) is not happening. Check daemon stderr.`,
+        });
+      }
+    }
+    // Known recurring jobs + their cadence. The 6h-interval jobs (maintenance.ts
+    // Group 3 setInterval) should have a row within ~2x cadence (12h) on a
+    // daemon that has been up at least that long. A MISSING row on a fresh/just-
+    // restarted daemon is expected (boot Group 1/3 may not have fired yet), so
+    // we only warn when the daemon entrypoint mtime shows it has been up long
+    // enough — reuse distMtimeAtStartup as a coarse "daemon start" proxy.
+    const SIX_H_MS = 6 * 3_600_000;
+    const RECURRING: Array<{ job: string; cadenceMs: number }> = [
+      { job: "purgeStaleEmbedCache", cadenceMs: SIX_H_MS },
+      { job: "purgeOldMonologue", cadenceMs: SIX_H_MS },
+      { job: "purgeOldTurnArchive", cadenceMs: SIX_H_MS },
+      { job: "sweepOrphanedEdges", cadenceMs: SIX_H_MS },
+      { job: "runEmbeddingBackfills", cadenceMs: SIX_H_MS },
+    ];
+    const daemonUpMs = distMtimeAtStartup > 0 ? Date.now() - distMtimeAtStartup : 0;
+    for (const { job, cadenceMs } of RECURRING) {
+      const staleAfter = cadenceMs * 2;
+      // Only evaluate "expected to have run" once the daemon has been up past
+      // 2x the cadence — otherwise a just-started daemon spuriously warns.
+      if (daemonUpMs > 0 && daemonUpMs < staleAfter) continue;
+      const row = latestByJob.get(job);
+      if (!row) {
+        diagnostics.push({
+          severity: "warn",
+          area: "maintenance",
+          message: `maintenance job "${job}" has no maintenance_runs row but the daemon has been up >${(staleAfter / 3_600_000).toFixed(0)}h — its 6h re-arm may not be firing.`,
+        });
+        continue;
+      }
+      const ranMs = row.ran_at ? Date.parse(row.ran_at) : NaN;
+      if (Number.isFinite(ranMs) && Date.now() - ranMs > staleAfter) {
+        const ageH = ((Date.now() - ranMs) / 3_600_000).toFixed(1);
+        diagnostics.push({
+          severity: "warn",
+          area: "maintenance",
+          message: `maintenance job "${job}" last ran ${ageH}h ago (>${(staleAfter / 3_600_000).toFixed(0)}h, ~2x its 6h cadence) — the re-arm interval may be stalled.`,
+        });
+      }
+    }
+  } catch (e) { swallow.warn("memoryHealth:maintenanceRuns", e); }
+
   // W2-6: detect daemon dist-drift. If the dist file on disk has a newer
   // mtime than when this module first loaded, the daemon is running stale
   // code (the v0.7.96 PID-34196 incident). Push a warn-level diagnostic so
