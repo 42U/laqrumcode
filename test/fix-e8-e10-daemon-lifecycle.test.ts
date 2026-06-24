@@ -68,6 +68,15 @@ describe("E8: supersede grace window bounds a busy daemon's stale-code lifetime"
     // Keep a client attached for the whole window so the graceful
     // last-client-disconnect path can NEVER fire — only the bounded deadline can.
     const client = await attachClient(port);
+    // attachClient resolves on the client's connect, but the server registers the
+    // connection in its async 'connection' handler, which can lag on slower/loaded
+    // runners (flaked the macOS CI leg with count still 0). Poll until acknowledged.
+    {
+      const deadline = Date.now() + 2_000;
+      while (server.attachedClientCount < 1 && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 10));
+      }
+    }
     expect(server.attachedClientCount).toBeGreaterThanOrEqual(1);
 
     server.markPendingSupersede();

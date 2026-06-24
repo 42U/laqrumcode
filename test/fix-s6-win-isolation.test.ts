@@ -135,7 +135,10 @@ describe("S6: handshake token file is per-user and 0600", () => {
   });
 
   it("resolveDaemonTokenPath co-locates the token in the user's own home", () => {
-    expect(resolveDaemonTokenPath("/home/alice")).toBe("/home/alice/.laqrumcode-daemon.token");
+    // Compare via join() so the expected uses the platform separator — on Windows
+    // resolveDaemonTokenPath() returns a backslash path, so a hardcoded forward-slash
+    // literal would (and did) fail the win32 CI leg.
+    expect(resolveDaemonTokenPath("/home/alice")).toBe(join("/home/alice", ".laqrumcode-daemon.token"));
     expect(resolveDaemonTokenPath("/home/bob")).not.toBe(resolveDaemonTokenPath("/home/alice"));
   });
 
