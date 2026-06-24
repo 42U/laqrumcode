@@ -241,7 +241,12 @@ const daemonScript = (() => {
     return join(here, "..", "dist", "daemon", "index.js");
   } catch { return ""; }
 })();
-const DAEMON_AVAILABLE = !!daemonScript && existsSync(daemonScript);
+// dist/daemon is committed, so existsSync is always true here — but CI has no full
+// daemon runtime (managed SurrealDB + embeddings) to actually spawn and handshake.
+// Honour the documented "skips in CI" intent so this real-binary integration smoke
+// test only runs where the runtime exists (local/built); CI keeps the 10 unit-level
+// transport tests above. (Without this, the gate never skipped and CI went red.)
+const DAEMON_AVAILABLE = !!daemonScript && existsSync(daemonScript) && !process.env.CI;
 const itDaemon = (name: string, fn: () => Promise<void>, timeout?: number) =>
   it(name, async () => { if (!DAEMON_AVAILABLE) return; await fn(); }, timeout);
 
@@ -260,7 +265,10 @@ describe("R6 (gated): spawning the real daemon in tcp mode is reachable over TCP
     const port = 28764;
     process.env.LAQRUMCODE_DAEMON_TRANSPORT = "tcp";
     process.env.LAQRUMCODE_DAEMON_PORT = String(port);
-    const ep = await ensureDaemon({ log: SILENT_LOG, readyTimeoutMs: 120_000 });
+    // Pass the resolved dist path explicitly: under vitest the module runs from
+    // src/, so ensureDaemon's relative resolveDaemonScript() would point at the
+    // non-existent src/daemon/index.js. Use the compiled daemon the gate located.
+    const ep = await ensureDaemon({ log: SILENT_LOG, readyTimeoutMs: 120_000, daemonScriptPath: daemonScript });
     expect(ep.tcpHost).toBe("127.0.0.1");
     expect(ep.tcpPort).toBe(port);
     const client = new IpcClient({ socketPath: null, tcpHost: ep.tcpHost, tcpPort: ep.tcpPort, log: SILENT_LOG });
