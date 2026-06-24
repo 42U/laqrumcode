@@ -2,7 +2,13 @@
 
 All notable changes to LaqrumCode are documented here. The 0.7.x series introduced the daemon-split architecture; 0.8.0 will be the first marketplace-ready stable.
 
-## [Unreleased]
+## [0.8.0] - 2026-06-24
+
+### Changed
+- Rebranded to **laqrumcode** — plugin id, marketplace name, MCP tool prefix (`mcp__plugin_laqrumcode_laqrumcode__*`), runtime paths (`~/.laqrumcode`), and SurrealDB namespace (`laqrum`). Existing installs must reinstall under the new id (see release notes).
+
+### Added
+- `scripts/migrate-legacy-graph.mjs` — content-safe migrator to import a pre-rebrand memory graph into the `laqrum` namespace (verbatim content copy + surgical structural-id fixups; `LEGACY_BRAND`/`NEW_BRAND` parameterized).
 
 ### Hardened — enterprise 1M-install readiness pass (branch `harden-1m-and-rename`)
 
