@@ -1,5 +1,5 @@
 /**
- * JSON-RPC client used by kongcode-mcp to talk to kongcode-daemon.
+ * JSON-RPC client used by laqrumcode-mcp to talk to laqrumcode-daemon.
  *
  * Connects to the daemon's Unix socket (linux/mac) or TCP loopback (Windows
  * / explicit override), sends typed RPC requests, and resolves promises with

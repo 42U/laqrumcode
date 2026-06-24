@@ -1,7 +1,7 @@
 /**
  * DB-state invariants — live integration test.
  *
- * Reads the production kongcode SurrealDB and asserts three invariants
+ * Reads the production laqrumcode SurrealDB and asserts three invariants
  * that caught real bugs in the v0.7.93–v0.7.95 investigation:
  *
  *   1. Embedding coverage: zero unembedded rows on every content table.
@@ -17,7 +17,7 @@
  *      the superseded name. Catches v0.7.92-class bugs where supersede
  *      promoted an unrelated concept.
  *
- * Skip behavior: skips cleanly if the kongcode daemon socket is absent
+ * Skip behavior: skips cleanly if the laqrumcode daemon socket is absent
  * (matches the `daemon-tool-roundtrip` integration test gate). Opt out
  * explicitly with `SKIP_DB_STATE=1`.
  *
@@ -37,7 +37,7 @@ import { Surreal } from "surrealdb";
 import { parsePluginConfig } from "../../src/engine/config.js";
 
 const SOCKET_PATH =
-  process.env.KONGCODE_DAEMON_SOCKET ?? join(homedir(), ".kongcode-daemon.sock");
+  process.env.LAQRUMCODE_DAEMON_SOCKET ?? join(homedir(), ".laqrumcode-daemon.sock");
 
 const RUN_LIVE =
   existsSync(SOCKET_PATH) && process.env.SKIP_DB_STATE !== "1";
@@ -54,7 +54,7 @@ const CONTENT_TABLES = [
   "reflection",
 ] as const;
 
-describe.skipIf(!RUN_LIVE)("kongcode DB state invariants (live, read-only)", () => {
+describe.skipIf(!RUN_LIVE)("laqrumcode DB state invariants (live, read-only)", () => {
   let db: Surreal | undefined;
 
   beforeAll(async () => {
@@ -194,7 +194,7 @@ describe.skipIf(!RUN_LIVE)("kongcode DB state invariants (live, read-only)", () 
         expect(
           count,
           `${count} ${table} rows have superseded_by = id (self-ref). ` +
-            `Run the heal in kongcode-heal-skill-corruption skill ` +
+            `Run the heal in laqrumcode-heal-skill-corruption skill ` +
             `(skill:j12hn8rf00muaww4rv0g) and ensure all id != $X SELECTs ` +
             `use type::record($X).`,
         ).toBe(0);

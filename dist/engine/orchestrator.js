@@ -5,7 +5,7 @@
  * Classifies intent, adapts agent configuration, records metrics.
  * Target: <25ms for non-trivial prompts, <1ms for simple ones.
  *
- * Ported from kongbrain — takes EmbeddingService + SurrealStore as params
+ * Ported from laqrumbrain — takes EmbeddingService + SurrealStore as params
  * instead of module-level singletons. Per-session state via SessionState.
  */
 import { classifyIntent, estimateComplexity } from "./intent.js";

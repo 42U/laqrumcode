@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Cross-platform kongcode hook proxy.
+ * Cross-platform laqrumcode hook proxy.
  *
  * Replacement for hook-proxy.sh that works on Windows without Git Bash.
  * Forwards Claude Code hook events to the MCP server's internal HTTP API
@@ -9,17 +9,17 @@
  * Usage: node hook-proxy.js <event-name>
  *   reads hook payload JSON from stdin, returns hook response JSON on stdout.
  *   fails open (returns "{}") if the MCP server is unreachable, so Claude
- *   Code's pipeline never gets blocked by a broken kongcode install.
+ *   Code's pipeline never gets blocked by a broken laqrumcode install.
  *
  * Discovery (mirrors hook-proxy.sh):
- *   1. Per-PID Unix sockets at $HOME/.kongcode-<pid>.sock — newest-first by
+ *   1. Per-PID Unix sockets at $HOME/.laqrumcode-<pid>.sock — newest-first by
  *      mtime, skip stale (PID dead). POSIX-only.
- *   2. Legacy shared Unix socket at $HOME/.kongcode.sock. POSIX-only.
- *   3. TCP port read from $HOME/.kongcode-port. Cross-platform.
+ *   2. Legacy shared Unix socket at $HOME/.laqrumcode.sock. POSIX-only.
+ *   3. TCP port read from $HOME/.laqrumcode-port. Cross-platform.
  *
  * Why Node and not bash: hooks.json invokes "bash ..." which fails silently
  * on Windows without Git Bash, leaving sessions/agents/projects/tasks empty.
- * Node is already a kongcode hard prereq (the MCP server runs on it), so
+ * Node is already a laqrumcode hard prereq (the MCP server runs on it), so
  * routing hooks through Node is the lowest-friction cross-platform fix.
  */
 
@@ -56,7 +56,7 @@ const EVENT_TIMEOUTS_MS = {
   "session-end": 3_000,
 };
 const TIMEOUT_MS = EVENT_TIMEOUTS_MS[HOOK_EVENT] ?? 8_000;
-const CACHE_DIR = path.join(HOME, ".kongcode", "cache");
+const CACHE_DIR = path.join(HOME, ".laqrumcode", "cache");
 const AUTH_TOKEN_PATH = path.join(CACHE_DIR, "auth-token");
 
 function readAuthToken() {
@@ -89,7 +89,7 @@ function isPidAlive(pid) {
   }
 }
 
-/** Find a per-PID kongcode socket whose owning process is still alive.
+/** Find a per-PID laqrumcode socket whose owning process is still alive.
  *  Returns the socket path or null. POSIX only — Windows treats Unix
  *  sockets as files but Node's HTTP client over UDS works on Windows 10+
  *  via named pipes or AF_UNIX, which we don't rely on here. */
@@ -102,12 +102,12 @@ function findUnixSocket() {
     return null;
   }
   const candidates = entries
-    .filter((e) => e.name.startsWith(".kongcode-") && e.name.endsWith(".sock"))
+    .filter((e) => e.name.startsWith(".laqrumcode-") && e.name.endsWith(".sock"))
     .map((e) => {
       const full = path.join(HOME, e.name);
       let mtime = 0;
       try { mtime = fs.statSync(full).mtimeMs; } catch {}
-      const pidStr = e.name.slice(".kongcode-".length, -".sock".length);
+      const pidStr = e.name.slice(".laqrumcode-".length, -".sock".length);
       const pid = Number(pidStr);
       return { path: full, mtime, pid };
     })
@@ -116,7 +116,7 @@ function findUnixSocket() {
     if (isPidAlive(c.pid)) return c.path;
   }
   // Legacy shared socket fallback (pre-0.3.0 MCPs)
-  const legacy = path.join(HOME, ".kongcode.sock");
+  const legacy = path.join(HOME, ".laqrumcode.sock");
   try { if (fs.statSync(legacy).isSocket()) return legacy; } catch {}
   return null;
 }
@@ -124,7 +124,7 @@ function findUnixSocket() {
 /** Read the TCP port the MCP wrote on startup. Cross-platform. */
 function readPort() {
   try {
-    const raw = fs.readFileSync(path.join(HOME, ".kongcode-port"), "utf8").trim();
+    const raw = fs.readFileSync(path.join(HOME, ".laqrumcode-port"), "utf8").trim();
     const n = Number(raw);
     return Number.isFinite(n) && n > 0 && n < 65536 ? n : null;
   } catch {
@@ -173,7 +173,7 @@ function trySpawnDaemon() {
   try {
     const raw = fs.readFileSync(pidFile, "utf8").trim();
     // daemon.pid has been a JSON marker since 0.7.65
-    // ({"marker":"kongcode-daemon","pid":N,...}). Number(JSON) is NaN, which
+    // ({"marker":"laqrumcode-daemon","pid":N,...}). Number(JSON) is NaN, which
     // made this guard dead for ~50 releases — every unreachable-socket hook
     // event forked a doomed daemon. Parse JSON-or-bare (mirrors
     // readDaemonPidMarker in src/mcp-client/daemon-spawn.ts).
@@ -260,8 +260,8 @@ function daemonDownResponse(eventName) {
     hookSpecificOutput: {
       hookEventName: EVENT_NAME_MAP[eventName] || eventName,
       additionalContext:
-        "[KongCode] Remember your tier0 directives are important to the user and make you more helpful. " +
-        "WARNING: kongcode daemon is unreachable — hooks, memory injection, and gates are inactive this turn. " +
+        "[LaqrumCode] Remember your tier0 directives are important to the user and make you more helpful. " +
+        "WARNING: laqrumcode daemon is unreachable — hooks, memory injection, and gates are inactive this turn. " +
         "The daemon has been respawned and should be available on the next turn. " +
         "If this persists, tell the user. " +
         "And remember to save knowledge gems along the way.",
@@ -273,16 +273,16 @@ function daemonDownResponse(eventName) {
   const payload = await readStdin();
   let body = payload || "{}";
   // Drain-session tag (2026-06-09 spawn-storm fix): auto-drain subprocesses are
-  // spawned with KONGCODE_DRAIN_SESSION=1 (buildDrainEnv). The hook payload's
+  // spawned with LAQRUMCODE_DRAIN_SESSION=1 (buildDrainEnv). The hook payload's
   // session_id is Claude Code's own transcript id, which the daemon cannot
   // correlate with the spawn — so stamp the flag into the payload here, where
   // the child's env is visible. handleSessionEnd uses it to skip the drain
   // re-trigger (pre-fix, each failed drain's own SessionEnd respawned the next
   // one every ~25s, burning the full daily budget). Fail-open on parse errors.
-  if (process.env.KONGCODE_DRAIN_SESSION === "1") {
+  if (process.env.LAQRUMCODE_DRAIN_SESSION === "1") {
     try {
       const obj = JSON.parse(body);
-      obj.kongcode_drain_session = true;
+      obj.laqrumcode_drain_session = true;
       body = JSON.stringify(obj);
     } catch { /* malformed stdin — pass through unchanged */ }
   }

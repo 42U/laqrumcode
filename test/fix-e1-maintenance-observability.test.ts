@@ -338,7 +338,7 @@ describe("E1 memory_health — reads maintenance_runs and surfaces job failures"
 // the store is real here.
 // ---------------------------------------------------------------------------
 const SKIP = process.env.SKIP_INTEGRATION === "1";
-const TEST_NS = "kong_test";
+const TEST_NS = "laqrum_test";
 const TEST_DB = `e1_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 let liveStore: SurrealStore;
 

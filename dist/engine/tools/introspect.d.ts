@@ -1,6 +1,6 @@
 /**
  * Introspect tool — inspect the memory database.
- * Ported from kongbrain with SurrealStore injection.
+ * Ported from laqrumbrain with SurrealStore injection.
  */
 import type { GlobalPluginState, SessionState } from "../state.js";
 export declare function createIntrospectToolDef(state: GlobalPluginState, session: SessionState): {
@@ -189,7 +189,7 @@ export declare function dirSizeBytes(dir: string, depth?: number): number | null
  *  non-managed port (e.g. an :8000 Docker container, where no SURREAL_URL is
  *  set — the case the old `!!process.env.SURREAL_URL` check missed). Keyed on
  *  the connected port vs the managed-surface ports (pickPort + legacy 18765),
- *  matching how findExistingKongcodeSurreal decides managed-vs-external. */
+ *  matching how findExistingLaqrumcodeSurreal decides managed-vs-external. */
 export declare function isConnectedDbExternal(connectedUrl: string): boolean;
 export declare function statsAction(state: GlobalPluginState): Promise<{
     content: {

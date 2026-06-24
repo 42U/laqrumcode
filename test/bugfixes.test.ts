@@ -153,7 +153,7 @@ describe("handoff file atomic rename (fix #14)", () => {
   let dir: string;
 
   beforeEach(async () => {
-    dir = await mkdtemp(join(tmpdir(), "kongbrain-bugfix-test-"));
+    dir = await mkdtemp(join(tmpdir(), "laqrumbrain-bugfix-test-"));
   });
 
   afterEach(async () => {
@@ -181,13 +181,13 @@ describe("handoff file atomic rename (fix #14)", () => {
     writeHandoffFileSync(sampleData, dir);
     readAndDeleteHandoffFile(dir);
 
-    expect(existsSync(join(dir, ".kongcode-handoff.json"))).toBe(false);
-    expect(existsSync(join(dir, ".kongcode-handoff.json.processing"))).toBe(false);
+    expect(existsSync(join(dir, ".laqrumcode-handoff.json"))).toBe(false);
+    expect(existsSync(join(dir, ".laqrumcode-handoff.json.processing"))).toBe(false);
   });
 
   it("cleans up stale .processing file from prior crash", async () => {
     // Simulate crash: left a .processing file but no main file
-    const processingPath = join(dir, ".kongcode-handoff.json.processing");
+    const processingPath = join(dir, ".laqrumcode-handoff.json.processing");
     await writeFile(processingPath, JSON.stringify(sampleData));
 
     // Should clean up the stale .processing file and return null

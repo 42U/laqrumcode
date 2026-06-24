@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * Live-fire integration runner — exercises every synapse of a running
- * kongcode daemon. Connects to /home/zero/.kongcode-daemon.sock via the
+ * laqrumcode daemon. Connects to /home/zero/.laqrumcode-daemon.sock via the
  * IPC protocol and fires representative payloads at every registered
  * method, plus calls the recovery.ts primitives directly via dynamic
  * import.
@@ -24,7 +24,7 @@
 import { createConnection } from "node:net";
 import { existsSync } from "node:fs";
 
-const SOCK = "/home/zero/.kongcode-daemon.sock";
+const SOCK = "/home/zero/.laqrumcode-daemon.sock";
 const SESSION_ID = `live-fire-${Date.now()}`;
 const RESULTS = []; // { synapse, ok, detail, ms }
 
@@ -72,7 +72,7 @@ async function fire(synapse, fn) {
 
 // ── Run ─────────────────────────────────────────────────────────────
 
-console.log("KongCode live-fire — exercising every synapse against running daemon");
+console.log("LaqrumCode live-fire — exercising every synapse against running daemon");
 console.log(`  socket: ${SOCK}`);
 console.log(`  test session: ${SESSION_ID}`);
 console.log("");
@@ -91,9 +91,9 @@ await fire("tool.introspect:query",  () => rpc("tool.introspect", { sessionId: S
 await fire("tool.introspect:trends", () => rpc("tool.introspect", { sessionId: SESSION_ID, args: { action: "trends" } }));
 await fire("tool.introspect:migrate-projectid", () => rpc("tool.introspect", { sessionId: SESSION_ID, args: { action: "migrate", filter: "backfill_project_id" } }, 30000));
 await fire("tool.introspect:migrate-derivedfrom", () => rpc("tool.introspect", { sessionId: SESSION_ID, args: { action: "migrate", filter: "backfill_derived_from" } }, 30000));
-await fire("tool.recall",           () => rpc("tool.recall", { sessionId: SESSION_ID, args: { query: "kongcode release process", limit: 3 } }));
+await fire("tool.recall",           () => rpc("tool.recall", { sessionId: SESSION_ID, args: { query: "laqrumcode release process", limit: 3 } }));
 await fire("tool.clusterScan",      () => rpc("tool.clusterScan", { sessionId: SESSION_ID, args: { query: "graph schema", limit: 5 } }));
-await fire("tool.whatIsMissing",    () => rpc("tool.whatIsMissing", { sessionId: SESSION_ID, args: { context: "exploring kongcode internals before refactoring memory daemon", gap_limit: 5 } }));
+await fire("tool.whatIsMissing",    () => rpc("tool.whatIsMissing", { sessionId: SESSION_ID, args: { context: "exploring laqrumcode internals before refactoring memory daemon", gap_limit: 5 } }));
 await fire("tool.coreMemory:list",  () => rpc("tool.coreMemory", { sessionId: SESSION_ID, args: { action: "list" } }));
 await fire("tool.fetchPendingWork", () => rpc("tool.fetchPendingWork", { sessionId: SESSION_ID, args: {} }));
 
@@ -165,7 +165,7 @@ if (liveCoreMemoryId) {
 }
 
 console.log("\n[4/5] hook.* (14 — every handler + gate registry exercisers)");
-const fakePayload = { session_id: SESSION_ID, prompt: "[live-fire] smoke test", cwd: "/home/zero/voidorigin/kongcode" };
+const fakePayload = { session_id: SESSION_ID, prompt: "[live-fire] smoke test", cwd: "/home/zero/voidorigin/laqrumcode" };
 await fire("hook.sessionStart",     () => rpc("hook.sessionStart", fakePayload));
 await fire("hook.userPromptSubmit", () => rpc("hook.userPromptSubmit", fakePayload, 30000));
 await fire("hook.preToolUse:Bash",  () => rpc("hook.preToolUse", { ...fakePayload, tool_name: "Bash", tool_input: { command: "echo test" } }));

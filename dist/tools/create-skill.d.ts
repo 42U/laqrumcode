@@ -1,5 +1,5 @@
 /**
- * create_skill MCP tool. Writes a skill row into the kongcode DB as the
+ * create_skill MCP tool. Writes a skill row into the laqrumcode DB as the
  * canonical location for procedural knowledge. Replaces the historical
  * SKILL.md-on-disk authoring path: bodies live in the vector-indexed
  * `skill` table where they are semantically recallable, smaller, and

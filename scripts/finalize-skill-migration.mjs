@@ -10,7 +10,7 @@
  *        description: <description>
  *        ---
  *
- *        Body in kongcode DB. Call mcp__plugin_kongcode_kongcode__get_skill_body
+ *        Body in laqrumcode DB. Call mcp__plugin_laqrumcode_laqrumcode__get_skill_body
  *        with name="<name>" to load full instructions.
  *
  * Idempotent: re-running on already-stubbed .md files is a no-op (the stub
@@ -20,16 +20,16 @@
  * Env-var overrides match scripts/migrate-skills-to-db.mjs.
  */
 
-import { Surreal } from "/home/zero/voidorigin/kongcode/node_modules/surrealdb/dist/surrealdb.mjs";
+import { Surreal } from "/home/zero/voidorigin/laqrumcode/node_modules/surrealdb/dist/surrealdb.mjs";
 import { writeFile, mkdir } from "node:fs/promises";
 import { join, dirname } from "node:path";
 
 const URL = process.env.SURREAL_URL || "ws://127.0.0.1:8000/rpc";
 const USER = process.env.SURREAL_USER || "root";
 const PASS = process.env.SURREAL_PASS || "root";
-const NS = process.env.SURREAL_NS || "kong";
+const NS = process.env.SURREAL_NS || "laqrum";
 const DB = process.env.SURREAL_DB || "memory";
-const REPO_ROOT = "/home/zero/voidorigin/kongcode";
+const REPO_ROOT = "/home/zero/voidorigin/laqrumcode";
 const SKILLS_DIR = join(REPO_ROOT, "skills");
 const SEED_PATH = join(REPO_ROOT, ".claude-plugin", "skills-seed.json");
 
@@ -54,7 +54,7 @@ name: ${name}
 description: ${escapeYaml(description)}
 ---
 
-Body in kongcode DB. Call \`mcp__plugin_kongcode_kongcode__get_skill_body\` with \`name="${name}"\` to load full instructions.
+Body in laqrumcode DB. Call \`mcp__plugin_laqrumcode_laqrumcode__get_skill_body\` with \`name="${name}"\` to load full instructions.
 `;
 }
 

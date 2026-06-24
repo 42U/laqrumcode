@@ -1,6 +1,6 @@
 /**
  * K42 regression — createSoul() had a check-then-create TOCTOU on the fixed
- * `soul:kongbrain` id with no try/catch. If a concurrent caller (two
+ * `soul:laqrumbrain` id with no try/catch. If a concurrent caller (two
  * session-end pipelines, or a retry) slips between hasSoul() and the CREATE,
  * the second CREATE throws "already exists" and the whole call rejected.
  *
@@ -25,13 +25,13 @@ describe("K42: createSoul TOCTOU idempotency", () => {
     const store = {
       isAvailable: () => true,
       queryFirst: vi.fn(async (sql: string) => {
-        if (sql.includes("FROM soul:kongbrain")) return soulExists ? [{ id: "soul:kongbrain" }] : [];
+        if (sql.includes("FROM soul:laqrumbrain")) return soulExists ? [{ id: "soul:laqrumbrain" }] : [];
         return [];
       }),
       queryExec: vi.fn(async () => {
         // Simulate the concurrent winner having created it just now.
         soulExists = true;
-        throw new Error("Database record `soul:kongbrain` already exists");
+        throw new Error("Database record `soul:laqrumbrain` already exists");
       }),
     };
     // Must resolve true, not reject.
@@ -42,7 +42,7 @@ describe("K42: createSoul TOCTOU idempotency", () => {
     const store = {
       isAvailable: () => true,
       queryFirst: vi.fn(async (sql: string) => {
-        if (sql.includes("FROM soul:kongbrain")) return []; // never exists
+        if (sql.includes("FROM soul:laqrumbrain")) return []; // never exists
         return [];
       }),
       queryExec: vi.fn(async () => { throw new Error("disk full"); }),
@@ -53,7 +53,7 @@ describe("K42: createSoul TOCTOU idempotency", () => {
   it("returns false up front when the soul already exists (unchanged happy path)", async () => {
     const store = {
       isAvailable: () => true,
-      queryFirst: vi.fn(async () => [{ id: "soul:kongbrain" }]),
+      queryFirst: vi.fn(async () => [{ id: "soul:laqrumbrain" }]),
       queryExec: vi.fn(async () => {}),
     };
     await expect(createSoul(emptyDoc, store as any)).resolves.toBe(false);

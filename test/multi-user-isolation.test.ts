@@ -9,7 +9,7 @@
  *      against an injected fixture /proc tree so it runs cross-platform in CI
  *      (the real kernel /proc can't be faked, hence the procRoot injection).
  *
- * The higher-level findExistingKongcodeSurreal owner-guard branching is exercised
+ * The higher-level findExistingLaqrumcodeSurreal owner-guard branching is exercised
  * indirectly here via its two building blocks; the network-fingerprint half is
  * already covered by bootstrap reuse behavior and needs a live SurrealDB.
  */
@@ -52,38 +52,38 @@ function withGetuid<T>(uid: number | undefined, fn: () => T): T {
 }
 
 describe("pickPort (GH #13 UID-offset managed port)", () => {
-  const origPort = process.env.KONGCODE_SURREAL_PORT;
+  const origPort = process.env.LAQRUMCODE_SURREAL_PORT;
 
   afterEach(() => {
-    if (origPort === undefined) delete process.env.KONGCODE_SURREAL_PORT;
-    else process.env.KONGCODE_SURREAL_PORT = origPort;
+    if (origPort === undefined) delete process.env.LAQRUMCODE_SURREAL_PORT;
+    else process.env.LAQRUMCODE_SURREAL_PORT = origPort;
   });
 
-  it("KONGCODE_SURREAL_PORT override always wins", () => {
-    process.env.KONGCODE_SURREAL_PORT = "29999";
+  it("LAQRUMCODE_SURREAL_PORT override always wins", () => {
+    process.env.LAQRUMCODE_SURREAL_PORT = "29999";
     expect(pickPort()).toBe(29999);
   });
 
   it("offsets the legacy base port by getuid() % 10000", () => {
-    delete process.env.KONGCODE_SURREAL_PORT;
+    delete process.env.LAQRUMCODE_SURREAL_PORT;
     withGetuid(1234, () => expect(pickPort()).toBe(LEGACY_MANAGED_SURREAL_PORT + 1234));
   });
 
   it("wraps the UID offset with mod 10000 to stay in range", () => {
-    delete process.env.KONGCODE_SURREAL_PORT;
+    delete process.env.LAQRUMCODE_SURREAL_PORT;
     // 412345 % 10000 = 2345
     withGetuid(412345, () => expect(pickPort()).toBe(LEGACY_MANAGED_SURREAL_PORT + 2345));
   });
 
   it("two distinct UIDs get distinct ports (collision avoidance)", () => {
-    delete process.env.KONGCODE_SURREAL_PORT;
+    delete process.env.LAQRUMCODE_SURREAL_PORT;
     const a = withGetuid(1000, () => pickPort());
     const b = withGetuid(1001, () => pickPort());
     expect(a).not.toBe(b);
   });
 
   it("derives a per-user managed port when getuid is unavailable (Windows) — no flat collision (E5)", () => {
-    delete process.env.KONGCODE_SURREAL_PORT;
+    delete process.env.LAQRUMCODE_SURREAL_PORT;
     // E5: Windows OS users are NOT isolated by a flat port on loopback TCP, so
     // pickPort() now offsets the managed-Surreal port by a stable hash of the
     // username into the [LEGACY, LEGACY+10000) window (mirrors the IPC port

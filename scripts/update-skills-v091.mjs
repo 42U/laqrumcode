@@ -1,20 +1,20 @@
 #!/usr/bin/env node
-// One-shot: append v0.7.91 sections to kongcode-release skill body, create
+// One-shot: append v0.7.91 sections to laqrumcode-release skill body, create
 // pre-flight-done-check skill. Idempotent — re-running on an already-updated
 // DB row is detected by checking for the v0.7.91 marker string in the body.
 
-import { Surreal } from "/home/zero/voidorigin/kongcode/node_modules/surrealdb/dist/surrealdb.mjs";
+import { Surreal } from "/home/zero/voidorigin/laqrumcode/node_modules/surrealdb/dist/surrealdb.mjs";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 const URL = process.env.SURREAL_URL || "ws://127.0.0.1:8000/rpc";
 const USER = process.env.SURREAL_USER || "root";
 const PASS = process.env.SURREAL_PASS || "root";
-const NS = process.env.SURREAL_NS || "kong";
+const NS = process.env.SURREAL_NS || "laqrum";
 const DB = process.env.SURREAL_DB || "memory";
 
-const REPO_ROOT = "/home/zero/voidorigin/kongcode";
-const RELEASE_ADDITIONS = readFileSync(join(REPO_ROOT, "scripts/v091-kongcode-release-additions.md"), "utf8");
+const REPO_ROOT = "/home/zero/voidorigin/laqrumcode";
+const RELEASE_ADDITIONS = readFileSync(join(REPO_ROOT, "scripts/v091-laqrumcode-release-additions.md"), "utf8");
 const PREFLIGHT_BODY = readFileSync(join(REPO_ROOT, "scripts/v091-pre-flight-done-check.md"), "utf8");
 
 const db = new Surreal();
@@ -22,21 +22,21 @@ await db.connect(URL);
 await db.signin({ username: USER, password: PASS });
 await db.use({ namespace: NS, database: DB });
 
-const cur = await db.query(`SELECT id, body FROM skill WHERE name = "kongcode-release" LIMIT 1`);
+const cur = await db.query(`SELECT id, body FROM skill WHERE name = "laqrumcode-release" LIMIT 1`);
 const row = cur[0]?.[0];
 if (!row) {
-  console.error("kongcode-release skill not found");
+  console.error("laqrumcode-release skill not found");
   process.exit(1);
 }
 const existing = row.body || "";
 
 if (existing.includes("(added v0.7.91)")) {
-  console.log(`SKIP kongcode-release: already contains v0.7.91 additions`);
+  console.log(`SKIP laqrumcode-release: already contains v0.7.91 additions`);
 } else {
   const newBody = existing + "\n" + RELEASE_ADDITIONS;
   // Clear embedding so the backfill job re-embeds with the new body content.
-  await db.query(`UPDATE skill SET body = $body, embedding = NONE WHERE name = "kongcode-release"`, { body: newBody });
-  console.log(`UPDATED kongcode-release body: ${existing.length} -> ${newBody.length} chars`);
+  await db.query(`UPDATE skill SET body = $body, embedding = NONE WHERE name = "laqrumcode-release"`, { body: newBody });
+  console.log(`UPDATED laqrumcode-release body: ${existing.length} -> ${newBody.length} chars`);
 }
 
 const existsCheck = await db.query(`SELECT id FROM skill WHERE name = "pre-flight-done-check" LIMIT 1`);

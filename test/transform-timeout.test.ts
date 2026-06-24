@@ -13,22 +13,22 @@ describe("resolveTransformTimeoutMs", () => {
     expect(resolveTransformTimeoutMs({})).toBe(15_000);
   });
 
-  it("scales to 45s in CPU mode (KONGCODE_NO_GPU=1, set by gpu-pin)", () => {
-    expect(resolveTransformTimeoutMs({ KONGCODE_NO_GPU: "1" })).toBe(45_000);
+  it("scales to 45s in CPU mode (LAQRUMCODE_NO_GPU=1, set by gpu-pin)", () => {
+    expect(resolveTransformTimeoutMs({ LAQRUMCODE_NO_GPU: "1" })).toBe(45_000);
   });
 
   it("explicit override wins — including over CPU mode", () => {
-    expect(resolveTransformTimeoutMs({ KONGCODE_TRANSFORM_TIMEOUT_MS: "20000" })).toBe(20_000);
-    expect(resolveTransformTimeoutMs({ KONGCODE_TRANSFORM_TIMEOUT_MS: "20000", KONGCODE_NO_GPU: "1" })).toBe(20_000);
+    expect(resolveTransformTimeoutMs({ LAQRUMCODE_TRANSFORM_TIMEOUT_MS: "20000" })).toBe(20_000);
+    expect(resolveTransformTimeoutMs({ LAQRUMCODE_TRANSFORM_TIMEOUT_MS: "20000", LAQRUMCODE_NO_GPU: "1" })).toBe(20_000);
   });
 
   it("floors fractional overrides", () => {
-    expect(resolveTransformTimeoutMs({ KONGCODE_TRANSFORM_TIMEOUT_MS: "12345.7" })).toBe(12_345);
+    expect(resolveTransformTimeoutMs({ LAQRUMCODE_TRANSFORM_TIMEOUT_MS: "12345.7" })).toBe(12_345);
   });
 
   it("rejects zero/negative/garbage overrides and falls through to defaults", () => {
-    expect(resolveTransformTimeoutMs({ KONGCODE_TRANSFORM_TIMEOUT_MS: "0" })).toBe(15_000);
-    expect(resolveTransformTimeoutMs({ KONGCODE_TRANSFORM_TIMEOUT_MS: "-5" })).toBe(15_000);
-    expect(resolveTransformTimeoutMs({ KONGCODE_TRANSFORM_TIMEOUT_MS: "abc", KONGCODE_NO_GPU: "1" })).toBe(45_000);
+    expect(resolveTransformTimeoutMs({ LAQRUMCODE_TRANSFORM_TIMEOUT_MS: "0" })).toBe(15_000);
+    expect(resolveTransformTimeoutMs({ LAQRUMCODE_TRANSFORM_TIMEOUT_MS: "-5" })).toBe(15_000);
+    expect(resolveTransformTimeoutMs({ LAQRUMCODE_TRANSFORM_TIMEOUT_MS: "abc", LAQRUMCODE_NO_GPU: "1" })).toBe(45_000);
   });
 });

@@ -72,7 +72,7 @@ export declare function pruneRawMetrics(store: SurrealStore, retentionDays?: num
 export declare function computeTrends(store: SurrealStore, windowDays?: number): Promise<TrendReport>;
 export declare function resetAnomalyCache(): void;
 /**
- * Record the outcome of a write attempt under `~/.kongcode/cache/`. Call
+ * Record the outcome of a write attempt under `~/.laqrumcode/cache/`. Call
  * sites: bootstrap.ts (auth token, daemon.pid), auto-drain.ts (spending
  * ledger), any other code path that persists state into the cache dir.
  * Each call appends an outcome to a 10-minute sliding window.

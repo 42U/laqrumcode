@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * compact-store.mjs — export the kongcode graph and import it into a FRESH
+ * compact-store.mjs — export the laqrumcode graph and import it into a FRESH
  * SurrealDB store (new major version), reclaiming append-only value-log
  * garbage and rebuilding every index from clean state.
  *
@@ -26,9 +26,9 @@
  *   node scripts/compact-store.mjs                 # test mode
  *   node scripts/compact-store.mjs --cleanup       # test then remove scratch
  * Env: SURREAL_URL/USER/PASS/NS/DB (defaults = production),
- *      KONGCODE_COMPACT_NEW_VERSION (default v3.1.4),
- *      KONGCODE_COMPACT_PORT (default 8940),
- *      KONGCODE_COMPACT_STAGE_DIR (default /mnt/money/voidorigin/kongcode-compact)
+ *      LAQRUMCODE_COMPACT_NEW_VERSION (default v3.1.4),
+ *      LAQRUMCODE_COMPACT_PORT (default 8940),
+ *      LAQRUMCODE_COMPACT_STAGE_DIR (default /mnt/money/voidorigin/laqrumcode-compact)
  */
 import { execSync } from "node:child_process";
 import { mkdirSync, statSync, createWriteStream } from "node:fs";
@@ -38,13 +38,13 @@ const HTTP_BASE = (process.env.SURREAL_URL || "ws://127.0.0.1:8000/rpc")
   .replace(/^ws/, "http").replace(/\/rpc$/, "");
 const USER = process.env.SURREAL_USER || "root";
 const PASS = process.env.SURREAL_PASS || "root";
-const NS = process.env.SURREAL_NS || "kong";
+const NS = process.env.SURREAL_NS || "laqrum";
 const DB = process.env.SURREAL_DB || "memory";
-const NEW_VERSION = process.env.KONGCODE_COMPACT_NEW_VERSION || "v3.1.4";
-const PORT = Number(process.env.KONGCODE_COMPACT_PORT) || 8940;
-const STAGE = process.env.KONGCODE_COMPACT_STAGE_DIR || "/mnt/money/voidorigin/kongcode-compact";
+const NEW_VERSION = process.env.LAQRUMCODE_COMPACT_NEW_VERSION || "v3.1.4";
+const PORT = Number(process.env.LAQRUMCODE_COMPACT_PORT) || 8940;
+const STAGE = process.env.LAQRUMCODE_COMPACT_STAGE_DIR || "/mnt/money/voidorigin/laqrumcode-compact";
 const CLEANUP = process.argv.includes("--cleanup");
-const SCRATCH = "kongcode-compact-test";
+const SCRATCH = "laqrumcode-compact-test";
 
 function sh(cmd) { return execSync(cmd, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim(); }
 
@@ -145,7 +145,7 @@ async function idDiffRepair(srcWsUrl, dstWsUrl, tables) {
 
 /** v2 (0.7.122): namespace sweep. A store can host databases the migration
  *  never touched — the 2026-06-12 audit found 58 namespaces (17 non-empty,
- *  incl. the kongclaw-era graph) on a server everyone thought held one DB.
+ *  incl. the laqrumclaw-era graph) on a server everyone thought held one DB.
  *  Every non-empty (ns,db) pair beyond the migrated one gets exported. */
 async function namespaceSweep(httpBase) {
   const auth = "Basic " + Buffer.from(`${USER}:${PASS}`).toString("base64");
@@ -206,7 +206,7 @@ async function main() {
   console.log(`    ${TABLES.length} tables;`, JSON.stringify(before).slice(0, 400) + "…");
 
   // ── 2. Logical export over HTTP ──
-  const exportPath = join(STAGE, `kong-memory-export.surql`);
+  const exportPath = join(STAGE, `laqrum-memory-export.surql`);
   console.log(`  [2/6] exporting ${NS}/${DB} → ${exportPath}…`);
   const res = await fetch(`${HTTP_BASE}/export`, {
     headers: {
@@ -234,7 +234,7 @@ async function main() {
   // root-owned bind dir dies with "IO error: Permission denied" — live-hit
   // on the first run, 2026-06-12).
   sh(`sudo docker run --rm -v ${dataDir}:/wipe alpine sh -c "rm -rf /wipe/* /wipe/.[!.]* 2>/dev/null; chmod 777 /wipe; true"`);
-  sh(`sudo docker run -d --name ${SCRATCH} -p 127.0.0.1:${PORT}:8000 -v ${dataDir}:/mydata surrealdb/surrealdb:${NEW_VERSION} start surrealkv:/mydata/kongdb --user ${USER} --pass ${PASS}`);
+  sh(`sudo docker run -d --name ${SCRATCH} -p 127.0.0.1:${PORT}:8000 -v ${dataDir}:/mydata surrealdb/surrealdb:${NEW_VERSION} start surrealkv:/mydata/laqrumdb --user ${USER} --pass ${PASS}`);
   const target = `http://127.0.0.1:${PORT}`;
   // Readiness poll (QA G2: fixed sleep was flaky) — up to 30s.
   let ready = false;
@@ -306,11 +306,11 @@ async function main() {
   } else if (verdict) {
     console.log(`
   CUTOVER RUNBOOK (manual — this script never touches production):
-    1. Stop writers: kill the kongcode daemon (it respawns against the new store after cutover).
+    1. Stop writers: kill the laqrumcode daemon (it respawns against the new store after cutover).
     2. Re-export + re-import for freshness (writes since this test), or accept the small gap.
     3. sudo docker stop <prod-container>   # old 65GB store stays on disk as the rollback
     4. Point the production container/compose at surrealdb/surrealdb:${NEW_VERSION} with the fresh store dir (${dataDir}), keeping host port 8000.
-    5. Start it; kongcode reconnects automatically; verify with memory_health (index_sanity should clear).
+    5. Start it; laqrumcode reconnects automatically; verify with memory_health (index_sanity should clear).
     6. After a comfortable soak, archive/delete the old store dir to reclaim ~65GB.
   Scratch container '${SCRATCH}' left running on :${PORT} for inspection.`);
   }

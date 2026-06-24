@@ -1,7 +1,7 @@
 /**
- * Prepend kongcode's runtime-downloaded node_modules dir to NODE_PATH.
+ * Prepend laqrumcode's runtime-downloaded node_modules dir to NODE_PATH.
  *
- * When kongcode-mcp ships as a SEA-bundled binary, its bundled JS contains
+ * When laqrumcode-mcp ships as a SEA-bundled binary, its bundled JS contains
  * MCP SDK code that calls require("ajv/...") at runtime. SEA executables
  * have no adjacent node_modules — Node's module resolution would fail with
  * MODULE_NOT_FOUND.
@@ -22,7 +22,7 @@ import { homedir } from "node:os";
 import { join, delimiter } from "node:path";
 
 export function setupRuntimeNodePath(cacheDir?: string): { applied: boolean; path: string | null } {
-  const cache = cacheDir ?? join(homedir(), ".kongcode", "cache");
+  const cache = cacheDir ?? join(homedir(), ".laqrumcode", "cache");
   const nativeNodeModules = join(cache, "native", "node_modules");
   if (!existsSync(nativeNodeModules)) {
     return { applied: false, path: null };

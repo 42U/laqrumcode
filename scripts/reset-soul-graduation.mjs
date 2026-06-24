@@ -4,7 +4,7 @@
  *
  * Why this exists
  * ---------------
- *   The user wants the current `soul:kongbrain` singleton, all
+ *   The user wants the current `soul:laqrumbrain` singleton, all
  *   `maturity_stage` rows, and any `graduation_event` rows removed so
  *   graduation can occur again naturally. They consider the current soul
  *   a "false start." This script implements that reset.
@@ -25,7 +25,7 @@
  *   - SELECT count() FROM graduation_event GROUP ALL     -> 0
  *   - The archive memory row exists with category='soul_archive'.
  *   - hasSoul() returns false (verified by the same SELECT the function
- *     itself runs: SELECT id FROM soul:kongbrain).
+ *     itself runs: SELECT id FROM soul:laqrumbrain).
  *
  * Safety
  * ------
@@ -132,7 +132,7 @@ async function main() {
   const archiveText = [
     `SOUL ARCHIVE — ${RESET_REASON}`,
     ``,
-    `This is a snapshot of the prior soul:kongbrain singleton + all maturity_stage and`,
+    `This is a snapshot of the prior soul:laqrumbrain singleton + all maturity_stage and`,
     `graduation_event rows, captured before user-requested reset of the graduation state.`,
     `The next soul, when it eventually graduates, can recall this archive to understand`,
     `what the prior identity looked like.`,
@@ -236,8 +236,8 @@ async function main() {
   const maturityCountAfter = await tableCount(db, "maturity_stage");
   const graduationCountAfter = await tableCount(db, "graduation_event");
 
-  // hasSoul() runs: SELECT id FROM soul:kongbrain. Replicate exactly.
-  const hasSoulRows = await qFirst(db, `SELECT id FROM soul:kongbrain`);
+  // hasSoul() runs: SELECT id FROM soul:laqrumbrain. Replicate exactly.
+  const hasSoulRows = await qFirst(db, `SELECT id FROM soul:laqrumbrain`);
   const hasSoulNow = hasSoulRows.length > 0;
 
   // Confirm the archive row still exists.

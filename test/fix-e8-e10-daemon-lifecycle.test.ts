@@ -16,7 +16,7 @@
  *     holds the port — asymmetric with the UDS path, which unlinks a stale
  *     socket first. The fix probes the occupant via an unauthenticated
  *     meta.health call and throws a DISTINGUISHABLE TcpPortInUseError whose
- *     `kind` is "kongcode-daemon" (a sibling kongcode daemon already serving)
+ *     `kind` is "laqrumcode-daemon" (a sibling laqrumcode daemon already serving)
  *     vs "foreign" (an unrelated process squatting the port).
  *
  * These tests use REAL sockets (node:net) — no mocks of the transport. TCP with
@@ -251,10 +251,10 @@ function startForeignOccupant(): Promise<{ server: NetServer; port: number }> {
   });
 }
 
-/** A stand-in kongcode daemon: answers meta.health with a well-formed JSON-RPC
+/** A stand-in laqrumcode daemon: answers meta.health with a well-formed JSON-RPC
  *  result, exactly as DaemonServer's real meta.health does. The probe must
- *  classify this as "kongcode-daemon". */
-function startKongcodeHealthOccupant(): Promise<{ server: NetServer; port: number }> {
+ *  classify this as "laqrumcode-daemon". */
+function startLaqrumcodeHealthOccupant(): Promise<{ server: NetServer; port: number }> {
   const server = createServer((sock) => {
     let buf = "";
     sock.on("data", (c) => {
@@ -292,7 +292,7 @@ describe("E10: TCP EADDRINUSE produces a distinguishable error", () => {
     if (occupant) { await new Promise<void>((r) => occupant!.server.close(() => r())); occupant = null; }
   });
 
-  it("throws TcpPortInUseError kind=foreign when a non-kongcode process holds the port", async () => {
+  it("throws TcpPortInUseError kind=foreign when a non-laqrumcode process holds the port", async () => {
     occupant = await startForeignOccupant();
     second = new DaemonServer({
       socketPath: null,
@@ -310,8 +310,8 @@ describe("E10: TCP EADDRINUSE produces a distinguishable error", () => {
     second = null; // never bound — nothing to close
   });
 
-  it("throws TcpPortInUseError kind=kongcode-daemon when a kongcode daemon already serves the port", async () => {
-    occupant = await startKongcodeHealthOccupant();
+  it("throws TcpPortInUseError kind=laqrumcode-daemon when a laqrumcode daemon already serves the port", async () => {
+    occupant = await startLaqrumcodeHealthOccupant();
     second = new DaemonServer({
       socketPath: null,
       tcpPort: occupant.port,
@@ -322,16 +322,16 @@ describe("E10: TCP EADDRINUSE produces a distinguishable error", () => {
     let caught: unknown;
     try { await second.listen(); } catch (e) { caught = e; }
     expect(caught).toBeInstanceOf(TcpPortInUseError);
-    expect((caught as TcpPortInUseError).kind).toBe("kongcode-daemon");
+    expect((caught as TcpPortInUseError).kind).toBe("laqrumcode-daemon");
     expect((caught as TcpPortInUseError).port).toBe(occupant.port);
-    expect((caught as Error).message).toMatch(/already served by another kongcode daemon/);
+    expect((caught as Error).message).toMatch(/already served by another laqrumcode daemon/);
     second = null; // never bound
   });
 
-  it("the SAME collision against a REAL DaemonServer occupant is classified kongcode-daemon", async () => {
+  it("the SAME collision against a REAL DaemonServer occupant is classified laqrumcode-daemon", async () => {
     // End-to-end: a real DaemonServer (with its real meta.health) holds the
     // port; a second real DaemonServer attempting the same port must recognize
-    // it as a sibling kongcode daemon, not a foreign squatter.
+    // it as a sibling laqrumcode daemon, not a foreign squatter.
     const first = new DaemonServer({ socketPath: null, tcpPort: 0, log: SILENT_LOG });
     first.register("meta.health", async () => ({ ok: true, stats: first.getStats() }));
     await first.listen();
@@ -343,7 +343,7 @@ describe("E10: TCP EADDRINUSE produces a distinguishable error", () => {
     second = null; // never bound
 
     expect(caught).toBeInstanceOf(TcpPortInUseError);
-    expect((caught as TcpPortInUseError).kind).toBe("kongcode-daemon");
+    expect((caught as TcpPortInUseError).kind).toBe("laqrumcode-daemon");
 
     await first.close();
   });

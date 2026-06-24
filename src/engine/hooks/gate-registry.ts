@@ -2,9 +2,9 @@
  * Extensible gate registry.
  *
  * Gates are PreToolUse checks that can deny tool calls based on profile,
- * tool type, and context. Three built-in gates ship with kongcode
+ * tool type, and context. Three built-in gates ship with laqrumcode
  * (config-protection, edit-gate, bash-gate). Users add arbitrary gates
- * via ~/.kongcode/gates.json — no code changes required.
+ * via ~/.laqrumcode/gates.json — no code changes required.
  *
  * The registry runs all active gates in priority order (lowest first)
  * on each PreToolUse invocation. First deny wins.
@@ -35,7 +35,7 @@ export interface GateContext {
 }
 
 export interface GateDefinition {
-  /** Stable id — used with KONGCODE_DISABLED_HOOKS to selectively disable. */
+  /** Stable id — used with LAQRUMCODE_DISABLED_HOOKS to selectively disable. */
   id: string;
   description?: string;
   /** Which hook profiles activate this gate. */
@@ -44,7 +44,7 @@ export interface GateDefinition {
   tools?: ReadonlySet<string>;
   /** Lower runs first. Default 50. Built-ins use 10/20/30. */
   priority?: number;
-  /** Origin: "builtin" for shipped gates, "config" for ~/.kongcode/gates.json. */
+  /** Origin: "builtin" for shipped gates, "config" for ~/.laqrumcode/gates.json. */
   source?: "builtin" | "config";
   /** Return null to allow, HookResponse to deny. */
   check(ctx: GateContext): Promise<HookResponse | null>;
@@ -104,7 +104,7 @@ export function makeDenyResponse(gateId: string, message: string): HookResponse 
     hookSpecificOutput: {
       hookEventName: "PreToolUse",
       permissionDecision: "deny",
-      permissionDecisionReason: `${TIER0_PREFIX}kongcode/${gateId}: ${message}`,
+      permissionDecisionReason: `${TIER0_PREFIX}laqrumcode/${gateId}: ${message}`,
     },
   };
 }
@@ -128,7 +128,7 @@ function registerBuiltinGates(): void {
         "config-protection",
         `editing ${filePath} is blocked under the current hook profile. ` +
         `Lint/format configs should not be weakened to make code pass — fix the code instead. ` +
-        `Set KONGCODE_ALLOW_CONFIG_EDIT=1 to override (and restart the daemon).`,
+        `Set LAQRUMCODE_ALLOW_CONFIG_EDIT=1 to override (and restart the daemon).`,
       );
     },
   });
@@ -175,7 +175,7 @@ interface ConfigGateEntry {
 }
 
 function loadConfigGates(): void {
-  const configPath = join(homedir(), ".kongcode", "gates.json");
+  const configPath = join(homedir(), ".laqrumcode", "gates.json");
   if (!existsSync(configPath)) return;
 
   try {

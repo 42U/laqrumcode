@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * kongcode forget — selective, REVERSIBLE forget for privacy / decluttering.
+ * laqrumcode forget — selective, REVERSIBLE forget for privacy / decluttering.
  *
  * Honors the D4 founder rule ("Nothing should be getting deleted"): NOTHING is
  * DELETEd. Matching content is SOFT-DEACTIVATED so it stops surfacing in
@@ -26,12 +26,12 @@
  *
  * Env: SURREAL_URL/USER/PASS/NS/DB (same defaults as backup-jsonl.mjs).
  */
-import { Surreal } from "/home/zero/voidorigin/kongcode/node_modules/surrealdb/dist/surrealdb.mjs";
+import { Surreal } from "/home/zero/voidorigin/laqrumcode/node_modules/surrealdb/dist/surrealdb.mjs";
 
 const URL = process.env.SURREAL_URL || "ws://127.0.0.1:8000/rpc";
 const USER = process.env.SURREAL_USER || "root";
 const PASS = process.env.SURREAL_PASS || "root";
-const NS = process.env.SURREAL_NS || "kong";
+const NS = process.env.SURREAL_NS || "laqrum";
 const DB = process.env.SURREAL_DB || "memory";
 
 const argv = process.argv.slice(2);

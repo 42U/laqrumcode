@@ -1,5 +1,5 @@
 /**
- * Daemon-spawn helper used by kongcode-mcp on startup.
+ * Daemon-spawn helper used by laqrumcode-mcp on startup.
  *
  * Implements the "client starts daemon if missing" lifecycle:
  *   1. Probe socket → if alive, return URL.
@@ -27,7 +27,7 @@ export interface DaemonSpawnOpts {
 }
 /** Where the daemon is (or will be) reachable. Mirrors the daemon's own
  *  transport selection (daemon/index.ts): Unix-domain socket on linux/macOS,
- *  TCP loopback on Windows or when KONGCODE_DAEMON_TRANSPORT=tcp. Exactly one
+ *  TCP loopback on Windows or when LAQRUMCODE_DAEMON_TRANSPORT=tcp. Exactly one
  *  of {socketPath} / {tcpHost,tcpPort} is the live transport, but socketPath
  *  is always populated for diagnostics/log continuity. */
 export interface DaemonEndpoint {
@@ -41,7 +41,7 @@ export interface DaemonEndpoint {
 /** Decide the client transport, symmetric with the daemon side
  *  (daemon/index.ts: `useUds = TRANSPORT !== "tcp" && platform !== "win32"`).
  *  Windows has no Unix sockets (the daemon binds TCP-only there), and the
- *  KONGCODE_DAEMON_TRANSPORT=tcp opt-in forces TCP on every platform. Kept
+ *  LAQRUMCODE_DAEMON_TRANSPORT=tcp opt-in forces TCP on every platform. Kept
  *  as a pure, testable function so the parity with the daemon is verifiable
  *  without spawning anything. */
 export declare function resolveTransport(env?: NodeJS.ProcessEnv, plat?: NodeJS.Platform): "uds" | "tcp";
@@ -67,7 +67,7 @@ export declare function osUserDiscriminator(): string | null;
  *  the property the client↔daemon parity depends on. Returns a non-negative int. */
 export declare function stableHash32(s: string): number;
 /** The TCP port the daemon binds. Must match daemon/index.ts exactly:
- *  - KONGCODE_DAEMON_PORT if set and valid → used verbatim, NO per-user offset
+ *  - LAQRUMCODE_DAEMON_PORT if set and valid → used verbatim, NO per-user offset
  *    (explicit operator intent; mirrors pickPort's env-override-wins rule).
  *  - else PORT_OFFSET_BASE + (hash(osUserDiscriminator) % PORT_OFFSET_RANGE) — the [28765,32764] window (T3).
  *
@@ -98,6 +98,6 @@ export declare function resolveDaemonTokenPath(home?: string): string;
 export declare function readDaemonToken(home?: string): string | null;
 /** Get a daemon endpoint — either the existing one if alive, or spawn a new
  *  one. Transport-aware: returns a TCP endpoint {tcpHost,tcpPort} on Windows
- *  or under KONGCODE_DAEMON_TRANSPORT=tcp (matching the daemon's own bind
+ *  or under LAQRUMCODE_DAEMON_TRANSPORT=tcp (matching the daemon's own bind
  *  decision), else a Unix-socket endpoint. */
 export declare function ensureDaemon(opts?: DaemonSpawnOpts): Promise<DaemonEndpoint>;

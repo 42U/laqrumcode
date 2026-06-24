@@ -5,9 +5,9 @@
  * On a degraded boot (store down) the guard is NOT latched: a deduped 5-min
  * self-retry plus any later session-start re-attempts until the store is up.
  *
- * Restores the five jobs that used to live in KongBrain's
+ * Restores the five jobs that used to live in LaqrumBrain's
  * ContextEngine.bootstrap(), which the OpenClaw framework called on session
- * lifecycle. KongCode has no such framework call, so these had been silently
+ * lifecycle. LaqrumCode has no such framework call, so these had been silently
  * not running since the port. See GitHub issue history around 2026-04-21 —
  * and the 2026-06-10 recurrence: on the daemon-split architecture the only
  * wired callers were the legacy monolith and the session-start hook, so with
@@ -36,10 +36,10 @@ import { log } from "./log.js";
 /**
  * One-time forward-migration of ACAN weights.
  *
- * Pre-config-threading default for ACAN weights was ~/.kongbrain/acan_weights.json
- * (from when the code lived in the kongbrain plugin). Now we thread
+ * Pre-config-threading default for ACAN weights was ~/.laqrumbrain/acan_weights.json
+ * (from when the code lived in the laqrumbrain plugin). Now we thread
  * state.config.paths.cacheDir into checkACANReadiness, so weights live under
- * ~/.kongcode/cache/. Existing user installs have 2.7MB of trained weights
+ * ~/.laqrumcode/cache/. Existing user installs have 2.7MB of trained weights
  * at the legacy path that would otherwise be orphaned.
  *
  * If the legacy file exists AND the new cacheDir file does NOT, copy the
@@ -50,7 +50,7 @@ import { log } from "./log.js";
  */
 function migrateLegacyACANWeights(cacheDir: string): void {
   try {
-    const legacyPath = join(homedir(), ".kongbrain", "acan_weights.json");
+    const legacyPath = join(homedir(), ".laqrumbrain", "acan_weights.json");
     const newPath = join(cacheDir, "acan_weights.json");
     if (!existsSync(legacyPath)) return; // nothing to migrate
     if (existsSync(newPath)) return; // already migrated, idempotent skip
@@ -160,13 +160,13 @@ export function runBootstrapMaintenance(state: GlobalPluginState): void {
   bootstrapMaintenanceRan = true;
 
   const { store, embeddings, config } = state;
-  const deferMs = Number(process.env.KONGCODE_MAINTENANCE_DEFER_MS) || 30_000;
+  const deferMs = Number(process.env.LAQRUMCODE_MAINTENANCE_DEFER_MS) || 30_000;
 
-  // One-time forward-migration of ACAN weights from ~/.kongbrain/ to cacheDir.
+  // One-time forward-migration of ACAN weights from ~/.laqrumbrain/ to cacheDir.
   // Cheap (one stat + zero or one copy), idempotent, runs early so the deferred
   // checkACANReadiness call below picks up the migrated weights.
   // Guarded against partial test mocks that omit config.paths.
-  const cacheDir = config.paths?.cacheDir ?? join(homedir(), ".kongcode", "cache");
+  const cacheDir = config.paths?.cacheDir ?? join(homedir(), ".laqrumcode", "cache");
   migrateLegacyACANWeights(cacheDir);
 
   // Group 1: cheap DB queries — safe to run immediately in parallel.
@@ -372,7 +372,7 @@ export async function runEmbeddingBackfills(state: GlobalPluginState): Promise<v
  *
  *  CADENCE DECISION (run EVERY cycle, not throttled): the sweep scans the 26
  *  relation tables with `in.id IS NONE` and is bounded by the per-install graph
- *  size — kongcode is one daemon + local SurrealDB PER HOST, so a real install's
+ *  size — laqrumcode is one daemon + local SurrealDB PER HOST, so a real install's
  *  graph is modest (the dev graph's 182k edges is an outlier from heavy testing).
  *  Crucially it is normally a CHEAP NO-OP going forward: new orphans should be
  *  ~0 because the only sanctioned content delete (gc.ts gcHardDelete keystone)
@@ -522,7 +522,7 @@ async function backfillSessionTurnCounts(state: GlobalPluginState): Promise<void
 }
 
 /** Seed the `skill` table from the repo-committed JSON snapshot at
- *  `.claude-plugin/skills-seed.json`. This is how fresh kongcode installs
+ *  `.claude-plugin/skills-seed.json`. This is how fresh laqrumcode installs
  *  get the curated skills since the SKILL.md files on disk are 5-line
  *  stubs (v0.7.84 moved the skill bodies into the DB as the founder's
  *  no-md-proliferation directive).

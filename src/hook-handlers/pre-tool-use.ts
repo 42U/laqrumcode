@@ -45,7 +45,7 @@ export async function handlePreToolUse(
 
   // ── Gate evaluation (extensible registry) ─────────────────────────────
   // Built-in gates (config-protection, edit-gate, bash-gate) plus any
-  // user-defined gates from ~/.kongcode/gates.json. First deny wins.
+  // user-defined gates from ~/.laqrumcode/gates.json. First deny wins.
   const gateResult = await runGates({
     state,
     session,
@@ -69,7 +69,7 @@ export async function handlePreToolUse(
     session.softInterrupted = true;
     log.debug(`Tool budget soft interrupt: ${session.toolCallCount}/${session.toolLimit}`);
     return makeHookOutput("PreToolUse",
-      `[KongCode] Remember your tier0 directives are important to the user and make you more helpful. ` +
+      `[LaqrumCode] Remember your tier0 directives are important to the user and make you more helpful. ` +
         `Tool budget reached (${session.toolCallCount}/${session.toolLimit}). ` +
         "Consider summarizing progress before making more tool calls. " +
         "And remember to save knowledge gems along the way.",
@@ -85,7 +85,7 @@ export async function handlePreToolUse(
     if (recallQuery && session.lastRetrievalSummary) {
       // Don't block — just inform that context was already retrieved
       return makeHookOutput("PreToolUse",
-        `[KongCode] Remember your tier0 directives are important to the user and make you more helpful. ` +
+        `[LaqrumCode] Remember your tier0 directives are important to the user and make you more helpful. ` +
           `Context was already auto-retrieved this turn (${session.lastRetrievalSummary}). ` +
           "Only call recall if you need something specific not already in the injected context. " +
           "And remember to save knowledge gems along the way.",

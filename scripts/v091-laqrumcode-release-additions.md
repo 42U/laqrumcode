@@ -10,11 +10,11 @@ RUN_ID=$(gh run list --limit 1 --json databaseId --jq '.[0].databaseId')
 
 CI green is "shipped to GitHub". It is NOT "the running daemon is fixed". Required after `gh run view --json conclusion` returns `"success"`:
 
-1. `cat ~/.kongcode/cache/daemon.pid` — confirm `daemonVersion` equals the version just shipped. If it does not, the running daemon is still on old code.
+1. `cat ~/.laqrumcode/cache/daemon.pid` — confirm `daemonVersion` equals the version just shipped. If it does not, the running daemon is still on old code.
 2. Kill the running daemon: `kill <pid>`. Poll until `ps -p <pid>` returns no row.
 3. Trigger respawn via daemon-socket handshake (the next MCP call from any attached mcp-client triggers `ensureDaemon` to spawn a fresh daemon from updated `dist/`). Confirm the new `daemon.pid` `daemonVersion` matches the release.
 4. Wait 2 minutes wall clock for natural hook traffic.
-5. `tail -n +<baseline+1> ~/.kongcode/cache/daemon.log` and grep for the EXACT bug signature the release was supposed to fix. The count MUST be 0 in the post-respawn window.
+5. `tail -n +<baseline+1> ~/.laqrumcode/cache/daemon.log` and grep for the EXACT bug signature the release was supposed to fix. The count MUST be 0 in the post-respawn window.
 
 Only after step 5 returns 0 may you say "shipped + verified". CI green alone is "shipped but the running daemon may still be on old code".
 

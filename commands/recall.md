@@ -1,10 +1,10 @@
 ---
 description: Search past knowledge in the graph memory
 argument-hint: "[query]"
-allowed-tools: ["mcp__plugin_kongcode_kongcode__recall"]
+allowed-tools: ["mcp__plugin_laqrumcode_laqrumcode__recall"]
 ---
 
-Search the KongCode memory graph for past knowledge matching the user's query.
+Search the LaqrumCode memory graph for past knowledge matching the user's query.
 
 If $ARGUMENTS is provided, use it as the search query. If empty, ask the user what they want to search for.
 

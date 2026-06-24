@@ -54,10 +54,10 @@ export function rotateLogIfOversized(path: string, capBytes: number = LOG_ROTATE
   }
 }
 
-const currentLevel: Level = (process.env.KONGCODE_LOG_LEVEL as Level) ?? "warn";
+const currentLevel: Level = (process.env.LAQRUMCODE_LOG_LEVEL as Level) ?? "warn";
 
 if (currentLevel === "debug") {
-  console.warn("[agent-memory] KONGCODE_LOG_LEVEL=debug — logs may contain user prompts and query data. Do not use in shared environments.");
+  console.warn("[agent-memory] LAQRUMCODE_LOG_LEVEL=debug — logs may contain user prompts and query data. Do not use in shared environments.");
 }
 
 /**

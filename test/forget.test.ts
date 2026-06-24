@@ -8,7 +8,7 @@
  *
  * Nothing is ever DELETEd (D4 founder rule). Requires a live SurrealDB; the
  * beforeAll probe races a 10s timeout so CI's no-DB env skips cleanly.
- * ns=kong_test, isolated from production.
+ * ns=laqrum_test, isolated from production.
  */
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { Surreal } from "surrealdb";
@@ -21,7 +21,7 @@ const execFileP = promisify(execFile);
 const URL = process.env.SURREAL_URL ?? "ws://127.0.0.1:8000/rpc";
 const USER = process.env.SURREAL_USER ?? "root";
 const PASS = process.env.SURREAL_PASS ?? "root";
-const TEST_NS = "kong_test";
+const TEST_NS = "laqrum_test";
 const TEST_DB = `forget_test_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const FORGET = join(REPO, "scripts", "forget.mjs");
@@ -85,7 +85,7 @@ function itDb(name: string, fn: () => Promise<void>) {
   it(name, async () => { if (!db) return; await fn(); }, 30_000);
 }
 
-describe("forget (live, kong_test) — reversible soft-deactivate", () => {
+describe("forget (live, laqrum_test) — reversible soft-deactivate", () => {
   itDb("dry-run changes nothing", async () => {
     await runForget(["--query", "apikey"]); // no --commit
     expect(await scalar<string>(`SELECT VALUE status FROM memory:f_secret`)).toBe("active");

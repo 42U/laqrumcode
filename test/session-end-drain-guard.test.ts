@@ -7,7 +7,7 @@
  *
  * The drain path is distinguished from the normal path by an observable: it
  * logs "(drain session — …)" via log.info. That lets the strict-boolean test
- * genuinely pin `payload.kongcode_drain_session === true` (a truthy STRING
+ * genuinely pin `payload.laqrumcode_drain_session === true` (a truthy STRING
  * must not take the drain path). auto-drain + log are vi.mock'd; state/store
  * are hand-rolled fakes. No DB — CI-safe.
  */
@@ -55,7 +55,7 @@ describe("handleSessionEnd — drain self-trigger guard", () => {
     const { state, claimSessionForCleanup, removeSession } = makeFakes();
     const res = await handleSessionEnd(
       state as never,
-      { session_id: "cc-drain-uuid", kongcode_drain_session: true },
+      { session_id: "cc-drain-uuid", laqrumcode_drain_session: true },
     );
     expect(res).toEqual({});
     // Observable proof the DRAIN path ran.
@@ -74,7 +74,7 @@ describe("handleSessionEnd — drain self-trigger guard", () => {
     const { state, claimSessionForCleanup, removeSession } = makeFakes("");
     const res = await handleSessionEnd(
       state as never,
-      { session_id: "cc-user-uuid", kongcode_drain_session: "true" },
+      { session_id: "cc-user-uuid", laqrumcode_drain_session: "true" },
     );
     expect(res).toEqual({});
     expect(drainLogLines().length).toBe(0); // drain path did NOT run

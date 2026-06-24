@@ -5,7 +5,7 @@
  *
  * Round-7's T3 raised the IPC window to [28765, 32764]; the UI default was
  * 28900 + uid%10000, which overlapped it, so ~1/4000 TCP-transport users
- * (always Windows; or POSIX with KONGCODE_DAEMON_TRANSPORT=tcp) got a working
+ * (always Windows; or POSIX with LAQRUMCODE_DAEMON_TRANSPORT=tcp) got a working
  * daemon whose web UI silently failed to bind (EADDRINUSE — non-fatal, but the
  * UI never came up). U1 moved UI_PORT_BASE to 33000, just above the IPC ceiling.
  *
@@ -36,13 +36,13 @@ describe("U1: UI port window is disjoint from the daemon IPC port window", () =>
   });
 
   it("uiPort() for the live uid does not fall inside the IPC window", () => {
-    const saved = process.env.KONGCODE_UI_PORT;
-    delete process.env.KONGCODE_UI_PORT;
+    const saved = process.env.LAQRUMCODE_UI_PORT;
+    delete process.env.LAQRUMCODE_UI_PORT;
     try {
       const p = uiPort();
       expect(p < IPC_LO || p >= IPC_HI).toBe(true);
     } finally {
-      if (saved !== undefined) process.env.KONGCODE_UI_PORT = saved;
+      if (saved !== undefined) process.env.LAQRUMCODE_UI_PORT = saved;
     }
   });
 
@@ -53,14 +53,14 @@ describe("U1: UI port window is disjoint from the daemon IPC port window", () =>
     }
   });
 
-  it("an explicit KONGCODE_UI_PORT override is honored verbatim", () => {
-    const saved = process.env.KONGCODE_UI_PORT;
-    process.env.KONGCODE_UI_PORT = "29999";
+  it("an explicit LAQRUMCODE_UI_PORT override is honored verbatim", () => {
+    const saved = process.env.LAQRUMCODE_UI_PORT;
+    process.env.LAQRUMCODE_UI_PORT = "29999";
     try {
       expect(uiPort()).toBe(29999);
     } finally {
-      if (saved !== undefined) process.env.KONGCODE_UI_PORT = saved;
-      else delete process.env.KONGCODE_UI_PORT;
+      if (saved !== undefined) process.env.LAQRUMCODE_UI_PORT = saved;
+      else delete process.env.LAQRUMCODE_UI_PORT;
     }
   });
 });

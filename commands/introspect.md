@@ -1,10 +1,10 @@
 ---
-description: Run diagnostics on the KongCode memory database
+description: Run diagnostics on the LaqrumCode memory database
 argument-hint: "[status|count|verify|query]"
-allowed-tools: ["mcp__plugin_kongcode_kongcode__introspect"]
+allowed-tools: ["mcp__plugin_laqrumcode_laqrumcode__introspect"]
 ---
 
-Run diagnostics on the KongCode memory database.
+Run diagnostics on the LaqrumCode memory database.
 
 Parse $ARGUMENTS for the action:
 - `status` (default if empty) — health overview with table counts and graduation progress

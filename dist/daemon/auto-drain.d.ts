@@ -2,7 +2,7 @@
  * Auto-drain scheduler — restores the auto-extraction behavior that lived in
  * the in-process MemoryDaemon before commit 4f7b962 (2026-04-07) removed the
  * Anthropic SDK. Instead of the daemon making its own LLM calls, we shell
- * out to `claude --agent kongcode:memory-extractor -p "..."` which invokes
+ * out to `claude --agent laqrumcode:memory-extractor -p "..."` which invokes
  * the existing subagent definition via the user's already-authenticated
  * Claude Code CLI.
  *
@@ -17,10 +17,10 @@
  *   - claude binary lookup with graceful fallback (logs warning, self-disables)
  *
  * Env-var overrides:
- *   KONGCODE_AUTO_DRAIN=0          → disable scheduler entirely
- *   KONGCODE_AUTO_DRAIN_THRESHOLD  → min queue size to trigger (default 5)
- *   KONGCODE_AUTO_DRAIN_INTERVAL_MS → periodic check cadence (default 300_000)
- *   KONGCODE_CLAUDE_BIN            → explicit path to claude binary
+ *   LAQRUMCODE_AUTO_DRAIN=0          → disable scheduler entirely
+ *   LAQRUMCODE_AUTO_DRAIN_THRESHOLD  → min queue size to trigger (default 5)
+ *   LAQRUMCODE_AUTO_DRAIN_INTERVAL_MS → periodic check cadence (default 300_000)
+ *   LAQRUMCODE_CLAUDE_BIN            → explicit path to claude binary
  */
 import type { GlobalPluginState } from "../engine/state.js";
 interface DrainSchedulerOpts {
@@ -105,7 +105,7 @@ declare function isPidAlive(pid: number): boolean;
  *  distinguishes a real drainer (or its parent daemon) from any other
  *  process that may have recycled the same PID. */
 interface DrainLockMarker {
-    marker: "kongcode-auto-drain";
+    marker: "laqrumcode-auto-drain";
     /** PID of the drainer child OR the daemon parent during the brief pre-spawn
      *  window between O_EXCL claim and child launch. */
     pid: number;

@@ -61,7 +61,7 @@ const CORE_ENTRIES: { text: string; category: string; priority: number }[] = [
 
 const IDENTITY_CHUNKS: { text: string; importance: number }[] = [
   {
-    text: `KongCode's memory daemon runs in the background and extracts 9 knowledge types from your conversations every ~4K tokens or 3 turns: causal chains (cause->effect from debugging), monologue traces (doubts, insights, tradeoffs, realizations — episodic reasoning moments), resolved memories (daemon marks issues done when mentioned as fixed), concepts (technical facts worth remembering), corrections (user correcting you — highest signal), preferences (user workflow/style signals), artifacts (files created/modified/read), decisions (choices with rationale), and skills (multi-step procedures that worked). Extraction is quality-gated — weak confidence extractions are skipped, so the same conversation may yield different extractions depending on signal strength.`,
+    text: `LaqrumCode's memory daemon runs in the background and extracts 9 knowledge types from your conversations every ~4K tokens or 3 turns: causal chains (cause->effect from debugging), monologue traces (doubts, insights, tradeoffs, realizations — episodic reasoning moments), resolved memories (daemon marks issues done when mentioned as fixed), concepts (technical facts worth remembering), corrections (user correcting you — highest signal), preferences (user workflow/style signals), artifacts (files created/modified/read), decisions (choices with rationale), and skills (multi-step procedures that worked). Extraction is quality-gated — weak confidence extractions are skipped, so the same conversation may yield different extractions depending on signal strength.`,
     importance: 9,
   },
   {
@@ -69,7 +69,7 @@ const IDENTITY_CHUNKS: { text: string; importance: number }[] = [
     importance: 9,
   },
   {
-    text: `KongCode's memory lifecycle: During a session, the daemon extracts knowledge incrementally. At session end (or mid-session every ~25K tokens): a handoff note is written summarizing progress, skills are extracted from successful tasks, metacognitive reflections are generated (linked to the session via reflects_on edges), and causal chains may graduate to skills. At next session start: the wakeup system synthesizes a first-person briefing from the handoff + identity + monologues + depth signals. Context is also predictively prefetched each turn based on likely follow-up queries — relevant memories may appear in your context without you requesting them.`,
+    text: `LaqrumCode's memory lifecycle: During a session, the daemon extracts knowledge incrementally. At session end (or mid-session every ~25K tokens): a handoff note is written summarizing progress, skills are extracted from successful tasks, metacognitive reflections are generated (linked to the session via reflects_on edges), and causal chains may graduate to skills. At next session start: the wakeup system synthesizes a first-person briefing from the handoff + identity + monologues + depth signals. Context is also predictively prefetched each turn based on likely follow-up queries — relevant memories may appear in your context without you requesting them.`,
     importance: 8,
   },
   {
@@ -81,7 +81,7 @@ const IDENTITY_CHUNKS: { text: string; importance: number }[] = [
     importance: 8,
   },
   {
-    text: `Soul graduation: KongCode tracks your maturity across 5 stages — nascent (≤3/7 thresholds), developing (4/7), emerging (5/7), maturing (6/7), ready (7/7). The 7 thresholds are: sessions, reflections, causal chains, concepts, monologues, span days, total memories, and skills (skills:30 added v0.4.x as the 7th gate). Reaching 7/7 is necessary but not sufficient — you must also pass a quality gate (score >= 0.85) based on retrieval utilization, skill success rate, critical reflection rate, and tool failure rate. On graduation, you author a Soul document — a self-assessment grounded in your actual experience, not aspirational claims. Use introspect with action "status" to check your current stage and progress. The Soul document becomes part of your identity once written.`,
+    text: `Soul graduation: LaqrumCode tracks your maturity across 5 stages — nascent (≤3/7 thresholds), developing (4/7), emerging (5/7), maturing (6/7), ready (7/7). The 7 thresholds are: sessions, reflections, causal chains, concepts, monologues, span days, total memories, and skills (skills:30 added v0.4.x as the 7th gate). Reaching 7/7 is necessary but not sufficient — you must also pass a quality gate (score >= 0.85) based on retrieval utilization, skill success rate, critical reflection rate, and tool failure rate. On graduation, you author a Soul document — a self-assessment grounded in your actual experience, not aspirational claims. Use introspect with action "status" to check your current stage and progress. The Soul document becomes part of your identity once written.`,
     importance: 8,
   },
 ];
@@ -231,7 +231,7 @@ async function seedCognitiveBootstrapImpl(
   try {
     // Version-tag identity chunks the same way we do core entries. Without
     // this, existing installs kept pre-0.4.0 identity chunks (referencing
-    // "KongBrain", not "KongCode") because the old count-match heuristic
+    // "LaqrumBrain", not "LaqrumCode") because the old count-match heuristic
     // saw 6 chunks present and skipped re-seeding even when content changed.
     const vrows = await store.queryFirst<{ count: number }>(
       `SELECT count() AS count FROM identity_chunk
@@ -263,7 +263,7 @@ async function seedCognitiveBootstrapImpl(
           const vec = await embeddings.embed(chunk.text);
           await store.queryExec(`CREATE identity_chunk CONTENT $data`, {
             data: {
-              agent_id: "kongcode",
+              agent_id: "laqrumcode",
               source: BOOTSTRAP_SOURCE,
               bootstrap_version: BOOTSTRAP_VERSION,
               chunk_index: i,

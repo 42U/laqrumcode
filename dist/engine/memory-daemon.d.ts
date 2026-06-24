@@ -6,7 +6,7 @@
  * turns: causal chains, monologue traces, resolved memories, concepts,
  * corrections, preferences, artifacts, decisions, skills.
  *
- * Ported from kongbrain — takes SurrealStore/EmbeddingService as params.
+ * Ported from laqrumbrain — takes SurrealStore/EmbeddingService as params.
  */
 import type { TurnData, PriorExtractions } from "./daemon-types.js";
 import type { SurrealStore } from "./surreal.js";

@@ -1,10 +1,10 @@
 /**
- * KongCode MCP client — thin per-Claude-Code-session process.
+ * LaqrumCode MCP client — thin per-Claude-Code-session process.
  *
  * Replaces the legacy src/mcp-server.ts as the binary that .mcp.json invokes.
  * Owns only:
  *   - stdio transport with Claude Code (MCP server end)
- *   - JSON-RPC client to kongcode-daemon (heavy state lives there)
+ *   - JSON-RPC client to laqrumcode-daemon (heavy state lives there)
  *
  * On startup:
  *   1. ensureDaemon() — connects to existing daemon or spawns one
@@ -45,9 +45,9 @@ let ipc: IpcClient | null = null;
  *  c3fb591 documented). The cache clears on success or failure. */
 let ipcInFlight: Promise<IpcClient> | null = null;
 /** Track our session ID so every IPC call carries it — daemon's session map
- *  is keyed on this. KONGCODE_SESSION_ID env var lets users pin a stable id;
+ *  is keyed on this. LAQRUMCODE_SESSION_ID env var lets users pin a stable id;
  *  default uses pid for per-process uniqueness. */
-const SESSION_ID = process.env.KONGCODE_SESSION_ID ?? `mcp-client-${process.pid}`;
+const SESSION_ID = process.env.LAQRUMCODE_SESSION_ID ?? `mcp-client-${process.pid}`;
 
 /** Decide what to do given a version-mismatch outcome from meta.requestSupersede.
  *  Pure function so the policy is testable without real socket setup. */
@@ -81,7 +81,7 @@ async function connectAndHandshake(): Promise<IpcClient> {
   const { socketPath, tcpHost, tcpPort, spawned } = await ensureDaemon({
     log: { info: log.info, warn: log.warn, error: log.error },
   });
-  // In TCP mode (Windows / KONGCODE_DAEMON_TRANSPORT=tcp) ensureDaemon returns
+  // In TCP mode (Windows / LAQRUMCODE_DAEMON_TRANSPORT=tcp) ensureDaemon returns
   // {tcpHost,tcpPort}; pass socketPath:null so IpcClient connects over TCP.
   // Otherwise connect over the Unix socket.
   const where = tcpPort !== undefined ? `TCP ${tcpHost}:${tcpPort}` : socketPath;
@@ -241,7 +241,7 @@ async function getOrConnectIpc(): Promise<IpcClient> {
  *  a large gem batch takes minutes, and the 30s default timed the CLIENT out
  *  while the daemon kept writing (founder report: "big gem batches fail";
  *  the writes are idempotency-sealed so retries don't duplicate, but the
- *  call still failed user-visibly). Explicit KONGCODE_IPC_TIMEOUT_MS still
+ *  call still failed user-visibly). Explicit LAQRUMCODE_IPC_TIMEOUT_MS still
  *  governs everything not listed here. */
 const TOOL_TIMEOUT_MS: Record<string, number> = {
   create_knowledge_gems: 300_000,
@@ -291,12 +291,12 @@ async function handleToolCall(
         return {
           content: [{
             type: "text",
-            text: `kongcode daemon unavailable after retry: ${(retryErr as Error).message}`,
+            text: `laqrumcode daemon unavailable after retry: ${(retryErr as Error).message}`,
           }],
         };
       }
     }
-    return { content: [{ type: "text", text: `kongcode error: ${err.message}` }] };
+    return { content: [{ type: "text", text: `laqrumcode error: ${err.message}` }] };
   }
 }
 
@@ -310,7 +310,7 @@ async function shutdown(): Promise<void> {
 
 async function main(): Promise<void> {
   const server = new Server(
-    { name: "kongcode", version: CLIENT_VERSION },
+    { name: "laqrumcode", version: CLIENT_VERSION },
     { capabilities: { tools: {} } },
   );
 
@@ -349,7 +349,7 @@ async function main(): Promise<void> {
   // ensure runs in the background after handshake completes.
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  log.info(`[mcp-client] kongcode MCP client running on stdio (v${CLIENT_VERSION}, session=${SESSION_ID})`);
+  log.info(`[mcp-client] laqrumcode MCP client running on stdio (v${CLIENT_VERSION}, session=${SESSION_ID})`);
 
   // Eagerly trigger daemon spawn in the background. Required so hook-proxy.cjs
   // can find the daemon's per-PID socket when SessionStart/UserPromptSubmit/

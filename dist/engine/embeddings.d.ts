@@ -86,7 +86,7 @@ export declare class EmbeddingService {
      *  traffic / a wedged embedder grow the FIFO without limit — each entry
      *  pins its text + two closures, so the queue is the leak surface on a
      *  long-lived daemon. Past this depth embed() fast-fails with a retryable
-     *  error instead of enqueueing. Override via KONGCODE_EMBED_QUEUE_MAX. */
+     *  error instead of enqueueing. Override via LAQRUMCODE_EMBED_QUEUE_MAX. */
     private readonly maxQueueDepth;
     embed(text: string): Promise<number[]>;
     private drainEmbedQueue;

@@ -22,7 +22,7 @@ permissions:
 
 jobs:
   build:
-    name: Build kongcode-${{ matrix.os_name }}-${{ matrix.arch }}
+    name: Build laqrumcode-${{ matrix.os_name }}-${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: ${{ matrix.timeout_minutes || 15 }}
     continue-on-error: ${{ matrix.allow_failure || false }}
@@ -79,7 +79,7 @@ jobs:
             local bundle_script="$1"   # npm run target name
             local config_file="$2"     # sea-config-XXX.json
             local blob_file="$3"       # dist/XXX-sea-prep.blob
-            local bin_prefix="$4"      # kongcode-daemon | kongcode-mcp
+            local bin_prefix="$4"      # laqrumcode-daemon | laqrumcode-mcp
             local bin_name="${bin_prefix}-${{ matrix.os_name }}-${{ matrix.arch }}${{ matrix.ext }}"
             echo "::group::Build $bin_name"
             npm run "$bundle_script"
@@ -97,22 +97,22 @@ jobs:
             echo "::endgroup::"
           }
 
-          build_sea "bundle:daemon" "sea-daemon-config.json" "dist/daemon-sea-prep.blob" "kongcode-daemon"
-          build_sea "bundle:mcp"    "sea-mcp-config.json"    "dist/mcp-sea-prep.blob"    "kongcode-mcp"
+          build_sea "bundle:daemon" "sea-daemon-config.json" "dist/daemon-sea-prep.blob" "laqrumcode-daemon"
+          build_sea "bundle:mcp"    "sea-mcp-config.json"    "dist/mcp-sea-prep.blob"    "laqrumcode-mcp"
 
       - name: Upload daemon artifact
         uses: actions/upload-artifact@v4
         with:
-          name: kongcode-daemon-${{ matrix.os_name }}-${{ matrix.arch }}
-          path: dist/bin/kongcode-daemon-${{ matrix.os_name }}-${{ matrix.arch }}${{ matrix.ext }}
+          name: laqrumcode-daemon-${{ matrix.os_name }}-${{ matrix.arch }}
+          path: dist/bin/laqrumcode-daemon-${{ matrix.os_name }}-${{ matrix.arch }}${{ matrix.ext }}
           if-no-files-found: error
           retention-days: 7
 
       - name: Upload mcp-client artifact
         uses: actions/upload-artifact@v4
         with:
-          name: kongcode-mcp-${{ matrix.os_name }}-${{ matrix.arch }}
-          path: dist/bin/kongcode-mcp-${{ matrix.os_name }}-${{ matrix.arch }}${{ matrix.ext }}
+          name: laqrumcode-mcp-${{ matrix.os_name }}-${{ matrix.arch }}
+          path: dist/bin/laqrumcode-mcp-${{ matrix.os_name }}-${{ matrix.arch }}${{ matrix.ext }}
           if-no-files-found: error
           retention-days: 7
 
@@ -131,7 +131,7 @@ jobs:
       - name: Flatten artifact tree
         run: |
           mkdir -p release-bin
-          find artifacts -type f -name "kongcode-*" -exec cp {} release-bin/ \;
+          find artifacts -type f -name "laqrumcode-*" -exec cp {} release-bin/ \;
           ls -la release-bin/
 
       - name: Extract CHANGELOG notes

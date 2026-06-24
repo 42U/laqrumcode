@@ -33,10 +33,10 @@ import { handlePostToolUse } from "../src/hook-handlers/post-tool-use.js";
 import { GlobalPluginState, SessionState } from "../src/engine/state.js";
 
 beforeEach(() => {
-  delete process.env.KONGCODE_HOOK_PROFILE;
-  delete process.env.KONGCODE_DISABLED_HOOKS;
-  delete process.env.KONGCODE_ALLOW_CONFIG_EDIT;
-  delete process.env.KONGCODE_GATE_TIMEOUT_MS;
+  delete process.env.LAQRUMCODE_HOOK_PROFILE;
+  delete process.env.LAQRUMCODE_DISABLED_HOOKS;
+  delete process.env.LAQRUMCODE_ALLOW_CONFIG_EDIT;
+  delete process.env.LAQRUMCODE_GATE_TIMEOUT_MS;
   _resetProfileCacheForTests();
   _resetConfigProtectionCacheForTests();
 });
@@ -47,47 +47,47 @@ describe("hook profile dispatcher", () => {
   });
 
   it("accepts minimal | standard | strict", () => {
-    process.env.KONGCODE_HOOK_PROFILE = "minimal";
+    process.env.LAQRUMCODE_HOOK_PROFILE = "minimal";
     _resetProfileCacheForTests();
     expect(getActiveProfile()).toBe("minimal");
 
-    process.env.KONGCODE_HOOK_PROFILE = "strict";
+    process.env.LAQRUMCODE_HOOK_PROFILE = "strict";
     _resetProfileCacheForTests();
     expect(getActiveProfile()).toBe("strict");
   });
 
   it("ignores garbage profile values and falls back to standard", () => {
-    process.env.KONGCODE_HOOK_PROFILE = "paranoid";
+    process.env.LAQRUMCODE_HOOK_PROFILE = "paranoid";
     _resetProfileCacheForTests();
     expect(getActiveProfile()).toBe("standard");
   });
 
   it("shouldHookRun matches profile against required list", () => {
-    process.env.KONGCODE_HOOK_PROFILE = "standard";
+    process.env.LAQRUMCODE_HOOK_PROFILE = "standard";
     _resetProfileCacheForTests();
     expect(shouldHookRun("edit-gate", ["standard", "strict"])).toBe(true);
     expect(shouldHookRun("bash-gate", ["strict"])).toBe(false);
 
-    process.env.KONGCODE_HOOK_PROFILE = "strict";
+    process.env.LAQRUMCODE_HOOK_PROFILE = "strict";
     _resetProfileCacheForTests();
     expect(shouldHookRun("bash-gate", ["strict"])).toBe(true);
 
-    process.env.KONGCODE_HOOK_PROFILE = "minimal";
+    process.env.LAQRUMCODE_HOOK_PROFILE = "minimal";
     _resetProfileCacheForTests();
     expect(shouldHookRun("edit-gate", ["standard", "strict"])).toBe(false);
     expect(shouldHookRun("config-protection", ["standard", "strict"])).toBe(false);
   });
 
-  it("KONGCODE_DISABLED_HOOKS suppresses a specific hook id", () => {
-    process.env.KONGCODE_HOOK_PROFILE = "standard";
-    process.env.KONGCODE_DISABLED_HOOKS = "edit-gate";
+  it("LAQRUMCODE_DISABLED_HOOKS suppresses a specific hook id", () => {
+    process.env.LAQRUMCODE_HOOK_PROFILE = "standard";
+    process.env.LAQRUMCODE_DISABLED_HOOKS = "edit-gate";
     _resetProfileCacheForTests();
     expect(shouldHookRun("edit-gate", ["standard", "strict"])).toBe(false);
     expect(shouldHookRun("config-protection", ["standard", "strict"])).toBe(true);
   });
 
   it("seedHookProfileDirective writes a Tier-0 row tagged for dedup", async () => {
-    process.env.KONGCODE_HOOK_PROFILE = "standard";
+    process.env.LAQRUMCODE_HOOK_PROFILE = "standard";
     _resetProfileCacheForTests();
 
     const queryExec = vi.fn(async () => undefined);
@@ -151,15 +151,15 @@ describe("config-protection denylist", () => {
     expect(isProtectedConfigFile("/biome.json")).toBe(true);
   });
 
-  it("KONGCODE_ALLOW_CONFIG_EDIT=1 disables the check", () => {
-    process.env.KONGCODE_ALLOW_CONFIG_EDIT = "1";
+  it("LAQRUMCODE_ALLOW_CONFIG_EDIT=1 disables the check", () => {
+    process.env.LAQRUMCODE_ALLOW_CONFIG_EDIT = "1";
     _resetConfigProtectionCacheForTests();
     expect(isProtectedConfigFile("/repo/biome.json")).toBe(false);
   });
 
-  it("KONGCODE_ALLOW_CONFIG_EDIT=0 / 'false' / '' does NOT bypass", () => {
+  it("LAQRUMCODE_ALLOW_CONFIG_EDIT=0 / 'false' / '' does NOT bypass", () => {
     for (const v of ["0", "false", "", "FALSE"]) {
-      process.env.KONGCODE_ALLOW_CONFIG_EDIT = v;
+      process.env.LAQRUMCODE_ALLOW_CONFIG_EDIT = v;
       _resetConfigProtectionCacheForTests();
       expect(isProtectedConfigFile("/repo/biome.json")).toBe(true);
     }
@@ -273,7 +273,7 @@ describe("checkFileEditGate", () => {
   });
 
   it("idle timeout wipes the cache so a stale 'cleared' file gets re-gated", async () => {
-    process.env.KONGCODE_GATE_TIMEOUT_MS = "1"; // 1ms ⇒ instant expiry
+    process.env.LAQRUMCODE_GATE_TIMEOUT_MS = "1"; // 1ms ⇒ instant expiry
     const { state, queryFirst } = makeMockState([{ id: "turn:abc" }]);
     const session = makeSession();
 
@@ -405,11 +405,11 @@ describe("PostToolUse path extraction (clears edit-gate via recall/Grep/Glob)", 
 
     await handlePostToolUse(state, {
       session_id: "sess-pt",
-      tool_name: "mcp__plugin_kongcode_kongcode__recall",
-      tool_response: "Found 2 results: /home/zero/voidorigin/kongcode/src/foo.ts and ./relative/bar.py — also schema.surql is relevant.",
+      tool_name: "mcp__plugin_laqrumcode_laqrumcode__recall",
+      tool_response: "Found 2 results: /home/zero/voidorigin/laqrumcode/src/foo.ts and ./relative/bar.py — also schema.surql is relevant.",
     });
 
-    expect(session._observedFilePaths.has("/home/zero/voidorigin/kongcode/src/foo.ts")).toBe(true);
+    expect(session._observedFilePaths.has("/home/zero/voidorigin/laqrumcode/src/foo.ts")).toBe(true);
     expect(session._observedFilePaths.has("./relative/bar.py")).toBe(true);
     expect(session._observedFilePaths.has("schema.surql")).toBe(true);
   });
@@ -464,7 +464,7 @@ describe("PostToolUse path extraction (clears edit-gate via recall/Grep/Glob)", 
     // Step 1: a recall call returns the path.
     await handlePostToolUse(ptState, {
       session_id: "sess-pt5",
-      tool_name: "mcp__plugin_kongcode_kongcode__recall",
+      tool_name: "mcp__plugin_laqrumcode_laqrumcode__recall",
       tool_response: "Top hit: /repo/src/target.ts (score 0.91)",
     });
 
@@ -564,7 +564,7 @@ describe("gate registry", () => {
   });
 
   it("runGates returns first deny from matching gates", async () => {
-    process.env.KONGCODE_HOOK_PROFILE = "standard";
+    process.env.LAQRUMCODE_HOOK_PROFILE = "standard";
     _resetProfileCacheForTests();
 
     registerGate({
@@ -597,7 +597,7 @@ describe("gate registry", () => {
   });
 
   it("runGates skips gates whose profile is not active", async () => {
-    process.env.KONGCODE_HOOK_PROFILE = "standard";
+    process.env.LAQRUMCODE_HOOK_PROFILE = "standard";
     _resetProfileCacheForTests();
 
     const checkFn = vi.fn(async () => makeDenyResponse("strict-only", "nope"));
@@ -618,7 +618,7 @@ describe("gate registry", () => {
   });
 
   it("runGates skips gates whose tool set does not match", async () => {
-    process.env.KONGCODE_HOOK_PROFILE = "standard";
+    process.env.LAQRUMCODE_HOOK_PROFILE = "standard";
     _resetProfileCacheForTests();
 
     const checkFn = vi.fn(async () => makeDenyResponse("edit-only", "nope"));
@@ -640,7 +640,7 @@ describe("gate registry", () => {
   });
 
   it("gates with no tools set apply to all tools", async () => {
-    process.env.KONGCODE_HOOK_PROFILE = "standard";
+    process.env.LAQRUMCODE_HOOK_PROFILE = "standard";
     _resetProfileCacheForTests();
 
     registerGate({
@@ -659,9 +659,9 @@ describe("gate registry", () => {
     expect(result?.hookSpecificOutput?.permissionDecisionReason).toContain("universal");
   });
 
-  it("KONGCODE_DISABLED_HOOKS disables a registered gate", async () => {
-    process.env.KONGCODE_HOOK_PROFILE = "standard";
-    process.env.KONGCODE_DISABLED_HOOKS = "my-gate";
+  it("LAQRUMCODE_DISABLED_HOOKS disables a registered gate", async () => {
+    process.env.LAQRUMCODE_HOOK_PROFILE = "standard";
+    process.env.LAQRUMCODE_DISABLED_HOOKS = "my-gate";
     _resetProfileCacheForTests();
 
     registerGate({
@@ -685,8 +685,8 @@ describe("gate registry lazy init loads builtins", () => {
     _resetRegistryForTests(false); // allow lazy init
     _resetProfileCacheForTests();
     _resetConfigProtectionCacheForTests();
-    delete process.env.KONGCODE_HOOK_PROFILE;
-    delete process.env.KONGCODE_DISABLED_HOOKS;
+    delete process.env.LAQRUMCODE_HOOK_PROFILE;
+    delete process.env.LAQRUMCODE_DISABLED_HOOKS;
   });
 
   it("listGates returns 3 built-in gates after lazy init", () => {
@@ -708,7 +708,7 @@ describe("gate registry lazy init loads builtins", () => {
   });
 
   it("builtin config-protection gate blocks .eslintrc via runGates", async () => {
-    process.env.KONGCODE_HOOK_PROFILE = "standard";
+    process.env.LAQRUMCODE_HOOK_PROFILE = "standard";
     _resetProfileCacheForTests();
 
     const { state } = makeMockState([]);
@@ -722,7 +722,7 @@ describe("gate registry lazy init loads builtins", () => {
   });
 
   it("builtin edit-gate blocks first edit to unknown file via runGates", async () => {
-    process.env.KONGCODE_HOOK_PROFILE = "standard";
+    process.env.LAQRUMCODE_HOOK_PROFILE = "standard";
     _resetProfileCacheForTests();
 
     const { state } = makeMockState([]);
@@ -740,7 +740,7 @@ describe("makeDenyResponse", () => {
   it("includes gate id and message in the deny reason", () => {
     const resp = makeDenyResponse("my-gate", "you cannot do this");
     expect(resp.hookSpecificOutput?.permissionDecision).toBe("deny");
-    expect(resp.hookSpecificOutput?.permissionDecisionReason).toContain("kongcode/my-gate:");
+    expect(resp.hookSpecificOutput?.permissionDecisionReason).toContain("laqrumcode/my-gate:");
     expect(resp.hookSpecificOutput?.permissionDecisionReason).toContain("you cannot do this");
   });
 

@@ -5,7 +5,7 @@
  * directives for the next turn, and grade retrieval quality with LLM-judged
  * relevance scores that feed back into ACAN training.
  *
- * Ported from kongbrain — per-session state via WeakMap, takes SurrealStore param.
+ * Ported from laqrumbrain — per-session state via WeakMap, takes SurrealStore param.
  */
 import { clamp01 } from "./math.js";
 const sessionState = new WeakMap();

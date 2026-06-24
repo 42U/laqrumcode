@@ -264,8 +264,8 @@ describe("computeSignals — utilization formula", () => {
   });
 
   it("clamps utilization to [0, 1] even when boost would push over", () => {
-    const item = mkItem("KongCode persistent memory graph SurrealDB BGE-M3 embeddings");
-    const response = "kongcode persistent memory graph surrealdb bge-m3 embeddings all working".toLowerCase();
+    const item = mkItem("LaqrumCode persistent memory graph SurrealDB BGE-M3 embeddings");
+    const response = "laqrumcode persistent memory graph surrealdb bge-m3 embeddings all working".toLowerCase();
     const { utilization } = computeSignals(item, response, true);
     expect(utilization).toBeLessThanOrEqual(1);
     expect(utilization).toBeGreaterThan(0.5);
@@ -288,8 +288,8 @@ describe("computeSignals — utilization formula", () => {
   });
 
   it("citation boost does not lower already-high utilization", () => {
-    const item = mkItem("KongCode persistent memory graph SurrealDB BGE-M3 embeddings");
-    const response = "kongcode persistent memory graph surrealdb bge-m3 embeddings all working".toLowerCase();
+    const item = mkItem("LaqrumCode persistent memory graph SurrealDB BGE-M3 embeddings");
+    const response = "laqrumcode persistent memory graph surrealdb bge-m3 embeddings all working".toLowerCase();
     const base = computeSignals(item, response, true).utilization;
     const withCite = computeSignals(item, response, true, true).utilization;
     expect(withCite).toBeGreaterThanOrEqual(base);

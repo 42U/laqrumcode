@@ -14,7 +14,7 @@
  *    no option<string> coercion failure on the kc-less fallback).
  *
  * Requires a live SurrealDB; the beforeAll probe races a 10s timeout so CI's
- * no-DB env skips cleanly. ns=kong_test, per-run dbs, removed on teardown.
+ * no-DB env skips cleanly. ns=laqrum_test, per-run dbs, removed on teardown.
  */
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
@@ -31,7 +31,7 @@ import type { GlobalPluginState } from "../src/engine/state.js";
 const URL = process.env.SURREAL_URL ?? "ws://127.0.0.1:8000/rpc";
 const USER = process.env.SURREAL_USER ?? "root";
 const PASS = process.env.SURREAL_PASS ?? "root";
-const TEST_NS = "kong_test";
+const TEST_NS = "laqrum_test";
 const STAMP = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 const SCHEMA = resolve(dirname(fileURLToPath(import.meta.url)), "..", "src", "engine", "schema.surql");
 const EMB = Array(1024).fill(0.01);

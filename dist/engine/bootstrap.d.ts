@@ -78,13 +78,13 @@ export declare function __getSupervisorState(): {
  *  Three runtime layouts to handle:
  *    1. Compiled tsc: bootstrap.js at <plugin>/dist/engine/ — walk up 2.
  *    2. esbuild bundle: bundle.cjs at <plugin>/dist/daemon/ — walk up 2.
- *    3. SEA executable: binary at <plugin>/bin/kongcode-daemon-<platform>
+ *    3. SEA executable: binary at <plugin>/bin/laqrumcode-daemon-<platform>
  *       — walk up 1 (NOT 2; the SEA binary lives in bin/, not dist/engine/).
  *
  *  Under SEA (CJS-in-binary), import.meta.url is undefined and fileURLToPath
  *  throws — caught and we use process.execPath instead.
  *
- *  KONGCODE_PLUGIN_DIR env var always wins for explicit overrides (tests,
+ *  LAQRUMCODE_PLUGIN_DIR env var always wins for explicit overrides (tests,
  *  unusual install layouts).
  */
 export declare function resolvePluginDir(): string;
@@ -110,8 +110,8 @@ export interface ManagedSurrealCred {
  *  exact secret a previously-spawned detached child (Option A) is already
  *  running with. Otherwise a fresh credential is generated and written.
  *
- *  - user: `kong_<uid>` on POSIX (matches the iKong per-user naming precedent),
- *    plain `kong` where getuid is unavailable (Windows).
+ *  - user: `laqrum_<uid>` on POSIX (matches the iLaqrum per-user naming precedent),
+ *    plain `laqrum` where getuid is unavailable (Windows).
  *  - pass: 24 random bytes, base64url (~32 chars, URL/CLI-safe, no padding).
  *  - File perms tightened to 0600 best-effort (cross-platform: chmod is a
  *    no-op-ish on Windows and is wrapped in try/catch so it never throws).
@@ -127,7 +127,7 @@ export declare function getOrCreateManagedCred(cacheDir: string): ManagedSurreal
  *  full bootstrap (npm ci + binary/model downloads).
  *
  *  Inputs:
- *   - discoveredPid: findExistingKongcodeSurreal's returned pid. Non-null ⟺ a
+ *   - discoveredPid: findExistingLaqrumcodeSurreal's returned pid. Non-null ⟺ a
  *     managed-surface port for which we hold a LIVE pid file (it is OUR managed
  *     child). Null ⟺ an EXTERNAL DB (8000/8042) whose lifecycle we don't own.
  *   - credFileExists: managedCredFileExists(cacheDir).
@@ -152,9 +152,9 @@ export declare function resolveReusedTargetCred(args: {
  * `port`, using only the Linux `/proc` filesystem.
  *
  * --- Threat model (GH #13) ---
- * On a shared host, OS user B must never connect to OS user A's kongcode
- * memory graph. The schema fingerprint (isKongcodeSurreal) confirms a port
- * speaks "kongcode", but NOT *whose* kongcode it is. Without an owner check,
+ * On a shared host, OS user B must never connect to OS user A's laqrumcode
+ * memory graph. The schema fingerprint (isLaqrumcodeSurreal) confirms a port
+ * speaks "laqrumcode", but NOT *whose* laqrumcode it is. Without an owner check,
  * if user A and user B collided on the same managed port (or A left a DB on
  * the legacy 18765 that B probes), B would silently attach to A's SurrealDB
  * and read/write A's private memory. This helper lets the caller verify the
@@ -181,13 +181,13 @@ export declare function resolveReusedTargetCred(args: {
  * real kernel /proc (which can't be faked cross-platform / in CI).
  */
 export declare function findListenerUidViaProc(port: number, procRoot?: string): number | null;
-/** Find an existing kongcode SurrealDB that the bootstrap should reuse instead
+/** Find an existing laqrumcode SurrealDB that the bootstrap should reuse instead
  *  of spawning a duplicate. Probes a list of candidate ports, fingerprints the
- *  schema to confirm it's kongcode's, AND (GH #13) verifies the listening
+ *  schema to confirm it's laqrumcode's, AND (GH #13) verifies the listening
  *  process is owned by the current OS user before connecting.
  *
  *  --- Threat model (GH #13 cross-user data isolation) ---
- *  The schema fingerprint proves a port speaks "kongcode" but not WHOSE. On a
+ *  The schema fingerprint proves a port speaks "laqrumcode" but not WHOSE. On a
  *  shared host, OS user B must never attach to OS user A's SurrealDB and read
  *  A's private memory graph. So for each fingerprinted port we resolve the
  *  listener's UID (findListenerUid → /proc or lsof) and:
@@ -209,7 +209,7 @@ export declare function findListenerUidViaProc(port: number, procRoot?: string):
  *
  *  Returns the first match. SURREAL_URL env var still takes precedence in the
  *  parent caller — this function only runs when the user hasn't pinned a URL. */
-export declare function findExistingKongcodeSurreal(cacheDir: string, managedPort: number, user: string, pass: string, resolveOwnerUid?: (port: number) => number | null): Promise<{
+export declare function findExistingLaqrumcodeSurreal(cacheDir: string, managedPort: number, user: string, pass: string, resolveOwnerUid?: (port: number) => number | null): Promise<{
     url: string;
     pid: number | null;
     port: number;
@@ -219,7 +219,7 @@ export declare function findExistingKongcodeSurreal(cacheDir: string, managedPor
  *  standing up the full bootstrap; production callers reach it via bootstrap(). */
 export declare function spawnManagedSurreal(binPath: string, dataDir: string, port: number, user: string, pass: string, cacheDir: string): Promise<ChildProcess>;
 /** The historical single-user managed SurrealDB port. Kept as a named constant
- *  because it's also the legacy candidate that {@link findExistingKongcodeSurreal}
+ *  because it's also the legacy candidate that {@link findExistingLaqrumcodeSurreal}
  *  must probe (gated by the owner guard) so an upgrading single-user install's
  *  data is still discovered. */
 export declare const LEGACY_MANAGED_SURREAL_PORT = 18765;
@@ -238,7 +238,7 @@ export declare const MANAGED_SURREAL_PORT_RANGE = 10000;
  *  collided with the 1st user's. We derive a per-user port by offsetting into
  *  the managed-SurrealDB window (MANAGED_SURREAL_PORT_RANGE wide). Two different
  *  users almost never land on the same port; even if they did, the process-owner
- *  guard in findExistingKongcodeSurreal prevents cross-user adoption.
+ *  guard in findExistingLaqrumcodeSurreal prevents cross-user adoption.
  *
  *  E5 (multi-OS-user Windows host): the prior code returned the FLAT legacy
  *  18765 for EVERY Windows account (getuid===null), so two users on one Windows
@@ -249,7 +249,7 @@ export declare const MANAGED_SURREAL_PORT_RANGE = 10000;
  *  on the SAME base+range as the POSIX path so the result stays inside the
  *  managed-SurrealDB window [18765, 28764].
  *
- *  - KONGCODE_SURREAL_PORT override always wins (explicit operator intent).
+ *  - LAQRUMCODE_SURREAL_PORT override always wins (explicit operator intent).
  *  - POSIX: 18765 + (getuid() % RANGE).
  *  - Windows / no getuid: 18765 + (fnv1a32(os.userInfo().username) % RANGE).
  *  - Degenerate (no uid AND no username): flat 18765 — the only safe choice;
@@ -260,7 +260,7 @@ export declare function pickPort(): number;
  * model, and a managed SurrealDB child process. Returns the URL the MCP server
  * should connect to (either the managed child or SURREAL_URL override).
  *
- * Skips bootstrap entirely when KONGCODE_SKIP_BOOTSTRAP=1 is set.
+ * Skips bootstrap entirely when LAQRUMCODE_SKIP_BOOTSTRAP=1 is set.
  * Skips the SurrealDB child when SURREAL_URL points at an external server.
  */
 export declare function bootstrap(input: BootstrapInput): Promise<BootstrapResult>;
@@ -271,7 +271,7 @@ export declare function bootstrap(input: BootstrapInput): Promise<BootstrapResul
  *  plugin updates, Claude Code restarts, etc.).
  *
  *  Pass { force: true } to actually SIGTERM the child — used by tests and any
- *  future "kongcode stop" CLI command that explicitly tears everything down. */
+ *  future "laqrumcode stop" CLI command that explicitly tears everything down. */
 export declare function shutdownManagedSurreal(opts?: {
     force?: boolean;
 }): void;

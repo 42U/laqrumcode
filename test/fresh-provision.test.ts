@@ -1,5 +1,5 @@
 /**
- * Regression: a fresh kongcode install must be able to provision its graph.
+ * Regression: a fresh laqrumcode install must be able to provision its graph.
  *
  * SurrealDB 3.1.x (the 2026-06-12 engine cutover) stopped lazily creating a
  * namespace/database on first write OR DDL. SurrealStore.connect() only SELECTS

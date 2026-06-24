@@ -15,7 +15,7 @@ import { readFileSync } from "node:fs";
 import { uiPort, UI_PORT_BASE } from "../src/ui-server.js";
 
 const launcher = readFileSync(new URL("../scripts/open-ui.mjs", import.meta.url), "utf8");
-const skillDoc = readFileSync(new URL("../skills/kongcode-web-ui/SKILL.md", import.meta.url), "utf8");
+const skillDoc = readFileSync(new URL("../skills/laqrumcode-web-ui/SKILL.md", import.meta.url), "utf8");
 
 describe("V1: open-ui.mjs derives the UI port from uiPort() (single source of truth)", () => {
   it("imports uiPort from the built ui-server and calls it (no duplicated formula)", () => {
@@ -41,13 +41,13 @@ describe("V1: open-ui.mjs derives the UI port from uiPort() (single source of tr
   });
 
   it("uiPort() default is the UI base, well clear of the old 28900", () => {
-    const saved = process.env.KONGCODE_UI_PORT;
-    delete process.env.KONGCODE_UI_PORT;
+    const saved = process.env.LAQRUMCODE_UI_PORT;
+    delete process.env.LAQRUMCODE_UI_PORT;
     try {
       expect(UI_PORT_BASE).toBe(33000);
       expect(uiPort()).toBeGreaterThanOrEqual(UI_PORT_BASE);
     } finally {
-      if (saved !== undefined) process.env.KONGCODE_UI_PORT = saved;
+      if (saved !== undefined) process.env.LAQRUMCODE_UI_PORT = saved;
     }
   });
 });

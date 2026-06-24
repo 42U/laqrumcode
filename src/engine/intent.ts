@@ -3,7 +3,7 @@
  * No LLM call — embed user input, cosine similarity against prototypes.
  * ~25ms total (16ms embed + 5ms cosine + heuristics).
  *
- * Ported from kongbrain — takes EmbeddingService instead of module-level embed.
+ * Ported from laqrumbrain — takes EmbeddingService instead of module-level embed.
  */
 
 import type { EmbeddingService } from "./embeddings.js";

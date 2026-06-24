@@ -10,7 +10,7 @@
  * 5. Context waste
  * 6. Contradiction detection
  *
- * Ported from kongbrain — uses SurrealStore instead of module-level DB.
+ * Ported from laqrumbrain — uses SurrealStore instead of module-level DB.
  */
 
 import type { SurrealStore, VectorSearchResult } from "./surreal.js";
@@ -79,8 +79,8 @@ const _pendingRetrievalBySession = new Map<string, PendingRetrieval>();
 // token budget (mirrors rerankResults' RERANK_TOTAL_TOKEN_BUDGET); the tail is
 // scored lexical-only. The top items dominate utilization signal anyway, so the
 // tail's CE rarely changed the stored row. All env-tunable.
-const EVAL_CE_TOP_K = Number(process.env.KONGCODE_EVAL_CE_TOP_K) || 10;
-const EVAL_CE_TOKEN_BUDGET = Number(process.env.KONGCODE_EVAL_CE_TOKEN_BUDGET) || 8192;
+const EVAL_CE_TOP_K = Number(process.env.LAQRUMCODE_EVAL_CE_TOP_K) || 10;
+const EVAL_CE_TOKEN_BUDGET = Number(process.env.LAQRUMCODE_EVAL_CE_TOKEN_BUDGET) || 8192;
 
 /** Register a session-removal cleanup so removed sessions purge their entry.
  *  Call once at daemon boot with the GlobalPluginState — re-registration is

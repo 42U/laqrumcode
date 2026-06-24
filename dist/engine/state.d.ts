@@ -136,7 +136,7 @@ export declare class GlobalPluginState {
      *  new session would exceed the cap we evict the OLDEST entry (Map preserves
      *  insertion order) and fire onSessionRemoved so dependent module-scoped maps
      *  GC too. Co-located Claude Code installs run a handful of sessions; 512 is
-     *  far above any legitimate steady state. Override via KONGCODE_MAX_SESSIONS. */
+     *  far above any legitimate steady state. Override via LAQRUMCODE_MAX_SESSIONS. */
     private readonly maxSessions;
     readonly observabilityCooldown: import("./observability.js").CooldownState;
     lastRollupDay: string;

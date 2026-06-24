@@ -24,7 +24,7 @@ import { seedCognitiveBootstrap } from "../src/engine/cognitive-bootstrap.js";
 // ── Helpers ──
 
 function makeTmpDir(): string {
-  const dir = join(tmpdir(), `kongbrain-boot-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+  const dir = join(tmpdir(), `laqrumbrain-boot-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
   mkdirSync(dir, { recursive: true });
   return dir;
 }

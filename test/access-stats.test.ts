@@ -7,7 +7,7 @@
  * Bumps now land in ~100B access_stats rows; rows get an amortized weekly
  * sync; scoring merges exact deltas via fetchAccessDeltas.
  *
- * Live test (kong_test ns) — skips cleanly when no DB is reachable (CI).
+ * Live test (laqrum_test ns) — skips cleanly when no DB is reachable (CI).
  */
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { SurrealStore } from "../src/engine/surreal.js";
@@ -18,7 +18,7 @@ let available = false;
 
 beforeAll(async () => {
   const config = parsePluginConfig({});
-  store = new SurrealStore({ ...config.surreal, ns: "kong_test", db: "access_stats_test" });
+  store = new SurrealStore({ ...config.surreal, ns: "laqrum_test", db: "access_stats_test" });
   try {
     await Promise.race([
       store.initialize(),

@@ -7,7 +7,7 @@ describe("parsePluginConfig", () => {
   const originalEnv = { ...process.env };
 
   beforeEach(() => {
-    // Clear all KongBrain-related env vars
+    // Clear all LaqrumBrain-related env vars
     delete process.env.SURREAL_URL;
     delete process.env.SURREAL_HTTP_URL;
     delete process.env.SURREAL_USER;
@@ -15,8 +15,8 @@ describe("parsePluginConfig", () => {
     delete process.env.SURREAL_NS;
     delete process.env.SURREAL_DB;
     delete process.env.EMBED_MODEL_PATH;
-    delete process.env.KONGCODE_CACHE_DIR;
-    delete process.env.KONGCODE_DATA_DIR;
+    delete process.env.LAQRUMCODE_CACHE_DIR;
+    delete process.env.LAQRUMCODE_DATA_DIR;
     delete process.env.SURREAL_BIN_PATH;
   });
 
@@ -29,21 +29,21 @@ describe("parsePluginConfig", () => {
     expect(config.surreal.url).toBe("ws://localhost:8000/rpc");
     expect(config.surreal.user).toBe("root");
     expect(config.surreal.pass).toBe("root");
-    expect(config.surreal.ns).toBe("kong");
+    expect(config.surreal.ns).toBe("laqrum");
     expect(config.surreal.db).toBe("memory");
     expect(config.embedding.dimensions).toBe(1024);
     expect(config.embedding.modelPath).toBe(
-      join(homedir(), ".kongcode", "cache", "models", "bge-m3-Q4_K_M.gguf"),
+      join(homedir(), ".laqrumcode", "cache", "models", "bge-m3-Q4_K_M.gguf"),
     );
-    expect(config.paths.cacheDir).toBe(join(homedir(), ".kongcode", "cache"));
-    expect(config.paths.dataDir).toBe(join(homedir(), ".kongcode", "data"));
+    expect(config.paths.cacheDir).toBe(join(homedir(), ".laqrumcode", "cache"));
+    expect(config.paths.dataDir).toBe(join(homedir(), ".laqrumcode", "data"));
     expect(config.paths.surrealBinPath).toBeNull();
   });
 
   it("returns defaults with empty object", () => {
     const config = parsePluginConfig({});
     expect(config.surreal.url).toBe("ws://localhost:8000/rpc");
-    expect(config.surreal.ns).toBe("kong");
+    expect(config.surreal.ns).toBe("laqrum");
   });
 
   it("reads values from plugin config", () => {

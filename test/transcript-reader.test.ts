@@ -37,7 +37,7 @@ let dir: string;
 let path: string;
 
 beforeEach(() => {
-  dir = mkdtempSync(join(tmpdir(), "kongcode-transcript-"));
+  dir = mkdtempSync(join(tmpdir(), "laqrumcode-transcript-"));
   path = join(dir, "transcript.jsonl");
 });
 

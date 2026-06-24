@@ -4,7 +4,7 @@
  * After preflight classifies intent, predict 2-4 follow-up queries and fire
  * vector searches in the background. Results are cached in an LRU with 5-min TTL.
  *
- * Ported from kongbrain — takes SurrealStore/EmbeddingService as params.
+ * Ported from laqrumbrain — takes SurrealStore/EmbeddingService as params.
  */
 
 import type { EmbeddingService } from "./embeddings.js";

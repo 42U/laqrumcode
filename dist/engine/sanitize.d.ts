@@ -1,5 +1,5 @@
 /**
- * Strip kongcode structural XML tags from user-supplied text.
+ * Strip laqrumcode structural XML tags from user-supplied text.
  *
  * Prevents stored content from breaking out of its injection envelope
  * when retrieved and assembled into the LLM context. Applied at write

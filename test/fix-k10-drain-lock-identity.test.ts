@@ -49,7 +49,7 @@ describe("K10: drain lock full-identity release check", () => {
   let fd: number;
 
   beforeEach(() => {
-    tmp = mkdtempSync(join(tmpdir(), "kongcode-k10-"));
+    tmp = mkdtempSync(join(tmpdir(), "laqrumcode-k10-"));
     lockPath = join(tmp, "auto-drain.pid");
     fd = openSync(lockPath, "w");
   });

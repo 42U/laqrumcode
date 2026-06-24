@@ -26,7 +26,7 @@ export async function handlePostCompact(state, payload) {
         if (session._compactionSummary) {
             const summary = session._compactionSummary;
             session._compactionSummary = undefined;
-            return makeHookOutput("PostCompact", `[KongCode context recovery after compaction]\n${summary}\n\nGraph memory will provide full context on the next prompt.`);
+            return makeHookOutput("PostCompact", `[LaqrumCode context recovery after compaction]\n${summary}\n\nGraph memory will provide full context on the next prompt.`);
         }
         return {};
     }

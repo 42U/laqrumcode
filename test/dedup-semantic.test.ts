@@ -28,7 +28,7 @@ import type { EmbeddingService } from "../src/engine/embeddings.js";
 import type { MemoryConfig } from "../src/engine/config.js";
 
 const SKIP = process.env.SKIP_INTEGRATION === "1";
-process.env.KONGCODE_AUTO_DRAIN = "0";
+process.env.LAQRUMCODE_AUTO_DRAIN = "0";
 
 const TEST_NS = `kctest_dsem_${Date.now()}_${Math.floor(Math.random() * 1e6)}`;
 const TEST_DB = "dedup";

@@ -16,7 +16,7 @@ import { isRerankerActive } from "../src/engine/graph-context.js";
  *
  * The deeper validation — that rerankResults actually produces 98.2% R@5
  * with the bge-reranker-v2-m3 model loaded — lives in the LongMemEval
- * benchmark (src/bench-longmemeval.ts, ported from kongclaw), not in
+ * benchmark (src/bench-longmemeval.ts, ported from laqrumclaw), not in
  * unit tests. Loading the 606MB model in vitest is impractical.
  */
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * One-shot migration: ingest every SKILL.md under /skills/ into the
- * kongcode `skill` table. Founder directive (2026-05-15): no more .md
+ * laqrumcode `skill` table. Founder directive (2026-05-15): no more .md
  * proliferation. Skill bodies belong in the vector-indexed DB.
  *
  * Approach: direct SurrealDB write with body in the SCHEMALESS skill
@@ -16,21 +16,21 @@
  *   SURREAL_URL   — default ws://127.0.0.1:8000/rpc
  *   SURREAL_USER  — default root
  *   SURREAL_PASS  — default root
- *   SURREAL_NS    — default kong
+ *   SURREAL_NS    — default laqrum
  *   SURREAL_DB    — default memory
- *   KONGCODE_SKILLS_DIR — default /home/zero/voidorigin/kongcode/skills
+ *   LAQRUMCODE_SKILLS_DIR — default /home/zero/voidorigin/laqrumcode/skills
  */
 
-import { Surreal } from "/home/zero/voidorigin/kongcode/node_modules/surrealdb/dist/surrealdb.mjs";
+import { Surreal } from "/home/zero/voidorigin/laqrumcode/node_modules/surrealdb/dist/surrealdb.mjs";
 import { readFile, readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
 
 const URL = process.env.SURREAL_URL || "ws://127.0.0.1:8000/rpc";
 const USER = process.env.SURREAL_USER || "root";
 const PASS = process.env.SURREAL_PASS || "root";
-const NS = process.env.SURREAL_NS || "kong";
+const NS = process.env.SURREAL_NS || "laqrum";
 const DB = process.env.SURREAL_DB || "memory";
-const SKILLS_DIR = process.env.KONGCODE_SKILLS_DIR || "/home/zero/voidorigin/kongcode/skills";
+const SKILLS_DIR = process.env.LAQRUMCODE_SKILLS_DIR || "/home/zero/voidorigin/laqrumcode/skills";
 
 function parseFrontmatter(content) {
   const m = content.match(/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/);

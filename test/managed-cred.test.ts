@@ -1,12 +1,12 @@
 /**
  * Phase 2 (multi-user auth, after GH #13) — per-user credentials for the
- * MANAGED (kongcode-auto-spawned) SurrealDB.
+ * MANAGED (laqrumcode-auto-spawned) SurrealDB.
  *
  * Two units under test, both in src/engine/bootstrap.ts:
  *
  *   1. getOrCreateManagedCred(cacheDir) — read-or-create the persisted
- *      managed credential at <kongcode-home>/surreal-cred.json (sibling of
- *      cacheDir). Asserts: shape (kong_<uid> user + base64url pass), 0600
+ *      managed credential at <laqrumcode-home>/surreal-cred.json (sibling of
+ *      cacheDir). Asserts: shape (laqrum_<uid> user + base64url pass), 0600
  *      perms best-effort, IDEMPOTENCY (second call returns byte-identical
  *      cred, so a reused detached child and the connecting daemon agree), and
  *      regeneration on a corrupt/legacy file.
@@ -20,7 +20,7 @@
  *      root:root managed child is gracefully kept on root:root.
  *
  * Isolation: every test uses a throwaway temp dir as cacheDir, so the real
- * ~/.kongcode/surreal-cred.json is never touched.
+ * ~/.laqrumcode/surreal-cred.json is never touched.
  */
 
 import { describe, it, expect, afterEach } from "vitest";
@@ -33,7 +33,7 @@ import {
   type ManagedSurrealCred,
 } from "../src/engine/bootstrap.js";
 
-// cacheDir mirrors production's ~/.kongcode/cache: the cred file is written to
+// cacheDir mirrors production's ~/.laqrumcode/cache: the cred file is written to
 // its PARENT (<root>/surreal-cred.json). So make a <root>/cache temp dir and
 // hand `<root>/cache` to the helper; the cred lands at `<root>/surreal-cred.json`.
 const tmpRoots: string[] = [];
@@ -64,13 +64,13 @@ describe("getOrCreateManagedCred — generation + shape", () => {
     expect(cred.user).not.toBe("root");
     expect(cred.pass).not.toBe("root");
 
-    // user is `kong` (no getuid) or `kong_<uid>` (POSIX). On the CI POSIX box
+    // user is `laqrum` (no getuid) or `laqrum_<uid>` (POSIX). On the CI POSIX box
     // process.getuid exists, so assert the uid-suffixed form there; accept the
     // bare form on a hypothetical non-POSIX runner.
     if (typeof process.getuid === "function") {
-      expect(cred.user).toBe(`kong_${process.getuid()}`);
+      expect(cred.user).toBe(`laqrum_${process.getuid()}`);
     } else {
-      expect(cred.user).toBe("kong");
+      expect(cred.user).toBe("laqrum");
     }
 
     // pass = randomBytes(24).toString("base64url"): 24 bytes → 32 chars,
@@ -79,7 +79,7 @@ describe("getOrCreateManagedCred — generation + shape", () => {
     expect(cred.pass.length).toBeGreaterThanOrEqual(30);
   });
 
-  it("writes the cred file to <kongcode-home>/surreal-cred.json (sibling of cacheDir)", () => {
+  it("writes the cred file to <laqrumcode-home>/surreal-cred.json (sibling of cacheDir)", () => {
     const cacheDir = mkCacheDir("path");
     getOrCreateManagedCred(cacheDir);
     const p = credPathFor(cacheDir);
@@ -119,7 +119,7 @@ describe("getOrCreateManagedCred — idempotency (Option-A reuse correctness)", 
 
   it("reuses a hand-written valid cred file verbatim", () => {
     const cacheDir = mkCacheDir("preexisting");
-    const planted: ManagedSurrealCred = { user: "kong_planted", pass: "planted-secret-xyz" };
+    const planted: ManagedSurrealCred = { user: "laqrum_planted", pass: "planted-secret-xyz" };
     writeFileSync(credPathFor(cacheDir), JSON.stringify(planted), "utf-8");
     expect(getOrCreateManagedCred(cacheDir)).toEqual(planted);
   });
@@ -147,10 +147,10 @@ describe("getOrCreateManagedCred — corrupt/legacy file regeneration", () => {
 
 describe("resolveReusedTargetCred — per-target credential decision", () => {
   const configured: ManagedSurrealCred = { user: "root", pass: "root" };
-  const generated: ManagedSurrealCred = { user: "kong_4321", pass: "GENERATED-secret" };
+  const generated: ManagedSurrealCred = { user: "laqrum_4321", pass: "GENERATED-secret" };
 
   // ── SAFETY PROPERTY: the dev's :8000 external Docker container. ──────────
-  // findExistingKongcodeSurreal returns pid === null for an external port, so
+  // findExistingLaqrumcodeSurreal returns pid === null for an external port, so
   // the daemon MUST connect with exactly the CONFIGURED creds (root:root by
   // default, or SURREAL_USER/SURREAL_PASS). Byte-identical to pre-Phase-2.
   it("EXTERNAL discovered DB (pid===null) → CONFIGURED creds (UNCHANGED auth)", () => {

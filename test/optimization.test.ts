@@ -33,7 +33,7 @@ describe("SessionState optimization fields", () => {
     session.lastQueryVec = [1, 2, 3];
     session.lastRetrievalSummary = "5 items injected";
     session.apiCycleCount = 7;
-    session.injectedSections.add("ikong");
+    session.injectedSections.add("ilaqrum");
     session.injectedSections.add("tier0");
     session.toolCallCount = 5;
 
@@ -47,17 +47,17 @@ describe("SessionState optimization fields", () => {
     // Session-scoped fields are NOT cleared
     expect(session.lastQueryVec).toEqual([1, 2, 3]);
     expect(session.injectedSections.size).toBe(2);
-    expect(session.injectedSections.has("ikong")).toBe(true);
+    expect(session.injectedSections.has("ilaqrum")).toBe(true);
     expect(session.injectedSections.has("tier0")).toBe(true);
   });
 
   it("injectedSections tracks multiple sections independently", () => {
-    session.injectedSections.add("ikong");
+    session.injectedSections.add("ilaqrum");
     session.injectedSections.add("tier0");
     session.injectedSections.add("tier1");
     session.injectedSections.add("rules_full");
 
-    expect(session.injectedSections.has("ikong")).toBe(true);
+    expect(session.injectedSections.has("ilaqrum")).toBe(true);
     expect(session.injectedSections.has("tier0")).toBe(true);
     expect(session.injectedSections.has("tier1")).toBe(true);
     expect(session.injectedSections.has("rules_full")).toBe(true);
@@ -65,14 +65,14 @@ describe("SessionState optimization fields", () => {
   });
 
   it("injectedSections.clear() resets all tracked sections", () => {
-    session.injectedSections.add("ikong");
+    session.injectedSections.add("ilaqrum");
     session.injectedSections.add("tier0");
     session.injectedSections.add("rules_full");
 
     session.injectedSections.clear();
 
     expect(session.injectedSections.size).toBe(0);
-    expect(session.injectedSections.has("ikong")).toBe(false);
+    expect(session.injectedSections.has("ilaqrum")).toBe(false);
   });
 });
 

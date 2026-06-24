@@ -1,5 +1,5 @@
 {
-  "name": "kongcode",
+  "name": "laqrumcode",
   "version": "0.7.130",
   "description": "Graph-backed persistent memory engine with SurrealDB + BGE-M3 embeddings. Gives Claude Code permanent memory that learns across sessions.",
   "author": {

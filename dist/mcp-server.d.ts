@@ -1,5 +1,5 @@
 /**
- * KongCode MCP Server — entry point.
+ * LaqrumCode MCP Server — entry point.
  *
  * Long-lived stdio process that owns:
  * - SurrealDB connection

@@ -1,5 +1,5 @@
 @echo off
-REM kongcode platform dispatcher (Windows cmd.exe).
+REM laqrumcode platform dispatcher (Windows cmd.exe).
 REM
 REM Invoked by Claude Code's plugin loader via .mcp.json on Windows.
 REM Detects arch and execs the matching SEA binary. The whole point is
@@ -18,14 +18,14 @@ if /I "%PROCESSOR_ARCHITEW6432%"=="AMD64" set "ARCH=x64"
 if /I "%PROCESSOR_ARCHITEW6432%"=="ARM64" set "ARCH=arm64"
 
 if "%ARCH%"=="" (
-  echo kongcode: unsupported arch %PROCESSOR_ARCHITECTURE% -- supported: x64, arm64. File at https://github.com/42U/kongcode/issues 1>&2
+  echo laqrumcode: unsupported arch %PROCESSOR_ARCHITECTURE% -- supported: x64, arm64. File at https://github.com/42U/laqrumcode/issues 1>&2
   exit /b 1
 )
 
-set "BIN=%~dp0kongcode-mcp-win32-%ARCH%.exe"
+set "BIN=%~dp0laqrumcode-mcp-win32-%ARCH%.exe"
 if exist "%BIN%" (
   REM Preferred: SEA mcp-client binary is present (0.7.0+ release).
-  REM Zero-Node-prereq. mcp-client spawns kongcode-daemon-win32-%ARCH%.exe
+  REM Zero-Node-prereq. mcp-client spawns laqrumcode-daemon-win32-%ARCH%.exe
   REM itself if a daemon isn't already running.
   "%BIN%" %*
   exit /b %ERRORLEVEL%
@@ -45,5 +45,5 @@ if %ERRORLEVEL% EQU 0 (
   exit /b %ERRORLEVEL%
 )
 
-echo kongcode: no usable runtime found. Tried SEA binary at %BIN% (not present) and 'node' (not on PATH). Install Node.js (https://nodejs.org) and restart Claude Code, or wait for a 0.7.0 release artifact for your platform. 1>&2
+echo laqrumcode: no usable runtime found. Tried SEA binary at %BIN% (not present) and 'node' (not on PATH). Install Node.js (https://nodejs.org) and restart Claude Code, or wait for a 0.7.0 release artifact for your platform. 1>&2
 exit /b 1

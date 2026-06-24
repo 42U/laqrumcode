@@ -1,6 +1,6 @@
 /**
  * Introspect tool — inspect the memory database.
- * Ported from kongbrain with SurrealStore injection.
+ * Ported from laqrumbrain with SurrealStore injection.
  */
 
 import { readFileSync, readdirSync, statSync } from "node:fs";
@@ -624,7 +624,7 @@ function pad(s: string | number, w: number): string {
 // daemon's appends. If the on-disk schema in auto-drain.ts changes, this
 // reader must change in lockstep (the test fixture pins the current shape).
 
-/** Default DB-size alert threshold in GB. Override via KONGCODE_DB_SIZE_ALERT_GB. */
+/** Default DB-size alert threshold in GB. Override via LAQRUMCODE_DB_SIZE_ALERT_GB. */
 const DEFAULT_DB_SIZE_ALERT_GB = 2;
 /** Default auto-drain daily budget — mirrors daemon/index.ts drainMaxDaily. */
 const DEFAULT_DRAIN_MAX_DAILY = 50;
@@ -774,7 +774,7 @@ async function totalCount(store: any, table: string): Promise<number> {
  *  non-managed port (e.g. an :8000 Docker container, where no SURREAL_URL is
  *  set — the case the old `!!process.env.SURREAL_URL` check missed). Keyed on
  *  the connected port vs the managed-surface ports (pickPort + legacy 18765),
- *  matching how findExistingKongcodeSurreal decides managed-vs-external. */
+ *  matching how findExistingLaqrumcodeSurreal decides managed-vs-external. */
 export function isConnectedDbExternal(connectedUrl: string): boolean {
   if (process.env.SURREAL_URL) return true;
   let port: number | null = null;
@@ -788,12 +788,12 @@ export async function statsAction(state: GlobalPluginState) {
 
   // Budget + alert thresholds (env-configurable, mirroring daemon defaults).
   const maxDaily = (() => {
-    const env = process.env.KONGCODE_AUTO_DRAIN_MAX_DAILY;
+    const env = process.env.LAQRUMCODE_AUTO_DRAIN_MAX_DAILY;
     if (env !== undefined) { const n = Number(env); return Number.isFinite(n) && n >= 0 ? n : DEFAULT_DRAIN_MAX_DAILY; }
     return DEFAULT_DRAIN_MAX_DAILY;
   })();
   const dbSizeAlertGb = (() => {
-    const env = process.env.KONGCODE_DB_SIZE_ALERT_GB;
+    const env = process.env.LAQRUMCODE_DB_SIZE_ALERT_GB;
     if (env !== undefined) { const n = Number(env); return Number.isFinite(n) && n > 0 ? n : DEFAULT_DB_SIZE_ALERT_GB; }
     return DEFAULT_DB_SIZE_ALERT_GB;
   })();
@@ -840,7 +840,7 @@ export async function statsAction(state: GlobalPluginState) {
     alerts.push({
       code: "db.size_over_threshold",
       severity: "warn",
-      message: `DB size on disk (${formatBytes(dbSizeBytes)}) exceeds the ${dbSizeAlertGb}GB alert threshold (KONGCODE_DB_SIZE_ALERT_GB)`,
+      message: `DB size on disk (${formatBytes(dbSizeBytes)}) exceeds the ${dbSizeAlertGb}GB alert threshold (LAQRUMCODE_DB_SIZE_ALERT_GB)`,
     });
   }
 

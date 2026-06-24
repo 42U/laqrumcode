@@ -186,7 +186,7 @@ function assertValidEdge(edge: string): void {
  *  default (60s — only genuine zombies blow it, not slow CPU-tier queries);
  *  env-overridable for constrained machines. Clamped to [1s, 10min]. */
 export const QUERY_DEADLINE_MS = (() => {
-  const n = Number(process.env.KONGCODE_DB_QUERY_TIMEOUT_MS);
+  const n = Number(process.env.LAQRUMCODE_DB_QUERY_TIMEOUT_MS);
   return Number.isFinite(n) && n > 0 ? Math.min(Math.max(Math.round(n), 1_000), 600_000) : 60_000;
 })();
 
@@ -332,8 +332,8 @@ export function patchOrderByFields(sql: string): string {
 }
 
 /**
- * SurrealDB store — wraps all database operations for the KongCode plugin.
- * Replaces the module-level singleton pattern from standalone KongCode.
+ * SurrealDB store — wraps all database operations for the LaqrumCode plugin.
+ * Replaces the module-level singleton pattern from standalone LaqrumCode.
  */
 export class SurrealStore {
   private db: Surreal;

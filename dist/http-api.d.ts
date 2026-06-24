@@ -2,7 +2,7 @@
  * Internal HTTP API on Unix socket for hook communication.
  *
  * The MCP server is the long-lived daemon; hook scripts are ephemeral.
- * Hooks discover this server via the .kongcode.sock file and POST
+ * Hooks discover this server via the .laqrumcode.sock file and POST
  * Claude Code hook payloads. The server processes them using the
  * shared GlobalPluginState and returns hook response JSON.
  */
@@ -131,18 +131,18 @@ export declare function registerHookHandler(event: string, handler: HookHandler)
  *  case is logged distinctly so ops can name "the loop was held and we cut it
  *  loose" when other sessions report slow hooks. Exported via __testing. */
 declare function dispatchHookWithDeadline(handler: HookHandler, state: GlobalPluginState, payload: Record<string, unknown>, event: string, deadlineMs?: number): Promise<HookResponse>;
-/** Read /proc/<pid>/cmdline on Linux and check it looks like a kongcode
- *  MCP-client process. Mirrors `cmdlineLooksLikeKongcodeDaemon` in
+/** Read /proc/<pid>/cmdline on Linux and check it looks like a laqrumcode
+ *  MCP-client process. Mirrors `cmdlineLooksLikeLaqrumcodeDaemon` in
  *  src/daemon/index.ts (~L371) but matches the per-session MCP relay rather
  *  than the long-lived daemon: substrings like 'mcp-client/index.js',
- *  'kongcode-mcp', or 'kongcode' alongside an mcp-ish path component.
+ *  'laqrumcode-mcp', or 'laqrumcode' alongside an mcp-ish path component.
  *
- *  Returns true  → confirmed to be a kongcode MCP (safe to SIGTERM)
+ *  Returns true  → confirmed to be a laqrumcode MCP (safe to SIGTERM)
  *  Returns false → confirmed to be a different process (do NOT SIGTERM — PID was recycled)
  *  Returns null  → cannot determine (non-Linux, or /proc unreadable) */
-declare function cmdlineLooksLikeKongcodeMcp(pid: number): boolean | null;
+declare function cmdlineLooksLikeLaqrumcodeMcp(pid: number): boolean | null;
 /**
- * Remove `.kongcode-<pid>.sock` files in `dir` whose PID is no longer alive.
+ * Remove `.laqrumcode-<pid>.sock` files in `dir` whose PID is no longer alive.
  * Skips ownPid and any PID that exists but we can't signal (EPERM).
  *
  * Also reaps live sibling MCPs by sending SIGTERM to their PIDs (default on).
@@ -151,17 +151,17 @@ declare function cmdlineLooksLikeKongcodeMcp(pid: number): boolean | null;
  * holding memory until killed manually. Reaping closes that loop.
  *
  * SAFETY (round-2): before SIGTERMing a PID derived from the socket filename
- * we verify via /proc/<pid>/cmdline that it actually IS a kongcode MCP
+ * we verify via /proc/<pid>/cmdline that it actually IS a laqrumcode MCP
  * process. PIDs can recycle quickly under load — a daemon restart could find
  * the socket file's PID number now belongs to an unrelated user process, and
  * the original behavior would SIGTERM that innocent process. Verification
- * mirrors the cmdlineLooksLikeKongcodeDaemon pattern used in
+ * mirrors the cmdlineLooksLikeLaqrumcodeDaemon pattern used in
  * src/daemon/index.ts for daemon.pid lock validation.
  *
  * Non-Linux platforms (no /proc): cmdline check returns null and we
  * CONSERVATIVELY skip the SIGTERM — only unlink if the PID is already dead.
  *
- * Set `KONGCODE_KEEP_SIBLINGS=1` to opt out — required when running multiple
+ * Set `LAQRUMCODE_KEEP_SIBLINGS=1` to opt out — required when running multiple
  * Claude Code windows simultaneously, since each window has its own MCP and
  * killing siblings would orphan the others. Single-window users (the common
  * case) want default-on behavior so no zombies linger.
@@ -185,7 +185,7 @@ export declare const __testing: {
     buildHealthDetailedResponse: typeof buildHealthDetailedResponse;
     healthCache: HealthCacheSnapshot;
     recordLastError: typeof recordLastError;
-    cmdlineLooksLikeKongcodeMcp: typeof cmdlineLooksLikeKongcodeMcp;
+    cmdlineLooksLikeLaqrumcodeMcp: typeof cmdlineLooksLikeLaqrumcodeMcp;
     dispatchHookWithDeadline: typeof dispatchHookWithDeadline;
     HOOK_HANDLER_DEADLINE_MS: number;
     applyHookConnectionPolicy: typeof applyHookConnectionPolicy;

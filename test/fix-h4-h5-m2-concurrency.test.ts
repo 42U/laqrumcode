@@ -78,10 +78,10 @@ function openClient(port: number): {
 }
 
 describe("H4: daemon-side hook handler execution deadline", () => {
-  const orig = process.env.KONGCODE_HOOK_HANDLER_TIMEOUT_MS;
+  const orig = process.env.LAQRUMCODE_HOOK_HANDLER_TIMEOUT_MS;
   afterEach(() => {
-    if (orig === undefined) delete process.env.KONGCODE_HOOK_HANDLER_TIMEOUT_MS;
-    else process.env.KONGCODE_HOOK_HANDLER_TIMEOUT_MS = orig;
+    if (orig === undefined) delete process.env.LAQRUMCODE_HOOK_HANDLER_TIMEOUT_MS;
+    else process.env.LAQRUMCODE_HOOK_HANDLER_TIMEOUT_MS = orig;
   });
 
   const fakeState = {} as unknown as GlobalPluginState;
@@ -144,10 +144,10 @@ describe("H5: connection ceiling + EMFILE accept policy", () => {
   });
 
   it("honors env overrides for the ceiling", async () => {
-    const prevMax = process.env.KONGCODE_DAEMON_MAX_CONNECTIONS;
-    const prevBacklog = process.env.KONGCODE_DAEMON_BACKLOG;
-    process.env.KONGCODE_DAEMON_MAX_CONNECTIONS = "8";
-    process.env.KONGCODE_DAEMON_BACKLOG = "16";
+    const prevMax = process.env.LAQRUMCODE_DAEMON_MAX_CONNECTIONS;
+    const prevBacklog = process.env.LAQRUMCODE_DAEMON_BACKLOG;
+    process.env.LAQRUMCODE_DAEMON_MAX_CONNECTIONS = "8";
+    process.env.LAQRUMCODE_DAEMON_BACKLOG = "16";
     try {
       const s = new DaemonServer({ socketPath: null, tcpPort: 0, log: SILENT_LOG });
       await s.listen();
@@ -155,10 +155,10 @@ describe("H5: connection ceiling + EMFILE accept policy", () => {
       expect(s._testLimits().backlog).toBe(16);
       await s.close();
     } finally {
-      if (prevMax === undefined) delete process.env.KONGCODE_DAEMON_MAX_CONNECTIONS;
-      else process.env.KONGCODE_DAEMON_MAX_CONNECTIONS = prevMax;
-      if (prevBacklog === undefined) delete process.env.KONGCODE_DAEMON_BACKLOG;
-      else process.env.KONGCODE_DAEMON_BACKLOG = prevBacklog;
+      if (prevMax === undefined) delete process.env.LAQRUMCODE_DAEMON_MAX_CONNECTIONS;
+      else process.env.LAQRUMCODE_DAEMON_MAX_CONNECTIONS = prevMax;
+      if (prevBacklog === undefined) delete process.env.LAQRUMCODE_DAEMON_BACKLOG;
+      else process.env.LAQRUMCODE_DAEMON_BACKLOG = prevBacklog;
     }
   });
 
@@ -167,8 +167,8 @@ describe("H5: connection ceiling + EMFILE accept policy", () => {
     // clears it. The key assertion: emitting 'error' with EMFILE does not throw
     // (a listener is attached) and schedules a resume. Pre-fix, no 'error'
     // listener existed → an unhandled 'error' event would crash the daemon.
-    const prevPause = process.env.KONGCODE_DAEMON_ACCEPT_PAUSE_MS;
-    process.env.KONGCODE_DAEMON_ACCEPT_PAUSE_MS = "60000";
+    const prevPause = process.env.LAQRUMCODE_DAEMON_ACCEPT_PAUSE_MS;
+    process.env.LAQRUMCODE_DAEMON_ACCEPT_PAUSE_MS = "60000";
     try {
       server = new DaemonServer({ socketPath: null, tcpPort: 0, log: SILENT_LOG });
       await server.listen();
@@ -178,21 +178,21 @@ describe("H5: connection ceiling + EMFILE accept policy", () => {
       // ENFILE takes the same path.
       expect(() => server!._testEmitAcceptError("ENFILE")).not.toThrow();
     } finally {
-      if (prevPause === undefined) delete process.env.KONGCODE_DAEMON_ACCEPT_PAUSE_MS;
-      else process.env.KONGCODE_DAEMON_ACCEPT_PAUSE_MS = prevPause;
+      if (prevPause === undefined) delete process.env.LAQRUMCODE_DAEMON_ACCEPT_PAUSE_MS;
+      else process.env.LAQRUMCODE_DAEMON_ACCEPT_PAUSE_MS = prevPause;
     }
   });
 });
 
 describe("M2(a): embed-queue-full throws a RETRYABLE error", () => {
-  const orig = process.env.KONGCODE_EMBED_QUEUE_MAX;
+  const orig = process.env.LAQRUMCODE_EMBED_QUEUE_MAX;
   afterEach(() => {
-    if (orig === undefined) delete process.env.KONGCODE_EMBED_QUEUE_MAX;
-    else process.env.KONGCODE_EMBED_QUEUE_MAX = orig;
+    if (orig === undefined) delete process.env.LAQRUMCODE_EMBED_QUEUE_MAX;
+    else process.env.LAQRUMCODE_EMBED_QUEUE_MAX = orig;
   });
 
   function makeReadyService(): any {
-    process.env.KONGCODE_EMBED_QUEUE_MAX = "2";
+    process.env.LAQRUMCODE_EMBED_QUEUE_MAX = "2";
     const config = { modelPath: "/tmp/fake-model.gguf", dimensions: 1024 } as unknown as EmbeddingConfig;
     const svc = new EmbeddingService(config) as any;
     svc.ready = true;
@@ -251,15 +251,15 @@ describe("M2(a): dispatcher maps a retryable-coded throw to that code", () => {
 
 describe("M2(b): per-connection in-flight sub-cap", () => {
   let server: DaemonServer | null = null;
-  const prev = process.env.KONGCODE_DAEMON_MAX_INFLIGHT_PER_SOCKET;
+  const prev = process.env.LAQRUMCODE_DAEMON_MAX_INFLIGHT_PER_SOCKET;
   afterEach(async () => {
     if (server) { await server.close(); server = null; }
-    if (prev === undefined) delete process.env.KONGCODE_DAEMON_MAX_INFLIGHT_PER_SOCKET;
-    else process.env.KONGCODE_DAEMON_MAX_INFLIGHT_PER_SOCKET = prev;
+    if (prev === undefined) delete process.env.LAQRUMCODE_DAEMON_MAX_INFLIGHT_PER_SOCKET;
+    else process.env.LAQRUMCODE_DAEMON_MAX_INFLIGHT_PER_SOCKET = prev;
   });
 
   it("one socket over its sub-cap gets the retryable code while a second socket still succeeds", async () => {
-    process.env.KONGCODE_DAEMON_MAX_INFLIGHT_PER_SOCKET = "2";
+    process.env.LAQRUMCODE_DAEMON_MAX_INFLIGHT_PER_SOCKET = "2";
     server = new DaemonServer({ socketPath: null, tcpPort: 0, log: SILENT_LOG });
 
     // A handler we can hold open: it resolves only when we release a gate, so we
@@ -307,7 +307,7 @@ describe("M2(b): per-connection in-flight sub-cap", () => {
   });
 
   it("meta.* is exempt from the per-socket sub-cap (lifecycle never starved)", async () => {
-    process.env.KONGCODE_DAEMON_MAX_INFLIGHT_PER_SOCKET = "1";
+    process.env.LAQRUMCODE_DAEMON_MAX_INFLIGHT_PER_SOCKET = "1";
     server = new DaemonServer({ socketPath: null, tcpPort: 0, log: SILENT_LOG });
     let release!: () => void;
     const gate = new Promise<void>((r) => { release = r; });

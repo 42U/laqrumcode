@@ -45,7 +45,7 @@ sed -i "s/\"version\": \"[^\"]*\"/\"version\": \"${VERSION}\"/" "$ROOT/package.j
 sed -i "s/\"version\": \"[^\"]*\"/\"version\": \"${VERSION}\"/" "$ROOT/.claude-plugin/plugin.json"
 
 # 3. DAEMON_VERSION in src/daemon/index.ts is now dynamic (reads package.json
-#    at runtime, or __KONGCODE_VERSION__ injected by esbuild --define at bundle
+#    at runtime, or __LAQRUMCODE_VERSION__ injected by esbuild --define at bundle
 #    time). No source bump needed; staleness check below skips it for the same
 #    reason.
 

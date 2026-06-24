@@ -7,7 +7,7 @@
  * the response is compact enough to inject into a hook turn if things go
  * sideways.
  *
- * This is the programmatic counterpart to the skills/kongcode-health
+ * This is the programmatic counterpart to the skills/laqrumcode-health
  * text-based skill — same data, structured output.
  */
 import type { GlobalPluginState, SessionState } from "../engine/state.js";

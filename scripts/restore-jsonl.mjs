@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 /**
- * KongCode JSON Lines restore — reads a `scripts/backup-jsonl.mjs` backup
+ * LaqrumCode JSON Lines restore — reads a `scripts/backup-jsonl.mjs` backup
  * directory (one `<table>.jsonl` per table + a `metadata.json` manifest) back
- * into a kongcode SurrealDB graph.
+ * into a laqrumcode SurrealDB graph.
  *
- * Activated by skills/kongcode-restore-jsonl/SKILL.md. Counterpart to
+ * Activated by skills/laqrumcode-restore-jsonl/SKILL.md. Counterpart to
  * scripts/backup-jsonl.mjs — keep NODE_TABLES + EDGE_TABLES in sync with it.
  *
  * Usage:
@@ -29,7 +29,7 @@
  *   SURREAL_URL   — default ws://127.0.0.1:8000/rpc
  *   SURREAL_USER  — default root
  *   SURREAL_PASS  — default root
- *   SURREAL_NS    — default kong
+ *   SURREAL_NS    — default laqrum
  *   SURREAL_DB    — default memory
  */
 
@@ -41,7 +41,7 @@ import { fileURLToPath } from "node:url";
 const URL = process.env.SURREAL_URL || "ws://127.0.0.1:8000/rpc";
 const USER = process.env.SURREAL_USER || "root";
 const PASS = process.env.SURREAL_PASS || "root";
-const NS = process.env.SURREAL_NS || "kong";
+const NS = process.env.SURREAL_NS || "laqrum";
 const DB = process.env.SURREAL_DB || "memory";
 
 /** Node tables — MUST match scripts/backup-jsonl.mjs NODE_TABLES. Imported FIRST. */
@@ -406,12 +406,12 @@ async function main() {
     process.exit(1);
   }
   if (!entries.some(f => f.endsWith(".jsonl") || f === "metadata.json")) {
-    console.error(`restore-jsonl: ${backupDir} contains no .jsonl files or metadata.json — not a kongcode backup dir.`);
+    console.error(`restore-jsonl: ${backupDir} contains no .jsonl files or metadata.json — not a laqrumcode backup dir.`);
     process.exit(1);
   }
 
   const strategy = flags.overwrite ? "overwrite" : flags.mergeByHash ? "merge-by-hash" : "skip-if-exists";
-  console.log(`KongCode JSON-Lines restore`);
+  console.log(`LaqrumCode JSON-Lines restore`);
   console.log(`  Source:   ${backupDir}`);
   console.log(`  Target:   ${URL} ns=${NS} db=${DB}`);
   console.log(`  Strategy: ${strategy}${flags.dryRun ? " (dry-run, no writes)" : ""}`);

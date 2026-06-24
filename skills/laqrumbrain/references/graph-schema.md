@@ -1,4 +1,4 @@
-# KongCode Graph Schema
+# LaqrumCode Graph Schema
 
 ## Tables (25)
 

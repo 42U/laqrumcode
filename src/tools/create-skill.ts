@@ -1,5 +1,5 @@
 /**
- * create_skill MCP tool. Writes a skill row into the kongcode DB as the
+ * create_skill MCP tool. Writes a skill row into the laqrumcode DB as the
  * canonical location for procedural knowledge. Replaces the historical
  * SKILL.md-on-disk authoring path: bodies live in the vector-indexed
  * `skill` table where they are semantically recallable, smaller, and
@@ -69,7 +69,7 @@ export async function handleCreateSkill(
       // query time. Pre-fix, rows landed with source=NONE and showed up
       // as orphans in source-distribution audits (this is the bug that
       // caused me to wrongly archive 6 legitimate skills earlier this
-      // turn — including kongcode-heal-skill-corruption itself).
+      // turn — including laqrumcode-heal-skill-corruption itself).
       source: "create_skill_tool",
       embeddingText: `${name}: ${description}\n\n${body}`,
       sessionId: session.sessionId,

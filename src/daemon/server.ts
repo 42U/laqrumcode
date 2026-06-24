@@ -1,5 +1,5 @@
 /**
- * JSON-RPC 2.0 server for the kongcode daemon.
+ * JSON-RPC 2.0 server for the laqrumcode daemon.
  *
  * Wire format: line-delimited JSON over Unix socket (Linux, macOS) or TCP
  * loopback (Windows / explicit override). Each direction sends one JSON
@@ -7,7 +7,7 @@
  *
  * Why line-delimited and not length-prefixed: simpler parser, no streaming
  * state machine needed, robust to socket partial reads, and trivial to
- * inspect via `nc -U ~/.kongcode-daemon.sock` for live debugging. Trade-off
+ * inspect via `nc -U ~/.laqrumcode-daemon.sock` for live debugging. Trade-off
  * is that no payload may contain raw newlines — JSON.stringify already
  * escapes \n inside strings so this is a non-issue in practice.
  *
@@ -61,7 +61,7 @@ const RPC_UNAUTHORIZED = IpcErrorCode.UNAUTHORIZED;
  *    - meta.handshake ESTABLISHES auth (verifies the 0600 per-user token, then
  *      calls ctx.markAuthed); gating it would make TCP auth impossible.
  *    - meta.health is the probeTcpOccupant liveness path (server.ts ~441) used
- *      to tell a kongcode daemon from a foreign squatter on an in-use port,
+ *      to tell a laqrumcode daemon from a foreign squatter on an in-use port,
  *      before any client could have handshook; it returns only liveness/stats,
  *      no graph data.
  *  Every OTHER meta.* (meta.shutdown, meta.requestSupersede, and any future
@@ -147,7 +147,7 @@ export interface DaemonServerOpts {
   onSupersedeDeadline?: () => void;
   /** Idle-reaper: when clients.size === 0 for this many ms, fire onIdleReap.
    *  Set to 0 to disable. Default wired in daemon/index.ts (0.7.11+) is
-   *  60s; users can override via KONGCODE_DAEMON_IDLE_TIMEOUT_MS env var.
+   *  60s; users can override via LAQRUMCODE_DAEMON_IDLE_TIMEOUT_MS env var.
    *  Without this, a daemon that loses its last client just sits forever
    *  holding BGE-M3 in RAM — the gap the user named when asking "what
    *  happened to the reaper that handled these sorts of things?" */
@@ -168,28 +168,28 @@ export interface DaemonServerOpts {
   /** E10: token presented when probing an EADDRINUSE occupant on the TCP listen
    *  path. meta.health needs no auth so the probe works without it, but if a
    *  future health gate is added this lets the probe still identify a sibling
-   *  kongcode daemon. Daemon main passes the current per-user token-file
+   *  laqrumcode daemon. Daemon main passes the current per-user token-file
    *  contents (readDaemonToken). Optional — null/undefined means "probe
    *  unauthenticated", which is sufficient to classify the occupant. */
   probeToken?: string | null;
   /** E10: how long the EADDRINUSE occupant probe waits for a meta.health reply
    *  before giving up and classifying the occupant as foreign/unresponsive.
-   *  Small by design — a live local kongcode daemon answers meta.health in
+   *  Small by design — a live local laqrumcode daemon answers meta.health in
    *  single-digit ms. Default 1500ms; tests override to keep the suite fast. */
   probeTimeoutMs?: number;
 }
 
 /** E10: thrown by listen() when the TCP port is already bound (EADDRINUSE) and
  *  the daemon couldn't take it over. `kind` makes the failure DISTINGUISHABLE —
- *  callers (and tests) can tell a sibling kongcode daemon already owning the
- *  port ("kongcode-daemon") from an unrelated foreign process squatting it
+ *  callers (and tests) can tell a sibling laqrumcode daemon already owning the
+ *  port ("laqrumcode-daemon") from an unrelated foreign process squatting it
  *  ("foreign"), instead of seeing a generic Error('listen EADDRINUSE'). This is
  *  the asymmetry E10 fixes: the UDS path already unlinks a stale socket and
  *  re-binds; the TCP path used to just rethrow the raw bind error with no
  *  diagnosis of WHO holds the port. */
 export class TcpPortInUseError extends Error {
   constructor(
-    public readonly kind: "kongcode-daemon" | "foreign",
+    public readonly kind: "laqrumcode-daemon" | "foreign",
     public readonly port: number,
     message: string,
   ) {
@@ -246,10 +246,10 @@ export class DaemonServer {
    *  error instead of piling onto the store/embedder — which on a single-host
    *  daemon would deepen the embed FIFO and worsen, not absorb, the overload.
    *  meta.* (handshake/health/shutdown/supersede) is always exempt so
-   *  lifecycle never wedges under load. Override via KONGCODE_DAEMON_MAX_INFLIGHT. */
+   *  lifecycle never wedges under load. Override via LAQRUMCODE_DAEMON_MAX_INFLIGHT. */
   private readonly maxInFlight =
-    Number(process.env.KONGCODE_DAEMON_MAX_INFLIGHT) > 0
-      ? Number(process.env.KONGCODE_DAEMON_MAX_INFLIGHT)
+    Number(process.env.LAQRUMCODE_DAEMON_MAX_INFLIGHT) > 0
+      ? Number(process.env.LAQRUMCODE_DAEMON_MAX_INFLIGHT)
       : 256;
 
   /** M2(b): per-connection in-flight RPC counts. The K12 global ceiling
@@ -267,9 +267,9 @@ export class DaemonServer {
    *  a single runaway socket can occupy at most ~25% of the daemon before it
    *  starts shedding its OWN excess. Always ≥1 so the cap can never wedge a
    *  socket out entirely. meta.* is exempt (lifecycle must never be starved).
-   *  Override via KONGCODE_DAEMON_MAX_INFLIGHT_PER_SOCKET. */
+   *  Override via LAQRUMCODE_DAEMON_MAX_INFLIGHT_PER_SOCKET. */
   private readonly maxInFlightPerSocket = (() => {
-    const explicit = Number(process.env.KONGCODE_DAEMON_MAX_INFLIGHT_PER_SOCKET);
+    const explicit = Number(process.env.LAQRUMCODE_DAEMON_MAX_INFLIGHT_PER_SOCKET);
     if (Number.isFinite(explicit) && explicit > 0) return Math.max(1, Math.round(explicit));
     return Math.max(1, Math.floor(this.maxInFlight / 4));
   })();
@@ -282,28 +282,28 @@ export class DaemonServer {
    *  windows) yet leaves headroom under the default 1024 fd soft limit for the
    *  daemon's own DB/embedder/log fds. Past this, Node stops accepting and
    *  queues at the kernel backlog until sockets free up. Override via
-   *  KONGCODE_DAEMON_MAX_CONNECTIONS. */
+   *  LAQRUMCODE_DAEMON_MAX_CONNECTIONS. */
   private readonly maxConnections =
-    Number(process.env.KONGCODE_DAEMON_MAX_CONNECTIONS) > 0
-      ? Number(process.env.KONGCODE_DAEMON_MAX_CONNECTIONS)
+    Number(process.env.LAQRUMCODE_DAEMON_MAX_CONNECTIONS) > 0
+      ? Number(process.env.LAQRUMCODE_DAEMON_MAX_CONNECTIONS)
       : 512;
 
   /** H5: explicit listen() backlog (kernel SYN/accept queue depth). Node's
    *  default (511) is fine, but pinning it makes the ceiling explicit and
-   *  tunable for constrained hosts. Override via KONGCODE_DAEMON_BACKLOG. */
+   *  tunable for constrained hosts. Override via LAQRUMCODE_DAEMON_BACKLOG. */
   private readonly listenBacklog =
-    Number(process.env.KONGCODE_DAEMON_BACKLOG) > 0
-      ? Number(process.env.KONGCODE_DAEMON_BACKLOG)
+    Number(process.env.LAQRUMCODE_DAEMON_BACKLOG) > 0
+      ? Number(process.env.LAQRUMCODE_DAEMON_BACKLOG)
       : 511;
 
   /** H5: how long to pause accepting after an EMFILE/ENFILE (fd exhaustion)
    *  accept error before resuming, instead of crash-looping on a tight accept
    *  retry. Short enough to recover quickly once fds free, long enough to stop
    *  burning CPU re-hitting the same limit. Override via
-   *  KONGCODE_DAEMON_ACCEPT_PAUSE_MS. */
+   *  LAQRUMCODE_DAEMON_ACCEPT_PAUSE_MS. */
   private readonly acceptPauseMs =
-    Number(process.env.KONGCODE_DAEMON_ACCEPT_PAUSE_MS) > 0
-      ? Number(process.env.KONGCODE_DAEMON_ACCEPT_PAUSE_MS)
+    Number(process.env.LAQRUMCODE_DAEMON_ACCEPT_PAUSE_MS) > 0
+      ? Number(process.env.LAQRUMCODE_DAEMON_ACCEPT_PAUSE_MS)
       : 1_000;
 
   /** H5: timers that resume accepting after an fd-exhaustion pause — tracked so
@@ -434,20 +434,20 @@ export class DaemonServer {
 
   /** E10: probe whoever holds an in-use TCP port by opening a short-lived
    *  connection and asking meta.health (which needs no auth — the token gate is
-   *  only on meta.handshake and non-meta methods, so any kongcode daemon
+   *  only on meta.handshake and non-meta methods, so any laqrumcode daemon
    *  answers it). A well-formed JSON-RPC health reply ⇒ the occupant IS a
-   *  kongcode daemon (this OS user's sibling, or — on a hash-collided shared
+   *  laqrumcode daemon (this OS user's sibling, or — on a hash-collided shared
    *  loopback port — another user's; either way a real daemon, not a squatter).
    *  No reply / connection refused / unparseable bytes ⇒ a FOREIGN process.
    *  This is what lets listen() throw a DISTINGUISHABLE TcpPortInUseError
    *  instead of a generic bind failure. Best-effort and bounded; never throws —
-   *  returns "kongcode-daemon" | "foreign". Presents probeToken if we have one
+   *  returns "laqrumcode-daemon" | "foreign". Presents probeToken if we have one
    *  for forward-compat with a future authed health endpoint. */
-  private async probeTcpOccupant(port: number): Promise<"kongcode-daemon" | "foreign"> {
+  private async probeTcpOccupant(port: number): Promise<"laqrumcode-daemon" | "foreign"> {
     const timeoutMs = this.opts.probeTimeoutMs ?? 1_500;
-    return new Promise<"kongcode-daemon" | "foreign">((resolve) => {
+    return new Promise<"laqrumcode-daemon" | "foreign">((resolve) => {
       let settled = false;
-      const done = (verdict: "kongcode-daemon" | "foreign") => {
+      const done = (verdict: "laqrumcode-daemon" | "foreign") => {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
@@ -467,18 +467,18 @@ export class DaemonServer {
         buffer += chunk.toString("utf8");
         const nl = buffer.indexOf("\n");
         if (nl === -1) {
-          if (buffer.length > 64 * 1024) done("foreign"); // never a kongcode health line
+          if (buffer.length > 64 * 1024) done("foreign"); // never a laqrumcode health line
           return;
         }
         try {
           const resp = JSON.parse(buffer.slice(0, nl)) as { jsonrpc?: string; result?: { ok?: boolean }; error?: unknown };
-          // A kongcode daemon answers meta.health with jsonrpc:"2.0" and either
+          // A laqrumcode daemon answers meta.health with jsonrpc:"2.0" and either
           // a result (ok:true + stats) or a structured JSON-RPC error. Either is
           // proof it speaks our protocol — a foreign squatter cannot produce
           // this shape. We don't require result.ok specifically because a daemon
           // mid-bootstrap could in principle error; the protocol marker is enough.
           if (resp && resp.jsonrpc === "2.0" && (resp.result !== undefined || resp.error !== undefined)) {
-            done("kongcode-daemon");
+            done("laqrumcode-daemon");
           } else {
             done("foreign");
           }
@@ -487,8 +487,8 @@ export class DaemonServer {
         }
       });
       // ECONNREFUSED (port freed between EADDRINUSE and probe), reset, etc. ⇒
-      // not a reachable kongcode daemon. Treat as foreign so the caller surfaces
-      // a clear "couldn't bind and couldn't confirm a kongcode daemon" message
+      // not a reachable laqrumcode daemon. Treat as foreign so the caller surfaces
+      // a clear "couldn't bind and couldn't confirm a laqrumcode daemon" message
       // rather than silently adopting.
       sock.on("error", () => done("foreign"));
       sock.on("close", () => done("foreign"));
@@ -500,7 +500,7 @@ export class DaemonServer {
    *  the spawn lock + PID file probe before calling listen()).
    *
    *  E10: the TCP path catches EADDRINUSE explicitly and probes the occupant
-   *  (probeTcpOccupant) so the failure is DISTINGUISHABLE — a sibling kongcode
+   *  (probeTcpOccupant) so the failure is DISTINGUISHABLE — a sibling laqrumcode
    *  daemon vs a foreign squatter — rather than a generic raw bind error. */
   async listen(): Promise<void> {
     if (this.opts.socketPath) {
@@ -564,26 +564,26 @@ export class DaemonServer {
         try { this.tcpServer!.close(); } catch {}
         this.tcpServer = null;
         const occupant = await this.probeTcpOccupant(port);
-        if (occupant === "kongcode-daemon") {
-          // A real kongcode daemon already owns the port. We can't (and must
+        if (occupant === "laqrumcode-daemon") {
+          // A real laqrumcode daemon already owns the port. We can't (and must
           // not) double-bind — the singleton invariant means that daemon should
           // serve this user. The spawn lock should have caused adoption
           // upstream; surface a clear, ACTIONABLE error distinct from a generic
           // bind failure so the operator/log shows the singleton collision.
           throw new TcpPortInUseError(
-            "kongcode-daemon",
+            "laqrumcode-daemon",
             port,
-            `TCP 127.0.0.1:${port} is already served by another kongcode daemon (singleton already running for this user). ` +
+            `TCP 127.0.0.1:${port} is already served by another laqrumcode daemon (singleton already running for this user). ` +
               `This daemon will not start a second instance; the existing daemon should be reused. ` +
-              `If it is actually stale, stop it (or remove ${"~/.kongcode-daemon.pid"}) and retry.`,
+              `If it is actually stale, stop it (or remove ${"~/.laqrumcode-daemon.pid"}) and retry.`,
           );
         }
-        // Foreign squatter — a non-kongcode process holds the per-user port.
+        // Foreign squatter — a non-laqrumcode process holds the per-user port.
         throw new TcpPortInUseError(
           "foreign",
           port,
-          `TCP 127.0.0.1:${port} is in use by a FOREIGN (non-kongcode) process — it did not answer a meta.health probe. ` +
-            `kongcode cannot bind its daemon endpoint. Free the port, or set KONGCODE_DAEMON_PORT to an unused port.`,
+          `TCP 127.0.0.1:${port} is in use by a FOREIGN (non-laqrumcode) process — it did not answer a meta.health probe. ` +
+            `laqrumcode cannot bind its daemon endpoint. Free the port, or set LAQRUMCODE_DAEMON_PORT to an unused port.`,
         );
       }
       // H5: install the steady-state connection ceiling + EMFILE/ENFILE accept
@@ -702,9 +702,9 @@ export class DaemonServer {
   /** Max time close() waits for in-flight RPCs to settle before forcibly
    *  ending sockets. Kept under daemon/index.ts's 8s shutdown watchdog so the
    *  drain finishes (or is abandoned) before the watchdog hard-exits. Override
-   *  via KONGCODE_DAEMON_DRAIN_TIMEOUT_MS (tests use a small value). */
+   *  via LAQRUMCODE_DAEMON_DRAIN_TIMEOUT_MS (tests use a small value). */
   private drainTimeoutMs(): number {
-    const env = Number(process.env.KONGCODE_DAEMON_DRAIN_TIMEOUT_MS);
+    const env = Number(process.env.LAQRUMCODE_DAEMON_DRAIN_TIMEOUT_MS);
     return Number.isFinite(env) && env >= 0 ? env : 5_000;
   }
 

@@ -6,12 +6,12 @@
  *      (+ legacy {date,count} file). Asserts today / 7d / 30d bucketing and
  *      malformed-line tolerance. No DB.
  *   2. dirSizeBytes — recursive directory size walk over a temp tree. No DB.
- *   3. statsAction end-to-end against a live kong_test DB: seed `session`
+ *   3. statsAction end-to-end against a live laqrum_test DB: seed `session`
  *      rows with token counts both inside and outside the 7d window, plus a
  *      spending-ledger fixture, and assert the 7d/30d aggregation + budget
  *      math in the structured `details`.
  *
- * The live-DB block uses the same kong_test harness as
+ * The live-DB block uses the same laqrum_test harness as
  * test/duplicate-row-fix.test.ts and is skipped when SKIP_INTEGRATION=1 or
  * the local SurrealDB isn't reachable.
  */
@@ -179,7 +179,7 @@ describe("dirSizeBytes", () => {
 // ── 3. statsAction — live DB aggregation ───────────────────────────────────
 
 const SKIP = process.env.SKIP_INTEGRATION === "1";
-const TEST_NS = "kong_test";
+const TEST_NS = "laqrum_test";
 const TEST_DB = `stats_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 
 let store: SurrealStore;
@@ -288,8 +288,8 @@ describe("statsAction (live DB)", () => {
     for (let i = 0; i < 9; i++) lines.push(JSON.stringify({ date: today, ts: now - i * 1000, pid: 1000 + i }));
     writeFileSync(join(cacheDir, "auto-drain-spending.ndjson"), lines.join("\n") + "\n", "utf-8");
 
-    const prevBudget = process.env.KONGCODE_AUTO_DRAIN_MAX_DAILY;
-    process.env.KONGCODE_AUTO_DRAIN_MAX_DAILY = "10"; // 9/10 = 90% → critical-adjacent warn
+    const prevBudget = process.env.LAQRUMCODE_AUTO_DRAIN_MAX_DAILY;
+    process.env.LAQRUMCODE_AUTO_DRAIN_MAX_DAILY = "10"; // 9/10 = 90% → critical-adjacent warn
     try {
       const state = makeState(cacheDir, dataDir);
       const res = await statsAction(state);
@@ -301,8 +301,8 @@ describe("statsAction (live DB)", () => {
       const alert = d.alerts.find((a: any) => a.code === "drain.budget_near_cap");
       expect(alert).toBeTruthy();
     } finally {
-      if (prevBudget === undefined) delete process.env.KONGCODE_AUTO_DRAIN_MAX_DAILY;
-      else process.env.KONGCODE_AUTO_DRAIN_MAX_DAILY = prevBudget;
+      if (prevBudget === undefined) delete process.env.LAQRUMCODE_AUTO_DRAIN_MAX_DAILY;
+      else process.env.LAQRUMCODE_AUTO_DRAIN_MAX_DAILY = prevBudget;
       rmSync(cacheDir, { recursive: true, force: true });
       rmSync(dataDir, { recursive: true, force: true });
     }

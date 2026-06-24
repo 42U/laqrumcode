@@ -40,7 +40,7 @@
  *
  * CARDINAL: this primitive is the ONLY place a content DELETE may live. Do
  * not loosen the D4 regex to permit DELETEs elsewhere — that re-opens the
- * 2026-04-06 silent-data-loss class (KongBrain fork commit 5b93d73 destroyed
+ * 2026-04-06 silent-data-loss class (LaqrumBrain fork commit 5b93d73 destroyed
  * user memory for ~6 weeks). Add new gated sites here with a `// GATED-GC:`
  * marker, never by blanket-whitelisting a file.
  */

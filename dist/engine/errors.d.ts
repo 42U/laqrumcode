@@ -2,7 +2,7 @@
  * Lightweight error swallowing with severity levels.
  *
  * - swallow(ctx, e)       — SILENT: expected degradation (embeddings offline, non-critical telemetry).
- *                           Only visible with KONGCODE_DEBUG=1.
+ *                           Only visible with LAQRUMCODE_DEBUG=1.
  * - swallow.warn(ctx, e)  — WARN: unexpected but recoverable (DB query failure, compaction failure).
  *                           Always logged to stderr.
  * - swallow.error(ctx, e) — ERROR: something is genuinely broken (cleanup failure, schema failure).
@@ -37,7 +37,7 @@ export declare const RECORD_ID_RE: RegExp;
  */
 export declare function isUniqueViolation(err: unknown): boolean;
 /**
- * Swallow an error silently. Only visible with KONGCODE_DEBUG=1.
+ * Swallow an error silently. Only visible with LAQRUMCODE_DEBUG=1.
  * Use for expected degradation (embeddings down, non-critical graph edges).
  */
 declare function swallow(context: string, err?: unknown): void;

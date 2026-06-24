@@ -15,7 +15,7 @@ import { runDeferredCleanup } from "../src/engine/deferred-cleanup.js";
 // ── Temp dir helper ──
 
 function makeTmpDir(): string {
-  const dir = join(tmpdir(), `kongbrain-persist-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+  const dir = join(tmpdir(), `laqrumbrain-persist-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
   mkdirSync(dir, { recursive: true });
   return dir;
 }
@@ -42,7 +42,7 @@ describe("writeHandoffFileSync", () => {
 
     writeHandoffFileSync(data, dir);
 
-    const path = join(dir, ".kongcode-handoff.json");
+    const path = join(dir, ".laqrumcode-handoff.json");
     expect(existsSync(path)).toBe(true);
 
     const content = JSON.parse(readFileSync(path, "utf-8"));
@@ -85,8 +85,8 @@ describe("readAndDeleteHandoffFile", () => {
     expect(result!.lastUserText).toBe("deploy it");
 
     // File should be deleted
-    expect(existsSync(join(dir, ".kongcode-handoff.json"))).toBe(false);
-    expect(existsSync(join(dir, ".kongcode-handoff.json.processing"))).toBe(false);
+    expect(existsSync(join(dir, ".laqrumcode-handoff.json"))).toBe(false);
+    expect(existsSync(join(dir, ".laqrumcode-handoff.json.processing"))).toBe(false);
   });
 
   it("returns null when no file exists", () => {
@@ -96,7 +96,7 @@ describe("readAndDeleteHandoffFile", () => {
 
   it("truncates long fields for safety", () => {
     dir = makeTmpDir();
-    writeFileSync(join(dir, ".kongcode-handoff.json"), JSON.stringify({
+    writeFileSync(join(dir, ".laqrumcode-handoff.json"), JSON.stringify({
       sessionId: "x".repeat(500),
       timestamp: "t".repeat(100),
       userTurnCount: 5,
@@ -115,7 +115,7 @@ describe("readAndDeleteHandoffFile", () => {
   it("rejects prototype pollution attempts", () => {
     dir = makeTmpDir();
     // Write raw JSON with __proto__ key (JSON.stringify strips it)
-    writeFileSync(join(dir, ".kongcode-handoff.json"),
+    writeFileSync(join(dir, ".laqrumcode-handoff.json"),
       '{"__proto__":{"isAdmin":true},"sessionId":"s1","timestamp":"","userTurnCount":0,"lastUserText":"","lastAssistantText":"","unextractedTokens":0}');
 
     const result = readAndDeleteHandoffFile(dir);
@@ -124,14 +124,14 @@ describe("readAndDeleteHandoffFile", () => {
 
   it("handles corrupted JSON gracefully", () => {
     dir = makeTmpDir();
-    writeFileSync(join(dir, ".kongcode-handoff.json"), "not json{{{");
+    writeFileSync(join(dir, ".laqrumcode-handoff.json"), "not json{{{");
     const result = readAndDeleteHandoffFile(dir);
     expect(result).toBeNull();
   });
 
   it("handles non-object JSON (array)", () => {
     dir = makeTmpDir();
-    writeFileSync(join(dir, ".kongcode-handoff.json"), "[1,2,3]");
+    writeFileSync(join(dir, ".laqrumcode-handoff.json"), "[1,2,3]");
     const result = readAndDeleteHandoffFile(dir);
     expect(result).toBeNull();
   });
@@ -139,16 +139,16 @@ describe("readAndDeleteHandoffFile", () => {
   it("cleans up stale .processing files", () => {
     dir = makeTmpDir();
     // Simulate a crash: .processing file exists but no .json
-    writeFileSync(join(dir, ".kongcode-handoff.json.processing"), "stale data");
+    writeFileSync(join(dir, ".laqrumcode-handoff.json.processing"), "stale data");
 
     const result = readAndDeleteHandoffFile(dir);
     expect(result).toBeNull();
-    expect(existsSync(join(dir, ".kongcode-handoff.json.processing"))).toBe(false);
+    expect(existsSync(join(dir, ".laqrumcode-handoff.json.processing"))).toBe(false);
   });
 
   it("validates field types (non-string sessionId becomes empty)", () => {
     dir = makeTmpDir();
-    writeFileSync(join(dir, ".kongcode-handoff.json"), JSON.stringify({
+    writeFileSync(join(dir, ".laqrumcode-handoff.json"), JSON.stringify({
       sessionId: 12345,  // should be string
       timestamp: null,
       userTurnCount: "not a number",

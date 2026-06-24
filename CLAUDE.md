@@ -1,10 +1,10 @@
-# kongcode
+# laqrumcode
 
 ## Standards for every action
 
 **Be factually correct.** Do not guess. If you do not know, check. If you cannot check, say so. Speculation is allowed only when the user explicitly invites it.
 
-**Slow down on anything non-trivial.** Before acting, consider multiple angles. Read the surrounding code. Query kongcode for prior decisions on similar work. Run probes that test the assumption you are about to act on. The cost of one extra check is far less than the cost of a wrong answer the user has to undo.
+**Slow down on anything non-trivial.** Before acting, consider multiple angles. Read the surrounding code. Query laqrumcode for prior decisions on similar work. Run probes that test the assumption you are about to act on. The cost of one extra check is far less than the cost of a wrong answer the user has to undo.
 
 **Verify before claiming done.** "Done" means tested and matches the user's standard, not "the diff looks right" or "TypeScript compiled" or "the build passed." Run the relevant tests. Exercise the actual feature end-to-end. Confirm the behavior. If you cannot fully verify, say so explicitly. Do not declare success on partial work.
 
@@ -32,7 +32,7 @@ Read recall scores honestly. Cosine similarity around 0.7+ is a strong match. 0.
 
 ## What to save (and what is already saved)
 
-kongcode automatically stores every turn and every tool call. Do not record those. Save only knowledge that improves future retrieval and would otherwise be lost.
+laqrumcode automatically stores every turn and every tool call. Do not record those. Save only knowledge that improves future retrieval and would otherwise be lost.
 
 **Save** via `record_finding` (single item) or `create_knowledge_gems` (structured set from a source):
 
@@ -72,7 +72,7 @@ If `recall` returns nothing for a topic that should have coverage, that is a ret
 
 ## Working in this repo specifically
 
-- Architecture, release rules, common pitfalls, and historical decisions are in the kongcode graph. Use `recall` first; do not duplicate them here.
+- Architecture, release rules, common pitfalls, and historical decisions are in the laqrumcode graph. Use `recall` first; do not duplicate them here.
 - Build/test workflow: `npm run build && npm test`. Tests must pass before any release tag.
 - Source layout: `src/daemon/` (long-lived process), `src/mcp-client/` (per-session JSON-RPC relay), `src/engine/` (retrieval, scoring, embeddings, hooks), `src/hook-handlers/` (production HTTP hooks called by Claude Code), `dist/` (compiled output the daemon actually loads at runtime).
 - After editing `src/`, rebuild `dist/` (`npm run build`) and restart the daemon for the change to take effect at runtime. Stale running daemons load older `dist/` and produce confusing "fix didn't work" symptoms.

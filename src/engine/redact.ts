@@ -9,7 +9,7 @@
  *
  * `SECRET_PATTERNS` is the single source of truth, shared with introspect.ts.
  *
- * Privacy is configured via ~/.kongcode/privacy.json (sibling of surreal-cred.json):
+ * Privacy is configured via ~/.laqrumcode/privacy.json (sibling of surreal-cred.json):
  *   {
  *     "redact_patterns": ["(?i)internal-token-[a-z0-9]{16}"],   // extra regexes (strings)
  *     "ignore_projects": ["client-x-confidential"],             // never store these projects' turns
@@ -68,7 +68,7 @@ export interface PrivacyConfig {
 let cached: PrivacyConfig | null = null;
 
 export function privacyConfigPath(): string {
-  return join(homedir(), ".kongcode", "privacy.json");
+  return join(homedir(), ".laqrumcode", "privacy.json");
 }
 
 /** Pure parse of a privacy.json object into a PrivacyConfig (built-ins + user
@@ -102,7 +102,7 @@ export function parsePrivacyConfig(raw: unknown): PrivacyConfig {
   return cfg;
 }
 
-/** Load + cache ~/.kongcode/privacy.json. NEVER throws: a missing or malformed
+/** Load + cache ~/.laqrumcode/privacy.json. NEVER throws: a missing or malformed
  *  file yields safe built-in defaults (secret patterns only). */
 export function loadPrivacyConfig(force = false): PrivacyConfig {
   if (cached && !force) return cached;

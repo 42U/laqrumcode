@@ -44,7 +44,7 @@ describe("soul_generate field sanitization", () => {
     return {
       isAvailable: () => true,
       queryFirst: vi.fn(async (sql: string) => {
-        if (sql.includes("FROM soul:kongbrain")) return createSoulSuccess ? [] : [{ id: "soul:kongbrain" }];
+        if (sql.includes("FROM soul:laqrumbrain")) return createSoulSuccess ? [] : [{ id: "soul:laqrumbrain" }];
         if (sql.includes("graduation_event")) return [];
         if (sql.includes("FROM concept")) return [{ count: 500 }];
         if (sql.includes("FROM memory")) return [{ count: 200 }];
@@ -97,8 +97,8 @@ describe("soul_generate field sanitization", () => {
       // result aborts the commit ("ownership lost") before the soul_generate
       // case runs — so the mock must report this row as still owned.
       if (sql.includes('status = "committing"') && sql.includes("committing_token")) return [{ id: "pending_work:test1" }];
-      if (sql.includes("FROM soul:kongbrain") && !sql.includes("SELECT *")) return [];
-      if (sql.includes("SELECT * FROM soul:kongbrain")) return [];
+      if (sql.includes("FROM soul:laqrumbrain") && !sql.includes("SELECT *")) return [];
+      if (sql.includes("SELECT * FROM soul:laqrumbrain")) return [];
       if (sql.includes("graduation_event")) return [];
       // checkGraduation queries
       if (sql.includes("FROM concept") && sql.includes("count")) return [{ count: 500 }];
@@ -118,9 +118,9 @@ describe("soul_generate field sanitization", () => {
       results: llmOutput,
     });
 
-    // Find the CREATE soul:kongbrain call
+    // Find the CREATE soul:laqrumbrain call
     const createCall = store.queryExec.mock.calls.find(
-      (c: any[]) => typeof c[0] === "string" && c[0].includes("CREATE soul:kongbrain"),
+      (c: any[]) => typeof c[0] === "string" && c[0].includes("CREATE soul:laqrumbrain"),
     );
     expect(createCall).toBeDefined();
 
@@ -158,7 +158,7 @@ describe("soul_generate field sanitization", () => {
       // K15 commit-ownership re-assert (see test1) — report this row as owned
       // so the commit reaches the soul_generate sanitization path.
       if (sql.includes('status = "committing"') && sql.includes("committing_token")) return [{ id: "pending_work:test2" }];
-      if (sql.includes("FROM soul:kongbrain")) return [];
+      if (sql.includes("FROM soul:laqrumbrain")) return [];
       if (sql.includes("graduation_event")) return [];
       if (sql.includes("count")) return [{ count: 500 }];
       if (sql.includes("retrieval_outcome")) return [{ total: 100, good: 90 }];
@@ -172,7 +172,7 @@ describe("soul_generate field sanitization", () => {
     });
 
     const createCall = store.queryExec.mock.calls.find(
-      (c: any[]) => typeof c[0] === "string" && c[0].includes("CREATE soul:kongbrain"),
+      (c: any[]) => typeof c[0] === "string" && c[0].includes("CREATE soul:laqrumbrain"),
     );
     expect(createCall).toBeDefined();
 

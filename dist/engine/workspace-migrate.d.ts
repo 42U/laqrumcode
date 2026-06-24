@@ -1,7 +1,7 @@
 /**
  * Workspace Migration — ingest OpenClaw's workspace files into SurrealDB.
  *
- * When a user switches from the default context engine to KongCode, their
+ * When a user switches from the default context engine to LaqrumCode, their
  * workspace may contain .md files, skill definitions, session transcripts,
  * and memory logs created by OpenClaw. This module:
  *
@@ -9,7 +9,7 @@
  *  2. Scans skills/ and .agents/skills/ for SKILL.md → proper `skill` records
  *  3. Scans memory/ for daily logs → `memory` records
  *  4. Ingests identity/user/agent files as memories + artifacts
- *  5. Archives originals into .kongbrain-archive/ so the workspace is clean
+ *  5. Archives originals into .laqrumbrain-archive/ so the workspace is clean
  *
  * IMPORTANT: This module NEVER touches user project files. A user's README.md,
  * package.json, docs/, test fixtures, scripts, etc. are left completely alone.

@@ -1,5 +1,5 @@
 /**
- * Strip kongcode structural XML tags from user-supplied text.
+ * Strip laqrumcode structural XML tags from user-supplied text.
  *
  * Prevents stored content from breaking out of its injection envelope
  * when retrieved and assembled into the LLM context. Applied at write
@@ -12,8 +12,8 @@ const STRUCTURAL_TAGS = [
     "active_directives",
     "session_directives",
     "reflection_context",
-    "kongcode_pending_work",
-    "kongcode-alert",
+    "laqrumcode_pending_work",
+    "laqrumcode-alert",
     "rules_reminder",
     "persisted-output",
     "user-prompt-submit-hook",

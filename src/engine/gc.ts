@@ -40,7 +40,7 @@
  *
  * CARDINAL: this primitive is the ONLY place a content DELETE may live. Do
  * not loosen the D4 regex to permit DELETEs elsewhere — that re-opens the
- * 2026-04-06 silent-data-loss class (KongBrain fork commit 5b93d73 destroyed
+ * 2026-04-06 silent-data-loss class (LaqrumBrain fork commit 5b93d73 destroyed
  * user memory for ~6 weeks). Add new gated sites here with a `// GATED-GC:`
  * marker, never by blanket-whitelisting a file.
  */
@@ -184,7 +184,7 @@ export interface GcHardDeleteOpts {
 /** Resolve the gc-backups directory under the configured cache dir. */
 function gcBackupDir(state: GlobalPluginState): string {
   const cacheDir =
-    state.config?.paths?.cacheDir ?? join(homedir(), ".kongcode", "cache");
+    state.config?.paths?.cacheDir ?? join(homedir(), ".laqrumcode", "cache");
   return join(cacheDir, "gc-backups");
 }
 
@@ -422,7 +422,7 @@ export async function gcHardDelete(
   );
 
   const snapshotLines: string[] = [];
-  snapshotLines.push(`-- kongcode gcHardDelete snapshot`);
+  snapshotLines.push(`-- laqrumcode gcHardDelete snapshot`);
   snapshotLines.push(`-- reason: ${reason}`);
   snapshotLines.push(`-- table: ${table}`);
   snapshotLines.push(`-- ids: ${idStrings.join(", ")}`);
@@ -671,7 +671,7 @@ export async function gcSweepOrphanedEdges(
   const perTable: Record<string, number> = {};
   const baselineLive: Record<string, number> = {};
   const snapshotLines: string[] = [
-    `-- kongcode gcSweepOrphanedEdges snapshot`,
+    `-- laqrumcode gcSweepOrphanedEdges snapshot`,
     `-- reason: ${reason}`,
     `-- generated_at: ${new Date().toISOString()}`,
     `-- detector: ${ORPHAN_PRED} (absent endpoint record)`,

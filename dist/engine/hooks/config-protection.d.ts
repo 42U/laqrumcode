@@ -6,7 +6,7 @@
  * hold real project metadata that legitimately needs editing, not just
  * lint/format rules.
  *
- * Bypass: KONGCODE_ALLOW_CONFIG_EDIT=1 skips the check for the lifetime
+ * Bypass: LAQRUMCODE_ALLOW_CONFIG_EDIT=1 skips the check for the lifetime
  * of the daemon. Useful when the user is intentionally tuning configs.
  */
 export declare function isProtectedConfigFile(filePath: string): boolean;

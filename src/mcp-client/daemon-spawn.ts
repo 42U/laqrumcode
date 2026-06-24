@@ -1,5 +1,5 @@
 /**
- * Daemon-spawn helper used by kongcode-mcp on startup.
+ * Daemon-spawn helper used by laqrumcode-mcp on startup.
  *
  * Implements the "client starts daemon if missing" lifecycle:
  *   1. Probe socket → if alive, return URL.
@@ -38,7 +38,7 @@ export interface DaemonSpawnOpts {
 
 /** Where the daemon is (or will be) reachable. Mirrors the daemon's own
  *  transport selection (daemon/index.ts): Unix-domain socket on linux/macOS,
- *  TCP loopback on Windows or when KONGCODE_DAEMON_TRANSPORT=tcp. Exactly one
+ *  TCP loopback on Windows or when LAQRUMCODE_DAEMON_TRANSPORT=tcp. Exactly one
  *  of {socketPath} / {tcpHost,tcpPort} is the live transport, but socketPath
  *  is always populated for diagnostics/log continuity. */
 export interface DaemonEndpoint {
@@ -55,12 +55,12 @@ const DEFAULT_HOME = homedir();
 /** Decide the client transport, symmetric with the daemon side
  *  (daemon/index.ts: `useUds = TRANSPORT !== "tcp" && platform !== "win32"`).
  *  Windows has no Unix sockets (the daemon binds TCP-only there), and the
- *  KONGCODE_DAEMON_TRANSPORT=tcp opt-in forces TCP on every platform. Kept
+ *  LAQRUMCODE_DAEMON_TRANSPORT=tcp opt-in forces TCP on every platform. Kept
  *  as a pure, testable function so the parity with the daemon is verifiable
  *  without spawning anything. */
 export function resolveTransport(env: NodeJS.ProcessEnv = process.env, plat: NodeJS.Platform = process.platform): "uds" | "tcp" {
   if (plat === "win32") return "tcp";
-  if (env.KONGCODE_DAEMON_TRANSPORT === "tcp") return "tcp";
+  if (env.LAQRUMCODE_DAEMON_TRANSPORT === "tcp") return "tcp";
   return "uds";
 }
 
@@ -113,7 +113,7 @@ export function stableHash32(s: string): number {
 }
 
 /** The TCP port the daemon binds. Must match daemon/index.ts exactly:
- *  - KONGCODE_DAEMON_PORT if set and valid → used verbatim, NO per-user offset
+ *  - LAQRUMCODE_DAEMON_PORT if set and valid → used verbatim, NO per-user offset
  *    (explicit operator intent; mirrors pickPort's env-override-wins rule).
  *  - else PORT_OFFSET_BASE + (hash(osUserDiscriminator) % PORT_OFFSET_RANGE) — the [28765,32764] window (T3).
  *
@@ -129,7 +129,7 @@ export function stableHash32(s: string): number {
  *  tcpPort=0 path in server.ts is test-only), so no discovery file is needed —
  *  both sides derive the port from the same constant + env + user identity. */
 export function resolveTcpPort(env: NodeJS.ProcessEnv = process.env): number {
-  const raw = env.KONGCODE_DAEMON_PORT;
+  const raw = env.LAQRUMCODE_DAEMON_PORT;
   if (raw) {
     const n = Number(raw);
     if (Number.isFinite(n) && n > 0) return Math.round(n);
@@ -148,7 +148,7 @@ export function resolveTcpPort(env: NodeJS.ProcessEnv = process.env): number {
  *  user can't read this file and is rejected at handshake. MUST stay identical
  *  on both sides — both derive the path from homedir(). */
 export function resolveDaemonTokenPath(home: string = homedir()): string {
-  return join(home, ".kongcode-daemon.token");
+  return join(home, ".laqrumcode-daemon.token");
 }
 
 /** Read the per-user handshake token, or null if the file is absent/unreadable
@@ -199,10 +199,10 @@ function isPidAlive(pid: number): boolean {
 }
 
 /** New daemon.pid format (0.7.65+) — JSON marker that identifies a real
- *  kongcode daemon. Legacy pre-0.7.65 daemons wrote bare PID strings; we
+ *  laqrumcode daemon. Legacy pre-0.7.65 daemons wrote bare PID strings; we
  *  read both transparently. */
 interface DaemonPidMarker {
-  marker: "kongcode-daemon";
+  marker: "laqrumcode-daemon";
   pid: number;
   startedAt: number;
   daemonVersion: string;
@@ -216,9 +216,9 @@ function readDaemonPidMarker(pidFile: string): DaemonPidMarker | null {
   if (!raw) return null;
   try {
     const parsed = JSON.parse(raw) as Partial<DaemonPidMarker>;
-    if (parsed && parsed.marker === "kongcode-daemon" && Number.isFinite(parsed.pid)) {
+    if (parsed && parsed.marker === "laqrumcode-daemon" && Number.isFinite(parsed.pid)) {
       return {
-        marker: "kongcode-daemon",
+        marker: "laqrumcode-daemon",
         pid: parsed.pid as number,
         startedAt: Number.isFinite(parsed.startedAt) ? (parsed.startedAt as number) : 0,
         daemonVersion: typeof parsed.daemonVersion === "string" ? parsed.daemonVersion : "?",
@@ -229,7 +229,7 @@ function readDaemonPidMarker(pidFile: string): DaemonPidMarker | null {
     // Legacy bare-PID format.
     const n = Number(raw);
     if (Number.isFinite(n) && n > 0) {
-      return { marker: "kongcode-daemon", pid: n, startedAt: 0, daemonVersion: "?" };
+      return { marker: "laqrumcode-daemon", pid: n, startedAt: 0, daemonVersion: "?" };
     }
     return null;
   }
@@ -245,9 +245,9 @@ function daemonCmdlineMatches(pid: number): boolean | null {
     if (!raw) return false;
     const joined = raw.replace(/\0/g, " ").toLowerCase();
     if (!joined.includes("node")) return false;
-    if (joined.includes("kongcode-daemon")) return true;
+    if (joined.includes("laqrumcode-daemon")) return true;
     if (joined.includes("daemon/index.js") || joined.includes("daemon/index.cjs")) return true;
-    if (joined.includes("kongcode") && joined.includes("daemon")) return true;
+    if (joined.includes("laqrumcode") && joined.includes("daemon")) return true;
     return false;
   } catch {
     return false;
@@ -305,22 +305,22 @@ function resolveDaemonScript(): string {
     // mcp-client/daemon-spawn.js → ../daemon/index.js
     return join(moduleDir, "..", "daemon", "index.js");
   } catch {
-    // SEA fallback — daemon binary lives at <pluginDir>/bin/kongcode-daemon-<platform>
+    // SEA fallback — daemon binary lives at <pluginDir>/bin/laqrumcode-daemon-<platform>
     return join(dirname(process.execPath), "..", "..", "dist", "daemon", "index.js");
   }
 }
 
 /** Get a daemon endpoint — either the existing one if alive, or spawn a new
  *  one. Transport-aware: returns a TCP endpoint {tcpHost,tcpPort} on Windows
- *  or under KONGCODE_DAEMON_TRANSPORT=tcp (matching the daemon's own bind
+ *  or under LAQRUMCODE_DAEMON_TRANSPORT=tcp (matching the daemon's own bind
  *  decision), else a Unix-socket endpoint. */
 export async function ensureDaemon(opts: DaemonSpawnOpts = {}): Promise<DaemonEndpoint> {
   const log = opts.log ?? { info: () => {}, warn: () => {}, error: () => {} };
   // Resolve all paths absolutely. The shared/ipc-types constants may use
   // relative paths or $HOME placeholders depending on how they're defined;
   // we rebuild from cacheDir + DEFAULT_HOME to be format-agnostic.
-  const socketPath = opts.socketPath ?? join(DEFAULT_HOME, ".kongcode-daemon.sock");
-  const cacheDir = opts.cacheDir ?? join(DEFAULT_HOME, ".kongcode", "cache");
+  const socketPath = opts.socketPath ?? join(DEFAULT_HOME, ".laqrumcode-daemon.sock");
+  const cacheDir = opts.cacheDir ?? join(DEFAULT_HOME, ".laqrumcode", "cache");
   const pidFile = join(cacheDir, "daemon.pid");
   const lockPath = join(cacheDir, "daemon.spawn.lock");
   const readyTimeoutMs = opts.readyTimeoutMs ?? 300_000; // 5 min cold first run
@@ -347,7 +347,7 @@ export async function ensureDaemon(opts: DaemonSpawnOpts = {}): Promise<DaemonEn
     return endpoint(false);
   }
 
-  // PID file probe with identity verification. If a live kongcode daemon
+  // PID file probe with identity verification. If a live laqrumcode daemon
   // owns the singleton lock but isn't serving its socket yet (still
   // bootstrapping, or transient stall), wait for it instead of spawning a
   // second daemon. A second daemon would double-run startDrainScheduler
@@ -362,13 +362,13 @@ export async function ensureDaemon(opts: DaemonSpawnOpts = {}): Promise<DaemonEn
       // cmdline === true → confirmed daemon, wait for its socket.
       // cmdline === null → non-Linux, can't verify; conservative: wait too.
       if (cmdline !== false) {
-        log.info(`[daemon-spawn] live kongcode daemon detected at pid=${marker.pid} v${marker.daemonVersion} — waiting for ${tcpMode ? `TCP ${tcpHost}:${tcpPort}` : "socket"} instead of spawning`);
+        log.info(`[daemon-spawn] live laqrumcode daemon detected at pid=${marker.pid} v${marker.daemonVersion} — waiting for ${tcpMode ? `TCP ${tcpHost}:${tcpPort}` : "socket"} instead of spawning`);
         const deadline = Date.now() + readyTimeoutMs;
         const ok = await pollSocketReady(probe, deadline, log);
         if (ok) return endpoint(false);
         log.warn(`[daemon-spawn] daemon pid=${marker.pid} alive but ${tcpMode ? "TCP endpoint" : "socket"} never became ready — proceeding to spawn fresh`);
       } else {
-        log.warn(`[daemon-spawn] daemon.pid claims pid=${marker.pid} but cmdline doesn't match kongcode daemon (recycled PID) — proceeding to spawn fresh`);
+        log.warn(`[daemon-spawn] daemon.pid claims pid=${marker.pid} but cmdline doesn't match laqrumcode daemon (recycled PID) — proceeding to spawn fresh`);
       }
     }
   }

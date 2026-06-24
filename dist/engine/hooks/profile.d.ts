@@ -2,13 +2,13 @@
  * Hook strictness profiles.
  *
  * Three profiles control which gates fire:
- *   - minimal:  no gates, kongcode pre-0.7.47 behavior.
+ *   - minimal:  no gates, laqrumcode pre-0.7.47 behavior.
  *   - standard: edit-gate on first Edit/Write/MultiEdit + config-protection
  *               on linter/formatter configs. Default.
  *   - strict:   standard + bash-gate on destructive shell commands.
  *
- * Profile is read once from KONGCODE_HOOK_PROFILE at module load. Per-hook
- * disable is read from KONGCODE_DISABLED_HOOKS (comma-separated ids).
+ * Profile is read once from LAQRUMCODE_HOOK_PROFILE at module load. Per-hook
+ * disable is read from LAQRUMCODE_DISABLED_HOOKS (comma-separated ids).
  * Both are env-only — daemon restart required to change them, same as every
  * other env-driven setting.
  */

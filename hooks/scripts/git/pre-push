@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Pre-push guard for kongcode.
+# Pre-push guard for laqrumcode.
 #
 # Enforces the discipline invariant that kept slipping during the 0.4.0
 # autonomous run: two commits (a536098, a8a880b) were pushed claiming
@@ -24,7 +24,7 @@ set -euo pipefail
 echo "[pre-push] running npm test before push..."
 
 # Tee to a log so a diagnostic tail is available if the hook aborts.
-LOG=$(mktemp -t kongcode-pre-push.XXXXXX)
+LOG=$(mktemp -t laqrumcode-pre-push.XXXXXX)
 if npm test 2>&1 | tee "$LOG"; then
   # npm test exited 0, but still grep for FAIL — some test runners pass
   # with individual failures or produce summary lines that mean "no".

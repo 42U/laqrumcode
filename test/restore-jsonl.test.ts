@@ -5,8 +5,8 @@
  * exactly how an operator runs them), against a live SurrealDB on localhost:8000:
  *
  *   1. ROUND-TRIP: seed a small graph (concepts + memories + an edge) in one
- *      kong_test db, run backup-jsonl into a temp dir, run restore-jsonl into a
- *      SECOND fresh kong_test db, and assert node/edge counts match, a sample
+ *      laqrum_test db, run backup-jsonl into a temp dir, run restore-jsonl into a
+ *      SECOND fresh laqrum_test db, and assert node/edge counts match, a sample
  *      row's content survives, and a SECOND restore is idempotent (creates 0).
  *   2. MISSING-ENDPOINT: an edge whose endpoint node was never seeded is skipped
  *      (logged), not created — no dangling edges.
@@ -33,7 +33,7 @@ const SKIP = process.env.SKIP_INTEGRATION === "1";
 const URL = process.env.SURREAL_URL ?? "ws://127.0.0.1:8000/rpc";
 const USER = process.env.SURREAL_USER ?? "root";
 const PASS = process.env.SURREAL_PASS ?? "root";
-const TEST_NS = "kong_test";
+const TEST_NS = "laqrum_test";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = resolve(HERE, "..");
@@ -174,7 +174,7 @@ describe("restore-jsonl round-trip", () => {
     }
 
     // ── Backup the source db to a temp dir.
-    const bk = await runScript(BACKUP_SCRIPT, [], { SURREAL_DB: srcDb, KONGCODE_BACKUP_DIR: backupDir });
+    const bk = await runScript(BACKUP_SCRIPT, [], { SURREAL_DB: srcDb, LAQRUMCODE_BACKUP_DIR: backupDir });
     expect(bk.stdout).toMatch(/Wrote \d+ total rows/);
 
     // metadata.json carries the manifest fields restore reads.
@@ -254,7 +254,7 @@ describe("restore-jsonl round-trip", () => {
       await src.close();
     }
 
-    await runScript(BACKUP_SCRIPT, [], { SURREAL_DB: srcDb, KONGCODE_BACKUP_DIR: backupDir });
+    await runScript(BACKUP_SCRIPT, [], { SURREAL_DB: srcDb, LAQRUMCODE_BACKUP_DIR: backupDir });
 
     // Pre-seed ONLY one endpoint (me_a) in the destination, then restore JUST the
     // edge file. The other endpoint (me_b) is absent → the edge must be skipped.
@@ -303,7 +303,7 @@ describe("restore-jsonl --merge-by-hash", () => {
     } finally {
       await src.close();
     }
-    await runScript(BACKUP_SCRIPT, [], { SURREAL_DB: srcDb, KONGCODE_BACKUP_DIR: backupDir });
+    await runScript(BACKUP_SCRIPT, [], { SURREAL_DB: srcDb, LAQRUMCODE_BACKUP_DIR: backupDir });
 
     // Destination ALREADY has a DIFFERENT artifact id but the SAME content_hash.
     const dst = await open(dstDb);
@@ -364,7 +364,7 @@ describe("restore-jsonl --dry-run", () => {
     } finally {
       await src.close();
     }
-    await runScript(BACKUP_SCRIPT, [], { SURREAL_DB: srcDb, KONGCODE_BACKUP_DIR: backupDir });
+    await runScript(BACKUP_SCRIPT, [], { SURREAL_DB: srcDb, LAQRUMCODE_BACKUP_DIR: backupDir });
 
     // The destination ALREADY holds both endpoint nodes (the bug condition) but
     // not the edge.

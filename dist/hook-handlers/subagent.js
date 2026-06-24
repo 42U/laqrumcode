@@ -58,14 +58,14 @@ export async function handleSubagentStop(state, payload) {
     const outcome = String(payload.outcome ?? (payload.error ? "error" : "completed"));
     // Auto-drain internal subprocesses live outside the PreToolUse →
     // SubagentStop lifecycle: the daemon spawn()s `claude --agent
-    // kongcode:memory-extractor[-lite]` directly, so no PreToolUse fires
+    // laqrumcode:memory-extractor[-lite]` directly, so no PreToolUse fires
     // and no spawn row exists. When the subprocess's inner agent finishes,
     // a SubagentStop event arrives here for an agent_type we never wrote
     // a start row for. The previous orphan-write branch would create a
     // bogus row and spam the warn channel. These internal drains are not
     // user-spawned subagents we track in the subagent table — silently
     // skip them.
-    const DRAIN_INTERNAL_AGENT_PREFIX = "kongcode:memory-extractor";
+    const DRAIN_INTERNAL_AGENT_PREFIX = "laqrumcode:memory-extractor";
     if (agentType.startsWith(DRAIN_INTERNAL_AGENT_PREFIX)) {
         log.debug(`[subagent] skipping stop for internal drain agent (no spawn row by design): session=${sessionId} agent_type=${agentType}`);
         return {};

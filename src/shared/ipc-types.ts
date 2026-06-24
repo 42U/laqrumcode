@@ -1,12 +1,12 @@
 /**
- * IPC contract between kongcode-daemon and kongcode-mcp (the per-Claude-Code
+ * IPC contract between laqrumcode-daemon and laqrumcode-mcp (the per-Claude-Code
  * client). This file is the single source of truth for what RPC methods
  * exist, what they accept, and what they return.
  *
  * Architecture (v0.7.0+):
- *   kongcode-mcp (thin client, one per Claude Code session)
+ *   laqrumcode-mcp (thin client, one per Claude Code session)
  *     └── stdio  ── Claude Code (MCP protocol)
- *     └── socket ── kongcode-daemon (JSON-RPC over Unix socket / TCP)
+ *     └── socket ── laqrumcode-daemon (JSON-RPC over Unix socket / TCP)
  *
  * The daemon owns SurrealStore, EmbeddingService, ACAN weights, hook handlers,
  * and tool handlers. Clients are stateless relays that translate Claude Code's
@@ -28,21 +28,21 @@
 export const PROTOCOL_VERSION = 1;
 
 /** Default Unix socket path (Linux, macOS). Single shared daemon socket
- *  replaces 0.6.x's per-PID `~/.kongcode-${pid}.sock` pattern. */
-export const DEFAULT_DAEMON_SOCKET_PATH = `${process.env.HOME ?? process.env.USERPROFILE ?? "/tmp"}/.kongcode-daemon.sock`;
+ *  replaces 0.6.x's per-PID `~/.laqrumcode-${pid}.sock` pattern. */
+export const DEFAULT_DAEMON_SOCKET_PATH = `${process.env.HOME ?? process.env.USERPROFILE ?? "/tmp"}/.laqrumcode-daemon.sock`;
 
 /** Default TCP fallback port (Windows or where Unix sockets are fragile).
- *  Loopback only. Override via KONGCODE_DAEMON_PORT. */
+ *  Loopback only. Override via LAQRUMCODE_DAEMON_PORT. */
 export const DEFAULT_DAEMON_TCP_PORT = 18764;
 
 /** Daemon PID file location. Written on daemon startup, removed on graceful
  *  shutdown. Used by clients to detect "daemon was running but crashed" vs
  *  "daemon never started." */
-export const DAEMON_PID_FILE = ".kongcode/cache/daemon.pid";
+export const DAEMON_PID_FILE = ".laqrumcode/cache/daemon.pid";
 
 /** Lock file held during daemon spawn. Prevents two clients from racing to
  *  fork two daemons simultaneously. */
-export const DAEMON_SPAWN_LOCK = ".kongcode/cache/daemon.spawn.lock";
+export const DAEMON_SPAWN_LOCK = ".laqrumcode/cache/daemon.spawn.lock";
 
 // ── Common envelope shapes ────────────────────────────────────────────────
 
@@ -91,7 +91,7 @@ export const IPC_METHODS = [
   "meta.handshake",
   /** Liveness probe — returns {ok: true} if daemon's event loop is responsive. */
   "meta.health",
-  /** Drain in-flight requests, close DB cleanly, exit. Used by `kongcode-daemon stop`. */
+  /** Drain in-flight requests, close DB cleanly, exit. Used by `laqrumcode-daemon stop`. */
   "meta.shutdown",
   /** Flag the daemon to exit when the last attached client disconnects.
    *  Used by mcp-clients newer than the running daemon to schedule a code
@@ -152,7 +152,7 @@ export interface ClientInfo {
 }
 
 export interface MetaHandshakeResponse {
-  daemonVersion: string;       // e.g. "0.7.0" — kongcode package version
+  daemonVersion: string;       // e.g. "0.7.0" — laqrumcode package version
   protocolVersion: number;     // PROTOCOL_VERSION
   startedAt: number;           // epoch ms when daemon began listening
   bootstrapPhase:              // mirrors mcp-server's lifecycle phases
@@ -187,7 +187,7 @@ export interface MetaHealthResponse {
     /** Reranker subsystem status (0.7.22+). True when bge-reranker-v2-m3
      *  cross-encoder is loaded and recall pipeline runs the rerank stage.
      *  False = recall falls back to WMR/ACAN-only scoring (model missing
-     *  or KONGCODE_RERANKER_DISABLED=1). Lets callers verify the 98.2% R@5
+     *  or LAQRUMCODE_RERANKER_DISABLED=1). Lets callers verify the 98.2% R@5
      *  retrieve-then-rerank pipeline is actually live. */
     rerankerActive?: boolean;
   };

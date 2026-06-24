@@ -19,7 +19,7 @@
  *
  * Idle timeout: a session that hasn't gated anything in 30 minutes
  * resets its in-memory cache (the agent's intent has likely shifted).
- * Configurable via KONGCODE_GATE_TIMEOUT_MS.
+ * Configurable via LAQRUMCODE_GATE_TIMEOUT_MS.
  *
  * Override: a user message containing the file path verbatim acts as
  * authorization (the user just told the agent what to do).

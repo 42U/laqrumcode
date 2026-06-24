@@ -2,7 +2,7 @@
  * DB4-queue-conn lane — regression guards for the queue/connection hardening
  * batch: K15, K41, K31, K21, K32, K17-maint.
  *
- * Local-first frame: kongcode is one long-lived daemon per host owning a local
+ * Local-first frame: laqrumcode is one long-lived daemon per host owning a local
  * SurrealDB serving a few co-located Claude Code sessions. These six findings
  * are all about that shape — a commit CAS that double-writes knowledge under a
  * withRetry re-fire (K41) or a stale-recovery revert (K15), concurrent

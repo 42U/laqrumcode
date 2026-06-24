@@ -18,7 +18,7 @@ Procedural checklist invoked BEFORE saying "shipped", "done", "verified", "fixed
 
 4. **CI green via JSON.** Push, then `gh run watch <id> --exit-status` AND `gh run view <id> --json conclusion,status,name`. The JSON must show `"conclusion":"success"`. Quote it verbatim. Do NOT use `gh run watch | tail` — that captures tail's exit code, not gh's.
 
-5. **Daemon restarted with new code.** `cat ~/.kongcode/cache/daemon.pid` — its `daemonVersion` field must equal the version just shipped. If not, kill the daemon to force respawn from new `dist/`.
+5. **Daemon restarted with new code.** `cat ~/.laqrumcode/cache/daemon.pid` — its `daemonVersion` field must equal the version just shipped. If not, kill the daemon to force respawn from new `dist/`.
 
 6. **Live grep on the original bug signature returns 0.** Tail the daemon log post-respawn for at least 2 minutes of real traffic, grep for the EXACT log line the fix targeted. Count MUST be 0.
 
@@ -33,5 +33,5 @@ Procedural checklist invoked BEFORE saying "shipped", "done", "verified", "fixed
 
 ## What this skill does NOT do
 
-- Does not ship the work for you. Follow `kongcode-release` for the bump / commit / push / verify chain.
+- Does not ship the work for you. Follow `laqrumcode-release` for the bump / commit / push / verify chain.
 - Does not catch bugs the fix did not address. If the live grep returns 0 but a different symptom appears, that is a different bug, not a verification failure for the current one.

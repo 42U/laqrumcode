@@ -121,7 +121,7 @@ function assertValidEdge(edge) {
  *  default (60s — only genuine zombies blow it, not slow CPU-tier queries);
  *  env-overridable for constrained machines. Clamped to [1s, 10min]. */
 export const QUERY_DEADLINE_MS = (() => {
-    const n = Number(process.env.KONGCODE_DB_QUERY_TIMEOUT_MS);
+    const n = Number(process.env.LAQRUMCODE_DB_QUERY_TIMEOUT_MS);
     return Number.isFinite(n) && n > 0 ? Math.min(Math.max(Math.round(n), 1_000), 600_000) : 60_000;
 })();
 /** Race a promise against a deadline. The losing arm's rejection is consumed
@@ -261,8 +261,8 @@ export function patchOrderByFields(sql) {
     return `${sql.slice(0, insertAt)}, ${missing.join(", ")}${sql.slice(insertAt)}`;
 }
 /**
- * SurrealDB store — wraps all database operations for the KongCode plugin.
- * Replaces the module-level singleton pattern from standalone KongCode.
+ * SurrealDB store — wraps all database operations for the LaqrumCode plugin.
+ * Replaces the module-level singleton pattern from standalone LaqrumCode.
  */
 export class SurrealStore {
     db;

@@ -1,7 +1,7 @@
 /**
  * Workspace Migration — ingest OpenClaw's workspace files into SurrealDB.
  *
- * When a user switches from the default context engine to KongCode, their
+ * When a user switches from the default context engine to LaqrumCode, their
  * workspace may contain .md files, skill definitions, session transcripts,
  * and memory logs created by OpenClaw. This module:
  *
@@ -9,7 +9,7 @@
  *  2. Scans skills/ and .agents/skills/ for SKILL.md → proper `skill` records
  *  3. Scans memory/ for daily logs → `memory` records
  *  4. Ingests identity/user/agent files as memories + artifacts
- *  5. Archives originals into .kongbrain-archive/ so the workspace is clean
+ *  5. Archives originals into .laqrumbrain-archive/ so the workspace is clean
  *
  * IMPORTANT: This module NEVER touches user project files. A user's README.md,
  * package.json, docs/, test fixtures, scripts, etc. are left completely alone.
@@ -354,7 +354,7 @@ async function tryReadFile(absPath, rootDir) {
 // proliferation) and NEVER archive a stub (that removes the slash command).
 /** True if a SKILL.md is already a DB-resident stub (body points at get_skill_body). */
 export function isSkillStub(content) {
-    return /get_skill_body|Body in kongcode DB/i.test(content);
+    return /get_skill_body|Body in laqrumcode DB/i.test(content);
 }
 /** Write the canonical 5-line DB-resident stub for a skill, idempotently.
  *  Matches the committed format so slash discovery and get_skill_body agree. */
@@ -364,7 +364,7 @@ export async function writeSkillStub(skillMdPath, name, description) {
         `name: ${name}\n` +
         `description: ${desc}\n` +
         `---\n\n` +
-        `Body in kongcode DB. Call \`mcp__plugin_kongcode_kongcode__get_skill_body\` ` +
+        `Body in laqrumcode DB. Call \`mcp__plugin_laqrumcode_laqrumcode__get_skill_body\` ` +
         `with \`name="${name}"\` to load full instructions.\n`;
     await mkdir(dirname(skillMdPath), { recursive: true });
     await writeFile(skillMdPath, stub, "utf-8");
@@ -643,12 +643,12 @@ function summarizeFile(relPath, name, content) {
 }
 // ── Archiving ────────────────────────────────────────────────────────────────
 /**
- * Move ingested files into .kongbrain-archive/ preserving directory structure.
+ * Move ingested files into .laqrumbrain-archive/ preserving directory structure.
  * Uses copyFile + unlink (works across filesystems and on all OSes).
  * SOUL.md is never touched.
  */
 async function archiveFiles(workspaceDir, files) {
-    const archiveDir = join(workspaceDir, ".kongbrain-archive");
+    const archiveDir = join(workspaceDir, ".laqrumbrain-archive");
     await mkdir(archiveDir, { recursive: true });
     const timestamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
     const movedPaths = [];
@@ -674,7 +674,7 @@ async function archiveFiles(workspaceDir, files) {
     }
     // Write manifest
     const manifest = [
-        `KongCode Migration Archive`,
+        `LaqrumCode Migration Archive`,
         `Date: ${new Date().toISOString()}`,
         `Platform: ${process.platform}`,
         ``,

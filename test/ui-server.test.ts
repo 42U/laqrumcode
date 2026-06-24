@@ -1,14 +1,14 @@
 /**
  * Live tests for the read-only web UI data layer (src/ui-server.ts, GH #15).
  *
- * Exercises the exported query functions against a seeded kong_test DB — the
+ * Exercises the exported query functions against a seeded laqrum_test DB — the
  * SQL layer where the two pre-ship bugs lived (type::thing→type::record, and
  * queryMulti returning only the last row instead of the rows array).
  *
  * Requires a live SurrealDB. The beforeAll probe RACES a 10s timeout (< the 30s
  * hook budget) so CI — which ships no SurrealDB — skips cleanly instead of the
- * hook timing out and reporting a FAIL (the v0.7.109 regression). ns=kong_test
- * is isolated from the production kong/memory graph.
+ * hook timing out and reporting a FAIL (the v0.7.109 regression). ns=laqrum_test
+ * is isolated from the production laqrum/memory graph.
  */
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { readFile } from "node:fs/promises";
@@ -27,7 +27,7 @@ import type { GlobalPluginState } from "../src/engine/state.js";
 const URL = process.env.SURREAL_URL ?? "ws://127.0.0.1:8000/rpc";
 const USER = process.env.SURREAL_USER ?? "root";
 const PASS = process.env.SURREAL_PASS ?? "root";
-const TEST_NS = "kong_test";
+const TEST_NS = "laqrum_test";
 const TEST_DB = `ui_test_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 const SCHEMA = resolve(dirname(fileURLToPath(import.meta.url)), "..", "src", "engine", "schema.surql");
 
@@ -108,7 +108,7 @@ function itDb(name: string, fn: () => Promise<void>) {
   it(name, async () => { if (!store) return; await fn(); }, 30_000);
 }
 
-describe("ui-server read endpoints (live, kong_test)", () => {
+describe("ui-server read endpoints (live, laqrum_test)", () => {
   itDb("dashboard returns table counts + embedding coverage", async () => {
     const d = await dashboard(state) as any;
     expect(d.table_counts.concept).toBeGreaterThanOrEqual(2);

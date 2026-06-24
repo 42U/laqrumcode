@@ -27,7 +27,7 @@ const FEATURE_COUNT = 7;
 // ── Helpers ──
 
 function makeTmpDir(): string {
-  const dir = join(tmpdir(), `kongbrain-acan-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+  const dir = join(tmpdir(), `laqrumbrain-acan-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
   mkdirSync(dir, { recursive: true });
   return dir;
 }
@@ -263,7 +263,7 @@ describe("scoreWithACAN", () => {
 
 describe("checkACANReadiness", () => {
   // Each test gets its own tmp weights dir, passed through to checkACANReadiness
-  // so the function never reads the developer's real ~/.kongbrain/acan_weights.json.
+  // so the function never reads the developer's real ~/.laqrumbrain/acan_weights.json.
   let dir: string;
 
   beforeEach(() => {

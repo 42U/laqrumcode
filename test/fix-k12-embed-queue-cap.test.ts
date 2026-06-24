@@ -18,11 +18,11 @@ import { EmbeddingService } from "../src/engine/embeddings.js";
 import type { EmbeddingConfig } from "../src/engine/config.js";
 
 describe("K12: embed queue hard cap", () => {
-  const original = process.env.KONGCODE_EMBED_QUEUE_MAX;
-  beforeEach(() => { process.env.KONGCODE_EMBED_QUEUE_MAX = "4"; });
+  const original = process.env.LAQRUMCODE_EMBED_QUEUE_MAX;
+  beforeEach(() => { process.env.LAQRUMCODE_EMBED_QUEUE_MAX = "4"; });
   afterEach(() => {
-    if (original === undefined) delete process.env.KONGCODE_EMBED_QUEUE_MAX;
-    else process.env.KONGCODE_EMBED_QUEUE_MAX = original;
+    if (original === undefined) delete process.env.LAQRUMCODE_EMBED_QUEUE_MAX;
+    else process.env.LAQRUMCODE_EMBED_QUEUE_MAX = original;
   });
 
   function makeReadyService(): EmbeddingService {

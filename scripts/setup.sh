@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
-# KongCode setup — checks prerequisites and guides initial configuration.
+# LaqrumCode setup — checks prerequisites and guides initial configuration.
 set -euo pipefail
 
-echo "=== KongCode Setup ==="
+echo "=== LaqrumCode Setup ==="
 echo ""
 
 # ──────────────────────────────────────────────────────────────────────────
 # Credential bootstrap: generate a random root password on first install so
 # we never advise the user to run SurrealDB with the documented default
-# `--user root --pass root` combo. Stored in ~/.kongcode/cache/surreal-creds
+# `--user root --pass root` combo. Stored in ~/.laqrumcode/cache/surreal-creds
 # with 0o600 so only the invoking user can read it. The daemon picks the
 # creds up via SURREAL_USER / SURREAL_PASS env vars (parsePluginConfig).
 # ──────────────────────────────────────────────────────────────────────────
-CREDS_DIR="${HOME}/.kongcode/cache"
+CREDS_DIR="${HOME}/.laqrumcode/cache"
 CREDS_FILE="${CREDS_DIR}/surreal-creds"
 if [ ! -f "$CREDS_FILE" ]; then
   # umask 077 BEFORE mkdir so the cache dir is created 0o700 directly. Setting
@@ -30,7 +30,7 @@ if [ ! -f "$CREDS_FILE" ]; then
     GEN_PASS=$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 32)
   fi
   {
-    echo "SURREAL_USER=kongcode"
+    echo "SURREAL_USER=laqrumcode"
     echo "SURREAL_PASS=${GEN_PASS}"
   } > "$CREDS_FILE"
   chmod 600 "$CREDS_FILE"

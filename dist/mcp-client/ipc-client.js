@@ -1,5 +1,5 @@
 /**
- * JSON-RPC client used by kongcode-mcp to talk to kongcode-daemon.
+ * JSON-RPC client used by laqrumcode-mcp to talk to laqrumcode-daemon.
  *
  * Connects to the daemon's Unix socket (linux/mac) or TCP loopback (Windows
  * / explicit override), sends typed RPC requests, and resolves promises with
@@ -25,7 +25,7 @@ import { readDaemonToken } from "./daemon-spawn.js";
  *  double-write incident). Clamped to [1s, 10min]; invalid values are
  *  ignored. Explicit per-call / per-client timeouts always win. */
 function envIpcTimeoutMs() {
-    const raw = process.env.KONGCODE_IPC_TIMEOUT_MS;
+    const raw = process.env.LAQRUMCODE_IPC_TIMEOUT_MS;
     if (!raw)
         return undefined;
     const n = Number(raw);
@@ -128,7 +128,7 @@ export class IpcClient {
         // S6/T2: auto-attach the per-user handshake token whenever it is readable,
         // REGARDLESS of transport. A daemon that bound TCP mints + enforces the token
         // on EVERY connection (it has no per-connection UDS/TCP discriminator), so a
-        // co-located UDS client (e.g. KONGCODE_DAEMON_PORT set on Linux, where the
+        // co-located UDS client (e.g. LAQRUMCODE_DAEMON_PORT set on Linux, where the
         // daemon binds UDS+TCP) MUST also send its own 0600 token or it locks ITSELF
         // out — the T2 regression. Reading our own per-user token is safe + cheap; a
         // UDS-only daemon that minted no token ignores the param, and a cross-user

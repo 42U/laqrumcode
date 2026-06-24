@@ -11,7 +11,7 @@
  * with an archive_reason annotation for forensic recovery. This lint fails
  * CI if any `DELETE <content_table>` pattern appears in src/.
  *
- * The destructive consolidate/GC/dedup patterns inherited from KongBrain
+ * The destructive consolidate/GC/dedup patterns inherited from LaqrumBrain
  * fork (commit 5b93d73, 2026-04-06) silently destroyed user memory for ~6
  * weeks before v0.7.93 converted all 11 sites. This lint prevents
  * regression.

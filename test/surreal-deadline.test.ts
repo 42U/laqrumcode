@@ -59,7 +59,7 @@ describe("isRetryableSurrealError", () => {
 
 describe("QUERY_DEADLINE_MS", () => {
   it("defaults generous (only zombies blow it, not slow CPU-tier queries)", () => {
-    // Env-clamped [1s, 10min]; default 60s when KONGCODE_DB_QUERY_TIMEOUT_MS unset.
+    // Env-clamped [1s, 10min]; default 60s when LAQRUMCODE_DB_QUERY_TIMEOUT_MS unset.
     expect(QUERY_DEADLINE_MS).toBeGreaterThanOrEqual(1_000);
     expect(QUERY_DEADLINE_MS).toBeLessThanOrEqual(600_000);
   });

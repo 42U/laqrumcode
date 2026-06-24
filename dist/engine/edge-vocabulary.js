@@ -1,5 +1,5 @@
 /**
- * Canonical edge vocabulary for the kongcode graph.
+ * Canonical edge vocabulary for the laqrumcode graph.
  *
  * Ad-hoc edge names fragment the graph — two concepts linked by
  * `applies_to_options` and `appliesToOptions` and `options_application`

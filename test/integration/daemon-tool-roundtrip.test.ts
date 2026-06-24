@@ -1,7 +1,7 @@
 /**
  * Daemon tool round-trip integration test (v0.7.85).
  *
- * Targets a live kongcode-daemon at the default socket path. Verifies the new
+ * Targets a live laqrumcode-daemon at the default socket path. Verifies the new
  * `tool.getSkillBody` IPC method is reachable end-to-end through the real
  * JSON-RPC transport plus `wrapToolHandler` dispatch plus real SurrealDB.
  * This is the runtime defense that complements the static lint test in
@@ -9,7 +9,7 @@
  * v0.7.84 failure class: a new tool wired only into `src/mcp-server.ts` but
  * missing from the daemon-split path.
  *
- * Skip behavior: when no daemon socket exists at `~/.kongcode-daemon.sock`
+ * Skip behavior: when no daemon socket exists at `~/.laqrumcode-daemon.sock`
  * (e.g. CI without a started daemon), tests skip cleanly. The static lint
  * always runs and catches the v0.7.84 class statically.
  *
@@ -32,7 +32,7 @@ import { join } from "node:path";
 import { IpcClient } from "../../src/mcp-client/ipc-client.js";
 
 const SOCKET_PATH =
-  process.env.KONGCODE_DAEMON_SOCKET ?? join(homedir(), ".kongcode-daemon.sock");
+  process.env.LAQRUMCODE_DAEMON_SOCKET ?? join(homedir(), ".laqrumcode-daemon.sock");
 
 const RUN_LIVE = existsSync(SOCKET_PATH);
 
@@ -60,14 +60,14 @@ describe.skipIf(!RUN_LIVE)("daemon tool round-trip (live IPC)", () => {
     if (client) client.close();
   });
 
-  it("tool.getSkillBody returns kongcode-release body via daemon-split path", async () => {
+  it("tool.getSkillBody returns laqrumcode-release body via daemon-split path", async () => {
     const result = await client.call<ToolResponse>(
       "tool.getSkillBody",
-      { sessionId: "rt-test", args: { name: "kongcode-release" } },
+      { sessionId: "rt-test", args: { name: "laqrumcode-release" } },
     );
     const text = result?.content?.[0]?.text ?? "";
     // Reconstructed frontmatter at the top.
-    expect(text).toMatch(/^---\nname:\s*kongcode-release/);
+    expect(text).toMatch(/^---\nname:\s*laqrumcode-release/);
     expect(text).toMatch(/description:/);
     // Body is the 7000+ char release procedure.
     expect(text.length).toBeGreaterThan(1000);
@@ -91,15 +91,15 @@ describe.skipIf(!RUN_LIVE)("daemon tool round-trip (live IPC)", () => {
     expect(text).toMatch(/`name` is required/);
   }, 15_000);
 
-  it("tool.getSkillBody for kongcode-health returns its body too", async () => {
+  it("tool.getSkillBody for laqrumcode-health returns its body too", async () => {
     // Second known migrated skill — verifies the lookup isn't accidentally
-    // hard-coded to kongcode-release.
+    // hard-coded to laqrumcode-release.
     const result = await client.call<ToolResponse>(
       "tool.getSkillBody",
-      { sessionId: "rt-test", args: { name: "kongcode-health" } },
+      { sessionId: "rt-test", args: { name: "laqrumcode-health" } },
     );
     const text = result?.content?.[0]?.text ?? "";
-    expect(text).toMatch(/^---\nname:\s*kongcode-health/);
+    expect(text).toMatch(/^---\nname:\s*laqrumcode-health/);
     expect(text.length).toBeGreaterThan(500);
   }, 15_000);
 });

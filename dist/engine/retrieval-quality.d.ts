@@ -10,7 +10,7 @@
  * 5. Context waste
  * 6. Contradiction detection
  *
- * Ported from kongbrain — uses SurrealStore instead of module-level DB.
+ * Ported from laqrumbrain — uses SurrealStore instead of module-level DB.
  */
 import type { SurrealStore, VectorSearchResult } from "./surreal.js";
 import type { GlobalPluginState } from "./state.js";

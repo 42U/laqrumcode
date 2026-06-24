@@ -17,7 +17,7 @@ export interface EmbeddingConfig {
 
 export interface RerankerConfig {
   /** When false, recall skips the cross-encoder rerank stage entirely.
-   *  Disabled via KONGCODE_RERANKER_DISABLED=1 — the model file (~606MB) is
+   *  Disabled via LAQRUMCODE_RERANKER_DISABLED=1 — the model file (~606MB) is
    *  not downloaded, recall falls back to WMR/ACAN scoring. */
   enabled: boolean;
   /** Path to the bge-reranker-v2-m3 GGUF file. Default
@@ -40,9 +40,9 @@ export interface ThresholdConfig {
 }
 
 export interface PathsConfig {
-  /** Where downloaded artifacts (SurrealDB binary, model) live. Default ~/.kongcode/cache. Survives plugin updates. */
+  /** Where downloaded artifacts (SurrealDB binary, model) live. Default ~/.laqrumcode/cache. Survives plugin updates. */
   cacheDir: string;
-  /** Where the bootstrapped SurrealDB child process stores its surrealkv data. Default ~/.kongcode/data. */
+  /** Where the bootstrapped SurrealDB child process stores its surrealkv data. Default ~/.laqrumcode/data. */
   dataDir: string;
   /** Path to the SurrealDB binary. Default <cacheDir>/surreal-<version>/<binaryName>. */
   surrealBinPath: string | null;
@@ -68,12 +68,12 @@ export function parsePluginConfig(raw?: Record<string, unknown>): MemoryConfig {
 
   const cacheDir =
     (typeof paths.cacheDir === "string" && paths.cacheDir ? paths.cacheDir : null) ??
-    (process.env.KONGCODE_CACHE_DIR || null) ??
-    join(homedir(), ".kongcode", "cache");
+    (process.env.LAQRUMCODE_CACHE_DIR || null) ??
+    join(homedir(), ".laqrumcode", "cache");
   const dataDir =
     (typeof paths.dataDir === "string" && paths.dataDir ? paths.dataDir : null) ??
-    (process.env.KONGCODE_DATA_DIR || null) ??
-    join(homedir(), ".kongcode", "data");
+    (process.env.LAQRUMCODE_DATA_DIR || null) ??
+    join(homedir(), ".laqrumcode", "data");
   const surrealBinPath =
     (typeof paths.surrealBinPath === "string" && paths.surrealBinPath ? paths.surrealBinPath : null) ??
     (process.env.SURREAL_BIN_PATH || null);
@@ -99,7 +99,7 @@ export function parsePluginConfig(raw?: Record<string, unknown>): MemoryConfig {
       },
       user: (typeof surreal.user === "string" && surreal.user ? surreal.user : null) ?? (process.env.SURREAL_USER || null) ?? "root",
       pass: (typeof surreal.pass === "string" && surreal.pass ? surreal.pass : null) ?? (process.env.SURREAL_PASS || null) ?? "root",
-      ns: (typeof surreal.ns === "string" && surreal.ns ? surreal.ns : null) ?? (process.env.SURREAL_NS || null) ?? "kong",
+      ns: (typeof surreal.ns === "string" && surreal.ns ? surreal.ns : null) ?? (process.env.SURREAL_NS || null) ?? "laqrum",
       db: (typeof surreal.db === "string" && surreal.db ? surreal.db : null) ?? (process.env.SURREAL_DB || null) ?? "memory",
     },
     embedding: {
@@ -113,7 +113,7 @@ export function parsePluginConfig(raw?: Record<string, unknown>): MemoryConfig {
     },
     reranker: (() => {
       const reranker = (raw?.reranker ?? {}) as Record<string, unknown>;
-      const enabled = process.env.KONGCODE_RERANKER_DISABLED !== "1";
+      const enabled = process.env.LAQRUMCODE_RERANKER_DISABLED !== "1";
       const modelPath =
         process.env.RERANKER_MODEL_PATH ??
         (typeof reranker.modelPath === "string"

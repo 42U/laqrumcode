@@ -38,7 +38,7 @@ export async function handleSessionStart(
   // Bootstrap 5-pillar nodes
   if (store.isAvailable()) {
     try {
-      session.agentId = await store.ensureAgent("kongcode", "claude");
+      session.agentId = await store.ensureAgent("laqrumcode", "claude");
 
       const cwd = (payload.cwd as string) ?? state.workspaceDir ?? process.cwd();
       const projectName = cwd.split("/").pop() ?? "unknown";
@@ -195,7 +195,7 @@ export async function handleSessionStart(
       // drain" report.
       const count = await countActionablePendingWork(store);
       if (count >= 1) {
-        pendingNote = `[PENDING WORK — DRAIN NOW]\n${count} background item${count === 1 ? "" : "s"} waiting. Items older than 7 days are silently purged, so don't postpone. Spawn a kongcode:memory-extractor subagent (opus, run_in_background=true) and have it loop fetch_pending_work → commit_work_results until empty. Light types (reflection, handoff_note) can run inline.`;
+        pendingNote = `[PENDING WORK — DRAIN NOW]\n${count} background item${count === 1 ? "" : "s"} waiting. Items older than 7 days are silently purged, so don't postpone. Spawn a laqrumcode:memory-extractor subagent (opus, run_in_background=true) and have it loop fetch_pending_work → commit_work_results until empty. Light types (reflection, handoff_note) can run inline.`;
       }
     } catch (e) {
       swallow("sessionStart:pendingWorkCheck", e);

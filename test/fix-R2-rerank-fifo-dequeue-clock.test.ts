@@ -21,7 +21,7 @@
  *
  * No DB, no 606MB model — a fake LlamaRankingContext is injected via the
  * @internal _setRankingCtxForTest seam. The module is imported fresh under a
- * short KONGCODE_RERANK_TIMEOUT_MS so the deadline is deterministic.
+ * short LAQRUMCODE_RERANK_TIMEOUT_MS so the deadline is deterministic.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
@@ -63,8 +63,8 @@ describe("R2: rerank FIFO starts the deadline clock at dequeue, not submit", () 
   let prevTimeout: string | undefined;
 
   beforeEach(async () => {
-    prevTimeout = process.env.KONGCODE_RERANK_TIMEOUT_MS;
-    process.env.KONGCODE_RERANK_TIMEOUT_MS = String(DEADLINE_MS);
+    prevTimeout = process.env.LAQRUMCODE_RERANK_TIMEOUT_MS;
+    process.env.LAQRUMCODE_RERANK_TIMEOUT_MS = String(DEADLINE_MS);
     vi.resetModules();
     mod = await import("../src/engine/graph-context.js");
     mod._resetRerankBreaker();
@@ -73,8 +73,8 @@ describe("R2: rerank FIFO starts the deadline clock at dequeue, not submit", () 
   afterEach(() => {
     mod._setRankingCtxForTest(null);
     mod._resetRerankBreaker();
-    if (prevTimeout === undefined) delete process.env.KONGCODE_RERANK_TIMEOUT_MS;
-    else process.env.KONGCODE_RERANK_TIMEOUT_MS = prevTimeout;
+    if (prevTimeout === undefined) delete process.env.LAQRUMCODE_RERANK_TIMEOUT_MS;
+    else process.env.LAQRUMCODE_RERANK_TIMEOUT_MS = prevTimeout;
     vi.resetModules();
   });
 

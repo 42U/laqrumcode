@@ -50,7 +50,7 @@ export class SessionState {
     pendingToolArgs = new Map();
     // First-touch edit-gate state (0.7.47+). In-memory cache of file paths
     // and bash-command patterns the gate has cleared this session. Wiped on
-    // idle timeout (default 30min, configurable via KONGCODE_GATE_TIMEOUT_MS).
+    // idle timeout (default 30min, configurable via LAQRUMCODE_GATE_TIMEOUT_MS).
     // Internal — do not inspect from outside engine/hooks/edit-gates.ts.
     _editGateChecked = new Set();
     _editGateLastActivity = 0;
@@ -158,9 +158,9 @@ export class GlobalPluginState {
      *  new session would exceed the cap we evict the OLDEST entry (Map preserves
      *  insertion order) and fire onSessionRemoved so dependent module-scoped maps
      *  GC too. Co-located Claude Code installs run a handful of sessions; 512 is
-     *  far above any legitimate steady state. Override via KONGCODE_MAX_SESSIONS. */
-    maxSessions = Number(process.env.KONGCODE_MAX_SESSIONS) > 0
-        ? Number(process.env.KONGCODE_MAX_SESSIONS)
+     *  far above any legitimate steady state. Override via LAQRUMCODE_MAX_SESSIONS. */
+    maxSessions = Number(process.env.LAQRUMCODE_MAX_SESSIONS) > 0
+        ? Number(process.env.LAQRUMCODE_MAX_SESSIONS)
         : 512;
     // Anomaly cooldown state (in-memory, resets on MCP restart). Per-flag
     // last-fired timestamps prevent spamming the model with the same alert

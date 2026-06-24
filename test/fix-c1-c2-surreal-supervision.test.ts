@@ -85,7 +85,7 @@ import {
   __getSupervisorState,
 } from "../src/engine/bootstrap.js";
 
-const ARGS = ["/fake/surreal", "/fake/data/dir", 18999, "kong_x", "secret", "/fake/cache"] as const;
+const ARGS = ["/fake/surreal", "/fake/data/dir", 18999, "laqrum_x", "secret", "/fake/cache"] as const;
 
 beforeEach(() => {
   spawnedChildren.length = 0;

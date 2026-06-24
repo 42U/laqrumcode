@@ -1,10 +1,10 @@
 /**
- * KongCode MCP client — thin per-Claude-Code-session process.
+ * LaqrumCode MCP client — thin per-Claude-Code-session process.
  *
  * Replaces the legacy src/mcp-server.ts as the binary that .mcp.json invokes.
  * Owns only:
  *   - stdio transport with Claude Code (MCP server end)
- *   - JSON-RPC client to kongcode-daemon (heavy state lives there)
+ *   - JSON-RPC client to laqrumcode-daemon (heavy state lives there)
  *
  * On startup:
  *   1. ensureDaemon() — connects to existing daemon or spawns one

@@ -212,11 +212,11 @@ export const MCP_TOOLS = [
   },
   {
     name: "create_skill",
-    description: "Create a new skill row in the kongcode DB. Skills are DB-resident vector-indexed procedural knowledge invokable via slash command. The full body is stored in the `skill` table and recallable via recall(scope=\"skills\"). Use this instead of authoring a SKILL.md file on disk.",
+    description: "Create a new skill row in the laqrumcode DB. Skills are DB-resident vector-indexed procedural knowledge invokable via slash command. The full body is stored in the `skill` table and recallable via recall(scope=\"skills\"). Use this instead of authoring a SKILL.md file on disk.",
     inputSchema: {
       type: "object" as const,
       properties: {
-        name: { type: "string", description: "Kebab-case skill name (matches the slash command, e.g. 'kongcode-release')" },
+        name: { type: "string", description: "Kebab-case skill name (matches the slash command, e.g. 'laqrumcode-release')" },
         description: { type: "string", description: "One-line summary used for slash-command suggestion and embedding target. Be specific about when to invoke." },
         body: { type: "string", description: "Full markdown body of the skill (procedural instructions, steps, examples). Min 20 chars." },
         preconditions: { type: "string", description: "Optional structured preconditions text." },
@@ -239,7 +239,7 @@ export const MCP_TOOLS = [
   },
   {
     name: "update_skill",
-    description: "Revise an EXISTING skill in the kongcode DB (counterpart to create_skill, which rejects name collisions). Patches the provided fields on the skill matched by `name` and RE-EMBEDS so recall(scope=\"skills\") reflects the new content — a raw SurrealQL UPDATE would leave the old embedding stale. `name` identifies the skill and is not changed; provide at least one mutable field.",
+    description: "Revise an EXISTING skill in the laqrumcode DB (counterpart to create_skill, which rejects name collisions). Patches the provided fields on the skill matched by `name` and RE-EMBEDS so recall(scope=\"skills\") reflects the new content — a raw SurrealQL UPDATE would leave the old embedding stale. `name` identifies the skill and is not changed; provide at least one mutable field.",
     inputSchema: {
       type: "object" as const,
       properties: {

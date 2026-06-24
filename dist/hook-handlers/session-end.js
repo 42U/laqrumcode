@@ -27,14 +27,14 @@ export async function handleSessionEnd(state, payload) {
     if (!store.isAvailable())
         return {};
     // Drain self-trigger guard (2026-06-09 spawn-storm fix): sessions spawned by
-    // the auto-drain are tagged by hook-proxy (kongcode_drain_session, from the
-    // child's KONGCODE_DRAIN_SESSION=1 env). A drain child ending is NOT a user
+    // the auto-drain are tagged by hook-proxy (laqrumcode_drain_session, from the
+    // child's LAQRUMCODE_DRAIN_SESSION=1 env). A drain child ending is NOT a user
     // session ending — re-triggering the scheduler from it created a ~25s spawn
     // storm (fail → exit → SessionEnd → respawn) that burned the daily budget.
     // Close the session row (so deferred cleanup doesn't enqueue extraction for
     // it later) and skip the queue/handoff/trigger pipeline entirely — a drain
     // session's own turns are tool-call plumbing, not extractable knowledge.
-    if (payload.kongcode_drain_session === true) {
+    if (payload.laqrumcode_drain_session === true) {
         log.info(`Session end: ${sessionId} (drain session — closing row, skipping queue + drain re-trigger)`);
         if (session.surrealSessionId) {
             try {
@@ -186,7 +186,7 @@ export async function handleSessionEnd(state, payload) {
     // Trigger auto-drain FIRST — this session just queued 2-3 items; let the
     // scheduler decide whether to spawn a headless extractor right now
     // (gated by threshold + PID-file lock). Fire-and-forget; returns
-    // immediately. No-op when KONGCODE_AUTO_DRAIN=0 or queue is below
+    // immediately. No-op when LAQRUMCODE_AUTO_DRAIN=0 or queue is below
     // threshold.
     //
     // Placed BEFORE clearSessionClaim's retry-with-backoff loop so the 60s
@@ -198,10 +198,10 @@ export async function handleSessionEnd(state, payload) {
     // drain happens in a detached child) but guarantees the call site
     // executes.
     triggerDrainCheck(state, {
-        threshold: Number(process.env.KONGCODE_AUTO_DRAIN_THRESHOLD ?? 5),
+        threshold: Number(process.env.LAQRUMCODE_AUTO_DRAIN_THRESHOLD ?? 5),
         intervalMs: 0,
         cacheDir: state.config.paths.cacheDir,
-        maxDaily: Number(process.env.KONGCODE_AUTO_DRAIN_MAX_DAILY ?? 50),
+        maxDaily: Number(process.env.LAQRUMCODE_AUTO_DRAIN_MAX_DAILY ?? 50),
     }, "session-end");
     // Clear the cleanup_claim_token now that the work is queued and the handoff
     // is written. The token is only useful between claim and completion;

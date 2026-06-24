@@ -9,7 +9,7 @@
  * But only meta.handshake actually verifies the per-user token. meta.shutdown
  * (schedules gracefulCleanup) and meta.requestSupersede (arms the E8 grace-exit)
  * do NO token check of their own. So on the TCP transport (Windows /
- * KONGCODE_DAEMON_TRANSPORT=tcp) a hash-collided cross-OS-user on the shared
+ * LAQRUMCODE_DAEMON_TRANSPORT=tcp) a hash-collided cross-OS-user on the shared
  * loopback port could send meta.shutdown as their FIRST line and kill another
  * user's daemon — an availability DoS. (Not a data breach: tool.* never matched
  * the prefix, so the graph stayed gated.)
@@ -219,7 +219,7 @@ describe("E2-META-DOS: UDS / no-token mode (requireHandshakeAuth OFF) — lifecy
 
   it("allows meta.shutdown WITHOUT any handshake when auth is not required", async () => {
     // The Unix-socket daemon: 0600 perms isolate OS users, so the gate is off
-    // and `kongcode-daemon stop` (meta.shutdown, no handshake) keeps working.
+    // and `laqrumcode-daemon stop` (meta.shutdown, no handshake) keeps working.
     const s = await startServer({ requireHandshakeAuth: false, token: null });
     server = s.server;
     const c = openClient(s.port);

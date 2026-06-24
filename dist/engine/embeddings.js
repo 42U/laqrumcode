@@ -41,7 +41,7 @@ export class EmbeddingService {
     constructor(config, resourceProfile) {
         this.config = config;
         this.resourceProfile = resourceProfile;
-        this.embedTimeoutMs = Number(process.env.KONGCODE_EMBED_TIMEOUT_MS) || 30_000;
+        this.embedTimeoutMs = Number(process.env.LAQRUMCODE_EMBED_TIMEOUT_MS) || 30_000;
     }
     setStore(store) {
         this.store = store;
@@ -174,9 +174,9 @@ export class EmbeddingService {
      *  traffic / a wedged embedder grow the FIFO without limit — each entry
      *  pins its text + two closures, so the queue is the leak surface on a
      *  long-lived daemon. Past this depth embed() fast-fails with a retryable
-     *  error instead of enqueueing. Override via KONGCODE_EMBED_QUEUE_MAX. */
-    maxQueueDepth = Number(process.env.KONGCODE_EMBED_QUEUE_MAX) > 0
-        ? Number(process.env.KONGCODE_EMBED_QUEUE_MAX)
+     *  error instead of enqueueing. Override via LAQRUMCODE_EMBED_QUEUE_MAX. */
+    maxQueueDepth = Number(process.env.LAQRUMCODE_EMBED_QUEUE_MAX) > 0
+        ? Number(process.env.LAQRUMCODE_EMBED_QUEUE_MAX)
         : 2048;
     async embed(text) {
         if (!this.ready || !this.ctx)

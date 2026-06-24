@@ -1,13 +1,13 @@
 {
-  "name": "kongcode-marketplace",
+  "name": "laqrumcode-marketplace",
   "version": "1.0.0",
-  "description": "KongCode — graph-backed persistent memory for Claude Code",
+  "description": "LaqrumCode — graph-backed persistent memory for Claude Code",
   "owner": {
     "name": "VoidOrigin"
   },
   "plugins": [
     {
-      "name": "kongcode",
+      "name": "laqrumcode",
       "description": "Graph-backed persistent memory engine with SurrealDB + BGE-M3 embeddings. Gives Claude Code permanent memory that learns across sessions.",
       "source": "./",
       "category": "productivity"

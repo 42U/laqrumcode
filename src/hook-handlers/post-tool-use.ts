@@ -20,7 +20,7 @@ const PATH_OBSERVING_TOOLS = ["Grep", "Glob"];
 function isPathObservingTool(toolName: string): boolean {
   if (PATH_OBSERVING_TOOLS.includes(toolName)) return true;
   // MCP-routed tool names look like `mcp__<plugin>__<name>` — match any
-  // recall variant so kongcode's own and any forked recall tool count.
+  // recall variant so laqrumcode's own and any forked recall tool count.
   return toolName.includes("recall");
 }
 

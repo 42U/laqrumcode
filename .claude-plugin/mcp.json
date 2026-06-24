@@ -1,7 +1,7 @@
 {
-  "$comment": "0.7.0 daemon architecture: Node spawns kongcode-mcp (thin client). mcp-client either connects to an already-running kongcode-daemon or forks one detached. Daemon owns SurrealStore + BGE-M3 + all tool/hook handlers. The 'mcp-server.js' legacy single-process entry point is still present in dist/ for emergency rollback (just point command back at it).",
+  "$comment": "0.7.0 daemon architecture: Node spawns laqrumcode-mcp (thin client). mcp-client either connects to an already-running laqrumcode-daemon or forks one detached. Daemon owns SurrealStore + BGE-M3 + all tool/hook handlers. The 'mcp-server.js' legacy single-process entry point is still present in dist/ for emergency rollback (just point command back at it).",
   "mcpServers": {
-    "kongcode": {
+    "laqrumcode": {
       "command": "node",
       "args": ["${CLAUDE_PLUGIN_ROOT}/dist/mcp-client/index.js"],
       "alwaysLoad": true

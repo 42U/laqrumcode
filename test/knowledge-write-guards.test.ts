@@ -12,7 +12,7 @@
  *
  * Uses a deterministic FAKE embedder (lookup map → hand-constructed 1024-dim
  * vectors) so pairwise cosines are exact: mix(c) = c·e1 + √(1−c²)·e2 gives
- * cosine(mix, e1) = c precisely. Real DB (kong_test ns), fake vectors.
+ * cosine(mix, e1) = c precisely. Real DB (laqrum_test ns), fake vectors.
  */
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { readFile } from "node:fs/promises";
@@ -27,7 +27,7 @@ import type { GlobalPluginState, SessionState } from "../src/engine/state.js";
 const URL = process.env.SURREAL_URL ?? "ws://127.0.0.1:8000/rpc";
 const USER = process.env.SURREAL_USER ?? "root";
 const PASS = process.env.SURREAL_PASS ?? "root";
-const TEST_NS = "kong_test";
+const TEST_NS = "laqrum_test";
 const TEST_DB = `kwg_test_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 const SCHEMA = resolve(dirname(fileURLToPath(import.meta.url)), "..", "src", "engine", "schema.surql");
 
@@ -97,14 +97,14 @@ beforeAll(async () => {
   // T1 target: exact-content (case/trim-insensitive) reuse.
   await store.queryExec(`CREATE concept:kwg_exact SET content = 'Redis Server', embedding = $e, stability = 1.0`, { e: unit(10) });
   // T2 target: prose concept; anchor phrase embeds at cosine 0.65 vs it.
-  await store.queryExec(`CREATE concept:kwg_prose SET content = 'kongcode is a graph-backed persistent memory engine for claude code', embedding = $e, stability = 1.0`, { e: unit(20) });
+  await store.queryExec(`CREATE concept:kwg_prose SET content = 'laqrumcode is a graph-backed persistent memory engine for claude code', embedding = $e, stability = 1.0`, { e: unit(20) });
   EMBED_MAP.set("memory engine for claude", mix(20, 21, 0.65)); // 0.65 ≥ 0.60 → reuse
   EMBED_MAP.set("totally unrelated anchor", mix(30, 31, 0.99)); // far from everything seeded
   EMBED_MAP.set("another fresh anchor", unit(40));
 
   // ── supersede seeds (the incident shape) ──
   // Stub whose content IS the old_text (exact short-circuit target).
-  const SLUG = "ikong-test-spec-v1";
+  const SLUG = "ilaqrum-test-spec-v1";
   await store.queryExec(`CREATE concept:kwg_stub SET content = $c, embedding = $e, stability = 1.0`, { c: SLUG, e: unit(50) });
   // Healthy LONG doc that contains the slug verbatim — embeds at cosine 0.75
   // vs the slug vector: above 0.70 (old behavior: collateral decay), below
@@ -115,7 +115,7 @@ beforeAll(async () => {
   // Guard-only scenario (no exact match anywhere): short-ish stale belief at
   // 0.75 (comparable length → decays) + long doc at 0.75 (→ skipped).
   await store.queryExec(`CREATE concept:kwg_belief SET content = 'daemon uses port 18765 by default', embedding = $e, stability = 1.0`, { e: mix(60, 61, 0.75) });
-  const longDoc2 = `Operations runbook: the kongcode daemon historically used port 18765 by default before the UID-offset scheme. `.repeat(4);
+  const longDoc2 = `Operations runbook: the laqrumcode daemon historically used port 18765 by default before the UID-offset scheme. `.repeat(4);
   await store.queryExec(`CREATE concept:kwg_longdoc2 SET content = $c, embedding = $e, stability = 1.0`, { c: longDoc2, e: mix(60, 62, 0.75) });
   EMBED_MAP.set("daemon default port is 18765", mix(60, 63, 1.0)); // = unit(60) → cosine 0.75 vs both
 }, 30_000);
@@ -181,7 +181,7 @@ describe("fresh-concept HNSW visibility (bug-4 probe pinned as test)", () => {
 
 describe("supersede collateral guard (incident fix)", () => {
   itDb("exact-content short-circuit: slug decays ONLY the stub; the 0.75 long-doc survives untouched", async () => {
-    const r = await callSupersede("ikong-test-spec-v1", "superseded by v1.1 spec");
+    const r = await callSupersede("ilaqrum-test-spec-v1", "superseded by v1.1 spec");
     expect(r.superseded_ids).toContain("concept:kwg_stub");
     expect(r.superseded_ids).not.toContain("concept:kwg_longdoc");
     const stubStab = await scalar<number>(`SELECT VALUE stability FROM concept:kwg_stub`);

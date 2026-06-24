@@ -7,7 +7,7 @@
  * kc-UUID caller path (all three production callers).
  *
  * Requires a live SurrealDB; the beforeAll probe races a 10s timeout so CI's
- * no-DB env skips cleanly. ns=kong_test, isolated from production.
+ * no-DB env skips cleanly. ns=laqrum_test, isolated from production.
  */
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { readFile } from "node:fs/promises";
@@ -18,7 +18,7 @@ import { SurrealStore } from "../src/engine/surreal.js";
 const URL = process.env.SURREAL_URL ?? "ws://127.0.0.1:8000/rpc";
 const USER = process.env.SURREAL_USER ?? "root";
 const PASS = process.env.SURREAL_PASS ?? "root";
-const TEST_NS = "kong_test";
+const TEST_NS = "laqrum_test";
 const TEST_DB = `pst_test_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 const SCHEMA = resolve(dirname(fileURLToPath(import.meta.url)), "..", "src", "engine", "schema.surql");
 
@@ -64,7 +64,7 @@ function itDb(name: string, fn: () => Promise<void>) {
   it(name, async () => { if (!store) return; await fn(); }, 30_000);
 }
 
-describe("getPreviousSessionTurns (live, kong_test)", () => {
+describe("getPreviousSessionTurns (live, laqrum_test)", () => {
   itDb("returns the previous session's turns when called with the current kc-UUID (pre-fix: [])", async () => {
     const turns = await store!.getPreviousSessionTurns(KC_CUR, 10);
     expect(turns.length).toBe(2);

@@ -6,7 +6,7 @@
  * hold real project metadata that legitimately needs editing, not just
  * lint/format rules.
  *
- * Bypass: KONGCODE_ALLOW_CONFIG_EDIT=1 skips the check for the lifetime
+ * Bypass: LAQRUMCODE_ALLOW_CONFIG_EDIT=1 skips the check for the lifetime
  * of the daemon. Useful when the user is intentionally tuning configs.
  */
 import { basename, resolve } from "node:path";
@@ -55,7 +55,7 @@ const PROTECTED_BASENAMES = new Set([
 /** Bypass set by env. Read once — the env is stable for the daemon's life. */
 let bypassActive = null;
 function readBypass() {
-    const raw = (process.env.KONGCODE_ALLOW_CONFIG_EDIT ?? "").trim();
+    const raw = (process.env.LAQRUMCODE_ALLOW_CONFIG_EDIT ?? "").trim();
     return raw !== "" && raw !== "0" && raw.toLowerCase() !== "false";
 }
 export function isProtectedConfigFile(filePath) {

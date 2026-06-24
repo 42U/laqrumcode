@@ -65,6 +65,6 @@ export function loadSchema(): string {
     }
   }
   throw new Error(
-    `kongcode: schema.surql not found in any candidate path. Last error: ${(lastErr as Error)?.message ?? "unknown"}`,
+    `laqrumcode: schema.surql not found in any candidate path. Last error: ${(lastErr as Error)?.message ?? "unknown"}`,
   );
 }

@@ -29,7 +29,7 @@ const {
 /** Build a JSON marker string matching the auto-drain lock format. */
 function drainMarkerJson(pid: number, daemonPid = pid, startedAt = Date.now()): string {
   return JSON.stringify({
-    marker: "kongcode-auto-drain",
+    marker: "laqrumcode-auto-drain",
     pid,
     daemonPid,
     startedAt,
@@ -48,24 +48,24 @@ describe("auto-drain: findClaudeBin", () => {
     resetClaudeBinCache();
   });
 
-  it("returns env override path when KONGCODE_CLAUDE_BIN is set and exists", () => {
-    const tmp = mkdtempSync(join(tmpdir(), "kongcode-auto-drain-"));
+  it("returns env override path when LAQRUMCODE_CLAUDE_BIN is set and exists", () => {
+    const tmp = mkdtempSync(join(tmpdir(), "laqrumcode-auto-drain-"));
     const fakeBin = join(tmp, "fake-claude");
     writeFileSync(fakeBin, "#!/bin/sh\necho ok\n");
-    const original = process.env.KONGCODE_CLAUDE_BIN;
-    process.env.KONGCODE_CLAUDE_BIN = fakeBin;
+    const original = process.env.LAQRUMCODE_CLAUDE_BIN;
+    process.env.LAQRUMCODE_CLAUDE_BIN = fakeBin;
     try {
       expect(findClaudeBin()).toBe(fakeBin);
     } finally {
-      if (original === undefined) delete process.env.KONGCODE_CLAUDE_BIN;
-      else process.env.KONGCODE_CLAUDE_BIN = original;
+      if (original === undefined) delete process.env.LAQRUMCODE_CLAUDE_BIN;
+      else process.env.LAQRUMCODE_CLAUDE_BIN = original;
       rmSync(tmp, { recursive: true, force: true });
     }
   });
 
   it("falls back to which-claude when env override is unset", () => {
-    const original = process.env.KONGCODE_CLAUDE_BIN;
-    delete process.env.KONGCODE_CLAUDE_BIN;
+    const original = process.env.LAQRUMCODE_CLAUDE_BIN;
+    delete process.env.LAQRUMCODE_CLAUDE_BIN;
     try {
       // On a dev machine claude is usually on PATH; on CI it may not be.
       // Either result is acceptable — we're just verifying the fn doesn't
@@ -73,14 +73,14 @@ describe("auto-drain: findClaudeBin", () => {
       const result = findClaudeBin();
       if (result !== null) expect(result.length).toBeGreaterThan(0);
     } finally {
-      if (original !== undefined) process.env.KONGCODE_CLAUDE_BIN = original;
+      if (original !== undefined) process.env.LAQRUMCODE_CLAUDE_BIN = original;
     }
   });
 
   it("returns null when env override points at non-existent path AND nothing else found", () => {
-    const original = process.env.KONGCODE_CLAUDE_BIN;
+    const original = process.env.LAQRUMCODE_CLAUDE_BIN;
     const originalPath = process.env.PATH;
-    process.env.KONGCODE_CLAUDE_BIN = "/definitely/not/a/real/path/claude-binary-xyzzy";
+    process.env.LAQRUMCODE_CLAUDE_BIN = "/definitely/not/a/real/path/claude-binary-xyzzy";
     process.env.PATH = "/dev/null"; // wipe PATH so `which claude` fails
     resetClaudeBinCache();
     try {
@@ -90,18 +90,18 @@ describe("auto-drain: findClaudeBin", () => {
       const result = findClaudeBin();
       expect(typeof result === "string" || result === null).toBe(true);
     } finally {
-      if (original === undefined) delete process.env.KONGCODE_CLAUDE_BIN;
-      else process.env.KONGCODE_CLAUDE_BIN = original;
+      if (original === undefined) delete process.env.LAQRUMCODE_CLAUDE_BIN;
+      else process.env.LAQRUMCODE_CLAUDE_BIN = original;
       if (originalPath !== undefined) process.env.PATH = originalPath;
     }
   });
 
   it("caches result on success — repeat call returns same value", () => {
-    const tmp = mkdtempSync(join(tmpdir(), "kongcode-auto-drain-"));
+    const tmp = mkdtempSync(join(tmpdir(), "laqrumcode-auto-drain-"));
     const fakeBin = join(tmp, "fake-claude");
     writeFileSync(fakeBin, "");
-    const original = process.env.KONGCODE_CLAUDE_BIN;
-    process.env.KONGCODE_CLAUDE_BIN = fakeBin;
+    const original = process.env.LAQRUMCODE_CLAUDE_BIN;
+    process.env.LAQRUMCODE_CLAUDE_BIN = fakeBin;
     resetClaudeBinCache();
     try {
       const first = findClaudeBin();
@@ -109,8 +109,8 @@ describe("auto-drain: findClaudeBin", () => {
       expect(first).toBe(second);
       expect(first).toBe(fakeBin);
     } finally {
-      if (original === undefined) delete process.env.KONGCODE_CLAUDE_BIN;
-      else process.env.KONGCODE_CLAUDE_BIN = original;
+      if (original === undefined) delete process.env.LAQRUMCODE_CLAUDE_BIN;
+      else process.env.LAQRUMCODE_CLAUDE_BIN = original;
       rmSync(tmp, { recursive: true, force: true });
     }
   });
@@ -121,7 +121,7 @@ describe("auto-drain: PID-file lock", () => {
   let lockPath: string;
 
   beforeEach(() => {
-    tmp = mkdtempSync(join(tmpdir(), "kongcode-auto-drain-lock-"));
+    tmp = mkdtempSync(join(tmpdir(), "laqrumcode-auto-drain-lock-"));
     lockPath = join(tmp, "auto-drain.pid");
   });
 
@@ -195,7 +195,7 @@ describe("auto-drain: spending state (daily cap)", () => {
   let tmp: string;
 
   beforeEach(() => {
-    tmp = mkdtempSync(join(tmpdir(), "kongcode-auto-drain-spend-"));
+    tmp = mkdtempSync(join(tmpdir(), "laqrumcode-auto-drain-spend-"));
   });
 
   afterEach(() => {
@@ -293,14 +293,14 @@ describe("auto-drain: readLockMarker", () => {
   it("parses well-formed JSON marker with all fields", () => {
     const startedAt = Date.now() - 1000;
     writeFileSync(lockPath, JSON.stringify({
-      marker: "kongcode-auto-drain",
+      marker: "laqrumcode-auto-drain",
       pid: 4242,
       daemonPid: 4200,
       startedAt,
     }));
     const m = readLockMarker(lockPath);
     expect(m).not.toBeNull();
-    expect(m!.marker).toBe("kongcode-auto-drain");
+    expect(m!.marker).toBe("laqrumcode-auto-drain");
     expect(m!.pid).toBe(4242);
     expect(m!.daemonPid).toBe(4200);
     expect(m!.startedAt).toBe(startedAt);
@@ -309,7 +309,7 @@ describe("auto-drain: readLockMarker", () => {
   it("rejects JSON with wrong marker string (e.g. daemon marker in a drain file)", () => {
     // Daemon marker should NOT be accepted by drain reader — cross-contamination guard.
     writeFileSync(lockPath, JSON.stringify({
-      marker: "kongcode-daemon",
+      marker: "laqrumcode-daemon",
       pid: 4242,
       startedAt: Date.now(),
       daemonVersion: "0.7.69",
@@ -358,7 +358,7 @@ describe("auto-drain: readLockMarker", () => {
 
   it("handles JSON marker with missing daemonPid/startedAt (defaults to 0)", () => {
     writeFileSync(lockPath, JSON.stringify({
-      marker: "kongcode-auto-drain",
+      marker: "laqrumcode-auto-drain",
       pid: 4242,
     }));
     const m = readLockMarker(lockPath);
@@ -393,7 +393,7 @@ describe("auto-drain: marker writers", () => {
     writeDaemonInterimMarker(fd!);
     const m = readLockMarker(lockPath);
     expect(m).not.toBeNull();
-    expect(m!.marker).toBe("kongcode-auto-drain");
+    expect(m!.marker).toBe("laqrumcode-auto-drain");
     expect(m!.pid).toBe(process.pid);
     expect(m!.daemonPid).toBe(process.pid);
     expect(m!.startedAt).toBeGreaterThan(0);
@@ -817,41 +817,41 @@ describe("auto-drain: pruneStaleSpending", () => {
   });
 });
 
-// Wave 2 Fix A1: drain subprocess must get a UNIQUE KONGCODE_SESSION_ID each
+// Wave 2 Fix A1: drain subprocess must get a UNIQUE LAQRUMCODE_SESSION_ID each
 // spawn so it never collides with the parent's (or a sibling drain's) entry
 // in the session cache. Inheriting the parent's value re-uses the parent's
 // SessionState — including its surrealSessionId race window — which then
 // surfaces downstream as "Invalid record ID format" on commit. Also: the
 // allowlist must include CLAUDE_PLUGIN_ROOT so the subprocess can find the
-// kongcode plugin.
+// laqrumcode plugin.
 describe("auto-drain: buildDrainEnv (Wave 2 Fix A1)", () => {
-  const savedKongcode = process.env.KONGCODE_SESSION_ID;
+  const savedLaqrumcode = process.env.LAQRUMCODE_SESSION_ID;
   const savedClaudePlugin = process.env.CLAUDE_PLUGIN_ROOT;
   afterEach(() => {
-    if (savedKongcode === undefined) delete process.env.KONGCODE_SESSION_ID;
-    else process.env.KONGCODE_SESSION_ID = savedKongcode;
+    if (savedLaqrumcode === undefined) delete process.env.LAQRUMCODE_SESSION_ID;
+    else process.env.LAQRUMCODE_SESSION_ID = savedLaqrumcode;
     if (savedClaudePlugin === undefined) delete process.env.CLAUDE_PLUGIN_ROOT;
     else process.env.CLAUDE_PLUGIN_ROOT = savedClaudePlugin;
   });
 
-  it("always sets a non-empty KONGCODE_SESSION_ID even when parent has none", () => {
-    delete process.env.KONGCODE_SESSION_ID;
+  it("always sets a non-empty LAQRUMCODE_SESSION_ID even when parent has none", () => {
+    delete process.env.LAQRUMCODE_SESSION_ID;
     const env = buildDrainEnv();
-    expect(env.KONGCODE_SESSION_ID).toBeTruthy();
-    expect(typeof env.KONGCODE_SESSION_ID).toBe("string");
-    expect((env.KONGCODE_SESSION_ID as string).length).toBeGreaterThan(0);
+    expect(env.LAQRUMCODE_SESSION_ID).toBeTruthy();
+    expect(typeof env.LAQRUMCODE_SESSION_ID).toBe("string");
+    expect((env.LAQRUMCODE_SESSION_ID as string).length).toBeGreaterThan(0);
   });
 
-  it("OVERRIDES inherited KONGCODE_SESSION_ID from the parent (does not reuse)", () => {
-    process.env.KONGCODE_SESSION_ID = "parent-session-fixed";
+  it("OVERRIDES inherited LAQRUMCODE_SESSION_ID from the parent (does not reuse)", () => {
+    process.env.LAQRUMCODE_SESSION_ID = "parent-session-fixed";
     const env = buildDrainEnv();
-    expect(env.KONGCODE_SESSION_ID).toBeTruthy();
-    expect(env.KONGCODE_SESSION_ID).not.toBe("parent-session-fixed");
+    expect(env.LAQRUMCODE_SESSION_ID).toBeTruthy();
+    expect(env.LAQRUMCODE_SESSION_ID).not.toBe("parent-session-fixed");
   });
 
-  it("generates a different KONGCODE_SESSION_ID on each call (no sibling collisions)", () => {
-    const a = buildDrainEnv().KONGCODE_SESSION_ID;
-    const b = buildDrainEnv().KONGCODE_SESSION_ID;
+  it("generates a different LAQRUMCODE_SESSION_ID on each call (no sibling collisions)", () => {
+    const a = buildDrainEnv().LAQRUMCODE_SESSION_ID;
+    const b = buildDrainEnv().LAQRUMCODE_SESSION_ID;
     expect(a).toBeTruthy();
     expect(b).toBeTruthy();
     expect(a).not.toBe(b);
@@ -882,7 +882,7 @@ describe("auto-drain: buildDrainEnv (Wave 2 Fix A1)", () => {
     const env = buildDrainEnv();
     expect(env.CLAUDE_PLUGIN_ROOT).toBeTruthy();
     expect(typeof env.CLAUDE_PLUGIN_ROOT).toBe("string");
-    // The value should be the kongcode repo root resolved from the test's
+    // The value should be the laqrumcode repo root resolved from the test's
     // module location via `resolve(...)`. We don't pin the exact path (it'd
     // be fragile across dev/CI), but it must be an absolute path. Use
     // node:path/isAbsolute so the assertion is portable across Linux/macOS
@@ -904,7 +904,7 @@ describe("auto-drain: buildDrainEnv (Wave 2 Fix A1)", () => {
 // initializeStack — specifically before `await store.initialize()` and
 // `await embeddings.initialize()` — so a slow/hung downstream init step
 // cannot starve the scheduler from arming. Pre-0.7.89, the scheduler call
-// was the last work before "kongcode stack ready"; when a single
+// was the last work before "laqrumcode stack ready"; when a single
 // initializeStack step hung, the periodic timer never fired and auto-drain
 // silently died.
 //
@@ -1013,13 +1013,13 @@ describe("auto-drain: startDrainScheduler logging (Wave 2 Fix #4)", () => {
     }
   });
 
-  it("logs disabled message when KONGCODE_AUTO_DRAIN=0", async () => {
+  it("logs disabled message when LAQRUMCODE_AUTO_DRAIN=0", async () => {
     const { log } = await import("../src/engine/log.js");
     const infoSpy = vi.spyOn(log, "info");
     const { startDrainScheduler, stopDrainScheduler } = await import("../src/daemon/auto-drain.js");
     stopDrainScheduler();
-    const saved = process.env.KONGCODE_AUTO_DRAIN;
-    process.env.KONGCODE_AUTO_DRAIN = "0";
+    const saved = process.env.LAQRUMCODE_AUTO_DRAIN;
+    process.env.LAQRUMCODE_AUTO_DRAIN = "0";
     try {
       const state = {
         store: { isAvailable: () => false, queryFirst: async () => [] },
@@ -1032,11 +1032,11 @@ describe("auto-drain: startDrainScheduler logging (Wave 2 Fix #4)", () => {
       });
       const disabledMessages = infoSpy.mock.calls
         .map(c => String(c[0] ?? ""))
-        .filter(s => s.includes("disabled by KONGCODE_AUTO_DRAIN=0"));
+        .filter(s => s.includes("disabled by LAQRUMCODE_AUTO_DRAIN=0"));
       expect(disabledMessages.length).toBe(1);
     } finally {
-      if (saved === undefined) delete process.env.KONGCODE_AUTO_DRAIN;
-      else process.env.KONGCODE_AUTO_DRAIN = saved;
+      if (saved === undefined) delete process.env.LAQRUMCODE_AUTO_DRAIN;
+      else process.env.LAQRUMCODE_AUTO_DRAIN = saved;
       stopDrainScheduler();
       infoSpy.mockRestore();
     }

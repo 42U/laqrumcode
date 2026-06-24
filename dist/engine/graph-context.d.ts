@@ -1,5 +1,5 @@
 /**
- * Graph-based context transformation for KongCode.
+ * Graph-based context transformation for LaqrumCode.
  *
  * Core retrieval pipeline: vector search → graph expand → WMR/ACAN scoring
  * → dedup → budget trim → format.
@@ -99,7 +99,7 @@ export declare function getTransformErrorRate(): {
  *  fixed 15s was tuned for GPU-era embed+rerank latency; the 2026-06-04
  *  switch of the daemon to CPU-only mode tripped it constantly (daemon.log:
  *  "graphTransformContext timed out" spam → raw-message fallback on every
- *  affected prompt). KONGCODE_NO_GPU=1 is set by gpu-pin.ts at daemon startup
+ *  affected prompt). LAQRUMCODE_NO_GPU=1 is set by gpu-pin.ts at daemon startup
  *  when CPU mode is configured, so the default self-adjusts. Exported for
  *  tests. Resolved per call (not at import) so it sees the post-pin env. */
 export declare function resolveTransformTimeoutMs(env?: NodeJS.ProcessEnv): number;

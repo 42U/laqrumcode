@@ -1,16 +1,16 @@
-# KongCode Workflows
+# LaqrumCode Workflows
 
-How to use the kongcode skill suite in practice. This document describes what the skills actually encode, not what we hoped they would. Reflects the state after the phase 0-5 production upgrade.
+How to use the laqrumcode skill suite in practice. This document describes what the skills actually encode, not what we hoped they would. Reflects the state after the phase 0-5 production upgrade.
 
 ## The core insight
 
-Kongcode's value is determined by a single metric: **retrieval_utilization**. Context injection has always worked — the problem was that Claude ignored ~90% of what got injected. The whole upgrade stack is organized around changing that, not around adding more retrieval infrastructure.
+Laqrumcode's value is determined by a single metric: **retrieval_utilization**. Context injection has always worked — the problem was that Claude ignored ~90% of what got injected. The whole upgrade stack is organized around changing that, not around adding more retrieval infrastructure.
 
 ## The skill suite (in dependency order)
 
 ### Tier 1 — foundation
 
-- **`kongcode-health`** — pre-flight check before any significant graph write. Runs `introspect`, samples `recall`, calls `fetch_pending_work`, reports GREEN/YELLOW/RED.
+- **`laqrumcode-health`** — pre-flight check before any significant graph write. Runs `introspect`, samples `recall`, calls `fetch_pending_work`, reports GREEN/YELLOW/RED.
 - **`ground-on-memory`** — behavioral enforcement. Scans injected context, cites relevant items, explicitly notes "no relevant memory" when true.
 
 ### Tier 2 — intelligence
@@ -34,7 +34,7 @@ Kongcode's value is determined by a single metric: **retrieval_utilization**. Co
 ### Ingesting a new source
 
 ```
-/kongcode-health                              # verify pipeline
+/laqrumcode-health                              # verify pipeline
 /extract-knowledge <path-or-url>              # extract gems
 (automatic: gap-scan vs existing coverage)
 (automatic: cross-source links to prior concepts)
@@ -43,7 +43,7 @@ Kongcode's value is determined by a single metric: **retrieval_utilization**. Co
 ### Answering a factual question
 
 ```
-(automatic: kongcode hook injects context)
+(automatic: laqrumcode hook injects context)
 /ground-on-memory                             # enforce grounding discipline
 (if injected context insufficient): /recall-explain <topic>
 (optional): /knowledge-gap-scan <topic>       # understand coverage first

@@ -29,7 +29,7 @@
  *
  * Isolation: every test creates a NEW Surreal database under a fresh
  * namespace (kctest_dedup_<timestamp>_<rand>) and tears it down on
- * afterAll. Never touches the user's kong/memory DB.
+ * afterAll. Never touches the user's laqrum/memory DB.
  *
  * Skip with: `SKIP_INTEGRATION=1 npm test -- --run dedup-integration`
  */
@@ -45,7 +45,7 @@ import type { MemoryConfig } from "../src/engine/config.js";
 const SKIP = process.env.SKIP_INTEGRATION === "1";
 
 // Disable auto-drain so the test doesn't try to spawn headless Claude.
-process.env.KONGCODE_AUTO_DRAIN = "0";
+process.env.LAQRUMCODE_AUTO_DRAIN = "0";
 
 const TEST_NS = `kctest_dedup_${Date.now()}_${Math.floor(Math.random() * 1e6)}`;
 const TEST_DB = "dedup";

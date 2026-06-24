@@ -5,7 +5,7 @@
  * cross-attention model. Ships dormant — auto-trains and activates when
  * enough retrieval outcome data accumulates (5000+ labeled pairs).
  *
- * Ported from kongbrain — uses SurrealStore instead of module-level DB.
+ * Ported from laqrumbrain — uses SurrealStore instead of module-level DB.
  */
 import type { SurrealStore } from "./surreal.js";
 export interface ACANWeights {

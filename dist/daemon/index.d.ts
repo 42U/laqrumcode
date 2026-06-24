@@ -1,7 +1,7 @@
 /**
- * kongcode-daemon entry point.
+ * laqrumcode-daemon entry point.
  *
- * Long-lived background process spawned by the first kongcode-mcp client
+ * Long-lived background process spawned by the first laqrumcode-mcp client
  * that doesn't find an existing daemon. Owns SurrealStore, EmbeddingService,
  * ACAN weights, hook event queue, and all tool/hook handlers. Outlives any
  * individual Claude Code session — plugin updates restart only the thin

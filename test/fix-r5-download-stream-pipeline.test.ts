@@ -207,7 +207,7 @@ describe("R5/R14/R15: downloadFile stream pipeline", () => {
   // ---- happy path with sha256 verification still works end-to-end. ----
   it("downloads and verifies a correct sha256, renaming .partial into place", async () => {
     const { createHash } = await import("node:crypto");
-    const payload = Buffer.from("hello kongcode bootstrap download");
+    const payload = Buffer.from("hello laqrumcode bootstrap download");
     const sha = createHash("sha256").update(payload).digest("hex");
     const url = await startServer((_req, res) => {
       res.writeHead(200, { "Content-Type": "application/octet-stream" });

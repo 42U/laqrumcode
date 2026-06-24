@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to KongCode are documented here. The 0.7.x series introduced the daemon-split architecture; 0.8.0 will be the first marketplace-ready stable.
+All notable changes to LaqrumCode are documented here. The 0.7.x series introduced the daemon-split architecture; 0.8.0 will be the first marketplace-ready stable.
 
 ## [Unreleased]
 
@@ -60,7 +60,7 @@ fixed; full suite green (1407 tests).
 
 - **Missed CRITICAL — Windows was entirely non-functional (R6):** the MCP client
   spoke only Unix sockets (existsSync gate) while the daemon binds TCP on win32,
-  so memory was dead on 100% of Windows installs and `KONGCODE_DAEMON_TRANSPORT=tcp`
+  so memory was dead on 100% of Windows installs and `LAQRUMCODE_DAEMON_TRANSPORT=tcp`
   was a no-op. Client is now transport-aware (TCP on win32 / env opt-in, fixed port
   18764), with a real meta.handshake readiness probe; dup-daemon protection preserved.
 - **Missed HIGH — ReDoS on the shared event loop (R4/R16):** the path-extraction
@@ -122,7 +122,7 @@ fixed by hand; full suite green (1451 tests).
   **monotonic** (the schema persists in the DB and is idempotent; reconnect only
   re-applies when never-applied) and only clears the zombie flag when usable.
 - **T2:** S6 enforced the handshake token on *every* connection but the co-located
-  UDS client never sent it → self-lockout when `KONGCODE_DAEMON_PORT` is set on
+  UDS client never sent it → self-lockout when `LAQRUMCODE_DAEMON_PORT` is set on
   Linux/macOS. Client now attaches its own 0600 token whenever readable.
 - **T3:** S6's per-user port window [18764, 28763] *overlapped* the managed-SurrealDB
   port 18765 → ~1/10000 usernames wedged. Window moved to [28765, 32764], provably
@@ -240,7 +240,7 @@ erasure) remain a gated, incremental roadmap behind a future `gcHardDelete` keys
 Built the single audited content-DELETE choke point that every GC delete must flow through —
 deletes nothing itself; it is the gate. Five REAL primitives (no stubs):
 1. **snapshot** — in-process SELECT of target rows + all incident edges across all **26 relation
-   tables** → re-importable file under `~/.kongcode/cache/gc-backups/`; a write failure ABORTS.
+   tables** → re-importable file under `~/.laqrumcode/cache/gc-backups/`; a write failure ABORTS.
 2. **genuinely-dead** — refuses to delete a correction (`category='correction'` / `[CORRECTION]`).
 3. **blast-radius** — co-deletes every incident edge + NULLs the **complete** scalar back-pointer
    set (4× `superseded_by`, `resolved_by`, `causal_chain.trigger/outcome_memory`, and the
@@ -302,7 +302,7 @@ Wave 1 fixes the CRITICAL + HIGH ones, each adversarially reviewed + the integra
 
 - **E2 (CRITICAL, security) — TCP daemon auth bypass.** The S6 handshake token gated only identity,
   not data access: `dispatchLine` dispatched every method with no per-socket auth state, so a
-  co-located process on the shared loopback port (Windows / `KONGCODE_DAEMON_TRANSPORT=tcp`) could
+  co-located process on the shared loopback port (Windows / `LAQRUMCODE_DAEMON_TRANSPORT=tcp`) could
   send `tool.*`/`hook.*` as its first line and read/write another OS user's graph. Added a per-socket
   `authed` flag (set only on a token-matching `meta.handshake`); `dispatchLine` now rejects any
   non-`meta.*` method on an unauthed socket with `UNAUTHORIZED` (−32006) when a token is enforced.
@@ -322,7 +322,7 @@ Wave 1 fixes the CRITICAL + HIGH ones, each adversarially reviewed + the integra
   **E16**: restored `access_stats` to both scripts' table lists.
 - **E5 (HIGH, cross-platform)** — managed-SurrealDB port was flat `18765` for all Windows OS users
   (collision → 2nd user wedged); now per-user (username-hash offset). **E14**: cred file written
-  `0600` atomically + `~/.kongcode` dir `0700`.
+  `0600` atomically + `~/.laqrumcode` dir `0700`.
 - **E9 (HIGH, cross-platform)** — auto-drain was POSIX-only (`which`/`spawn`); made `findClaudeBin`
   Windows-aware (`where`, `.cmd`/`.exe`, `%APPDATA%\npm`) + `shell` on win32.
 
@@ -342,7 +342,7 @@ Closes the rest of the 16-gap audit:
   (single shared `supersedeFired` guard; can't double-exit or thrash).
 - **E10 (MEDIUM) — TCP EADDRINUSE recovery.** The TCP listen path now probes the occupant with an
   unauthenticated `meta.health` and throws a distinguishable `TcpPortInUseError{kind}` —
-  `kongcode-daemon` → defer to the live sibling (exit 0), `foreign` → clear diagnostic + exit 1
+  `laqrumcode-daemon` → defer to the live sibling (exit 0), `foreign` → clear diagnostic + exit 1
   (was an opaque bind crash; UDS path unchanged).
 - **E11 (LOW) — maintenance failure backoff.** `shouldRunMaintenance` now reads the E1 status field
   and skips a job whose latest run errored within a 30min cooldown — a permanently-failing job no
@@ -355,7 +355,7 @@ Closes the rest of the 16-gap audit:
   `memory_table,memory_id`; concept-edge endpoints) so they aren't full scans on a large graph.
 - **E12 (MEDIUM) — drain liveness.** Auto-drain now writes a `maintenance_runs` row (job=`autoDrain`,
   ok/error) per attempt, so E1's `memory_health` diagnostic surfaces a chronically-failing drainer.
-- **E20 (LOW) — backup skill.** `kongcode-backup-native` de-hardcoded (runtime-resolved surreal
+- **E20 (LOW) — backup skill.** `laqrumcode-backup-native` de-hardcoded (runtime-resolved surreal
   binary, version de-pinned, Verify section corrected to the real batched-INSERT export format).
 
 Full suite green (1577; sole failure is the pre-existing environmental R6 TCP-spawn timeout). All 16
@@ -531,7 +531,7 @@ through an independent design review + QA auditor (no CRITICAL/MAJOR).
   makes rerank wall-time a **bounded, hardware-independent constant** (work ∝ tokens,
   capped) — it does NOT rely on core count. Measured @ 4 cores (commodity laptop): a
   full 30-doc batch ≈ 22s (≤~27s at the budget ceiling) vs the OLD path timing out
-  >45s; scales down with cores. All `KONGCODE_RERANK_*` env-tunable.
+  >45s; scales down with cores. All `LAQRUMCODE_RERANK_*` env-tunable.
 - **Side win:** the same token cap bounds the cross-encoder utilization scoring in
   `retrieval-quality.ts` (each item was scored against the full response — up to
   ~30×6500 tokens per eval), cutting that hidden cost ~13×. The 512-token response
@@ -558,7 +558,7 @@ redact-before-store proven live on a throwaway 3.1.4 instance), verifier release
   (`src/context-assembler.ts`); built-in provider patterns (Anthropic, AWS, GitHub,
   OpenAI, Stripe, Slack, Google, GitLab, npm, Hugging Face, JWT, PEM private-key
   blocks) fire with no configuration required.
-- **Optional `~/.kongcode/privacy.json`** (sibling of `surreal-cred.json`):
+- **Optional `~/.laqrumcode/privacy.json`** (sibling of `surreal-cred.json`):
   `redact_patterns` (extra regexes; a leading `(?i)` compiles case-insensitive),
   `ignore_projects` (those projects' turns are never stored), `ignore_paths`
   (matching files are not recorded as artifacts — wired into the PostToolUse path).
@@ -595,7 +595,7 @@ auditor CLEAN on all code, validator VERIFIED_FIXED on live probes.
   now issues idempotent `DEFINE NAMESPACE/DATABASE IF NOT EXISTS` before applying
   the schema — best-effort (a restricted user on a shared instance where the ns/db
   already exist still proceeds; the schema apply remains the authoritative gate).
-  Verified end-to-end on a throwaway 3.1.4 store: `kong` namespace goes absent →
+  Verified end-to-end on a throwaway 3.1.4 store: `laqrum` namespace goes absent →
   present, `initialize()` resolves true, graph is writable. (`src/engine/surreal.ts`)
 
 ### Added — web UI v2 (GH #15)
@@ -646,7 +646,7 @@ plus the full migration audit baked into compact-store. QA verdict CLEAN.
   Validation run: 484 live-drift rows repaired, 0 failures, 106/106 tables.
 - **Namespace sweep**: every non-empty (ns,db) beyond the migrated one is
   found and auto-exported (the old server silently hosted 58 namespaces,
-  including the kongclaw-era graph).
+  including the laqrumclaw-era graph).
 
 ## [0.7.121] — 2026-06-12
 
@@ -671,7 +671,7 @@ before tagging.
   bump (QA C1) — embedding/project/importance backfills are now WHERE-gated
   separate statements that emit no row version unless something actually
   changes.
-- **Store-amplification watch** in memory_health: set `KONGCODE_STORE_PATH`
+- **Store-amplification watch** in memory_health: set `LAQRUMCODE_STORE_PATH`
   to the surrealkv data dir and a >10× physical-vs-logical ratio raises a
   warning naming the compaction runbook.
 - **`scripts/compact-store.mjs`**: size-receipts-first LOGICAL export (~the
@@ -759,7 +759,7 @@ CLEAN; the one coverage flag answered with 5 new tests).
 
 ### Notes
 - "SessionEnd hook … failed: Hook cancelled" is a harness-side cancellation
-  message (typically at app exit), not a kongcode error; with the 3s budget
+  message (typically at app exit), not a laqrumcode error; with the 3s budget
   it should become rare, and it was always self-healing.
 
 ## [0.7.118] — 2026-06-10
@@ -771,7 +771,7 @@ review concerns (C1/D1/D2/D3/A1 + comment rot) fixed before tagging.
 ### Added
 - **Per-query deadline + zombie recovery** (src/engine/surreal.ts): every SDK
   round-trip (queryFirst/Multi/Exec/Batch + 3s ping) races a deadline
-  (`KONGCODE_DB_QUERY_TIMEOUT_MS`, default 60s). A blown deadline flags the
+  (`LAQRUMCODE_DB_QUERY_TIMEOUT_MS`, default 60s). A blown deadline flags the
   connection `zombieSuspect`; `ensureConnected` then rebuilds a fresh Surreal
   instance even though the SDK still reports `isConnected` — the production
   zombie (rpcsInFlight growing unboundedly while meta.health stayed green,
@@ -815,7 +815,7 @@ review concerns (C1/D1/D2/D3/A1 + comment rot) fixed before tagging.
   (archived/superseded/pruned rows are deliberately outside retrieval).
 
 ### Operational notes
-- Knobs: `KONGCODE_DB_QUERY_TIMEOUT_MS` (per-query deadline, clamp 1s–10min).
+- Knobs: `LAQRUMCODE_DB_QUERY_TIMEOUT_MS` (per-query deadline, clamp 1s–10min).
 - Maintenance cadence change: once per daemon process (+ 6h embedding
   re-sweeps) instead of per-session re-runs.
 
@@ -851,7 +851,7 @@ defects fixed before tagging).
   (core-memory → query-vec → vector-search → graph-expand → score-rerank →
   recent-turns → format-context, plus skip-retrieval); timeout failures now log
   per-stage elapsed and the stage that died, instead of a bare "45001ms".
-- `KONGCODE_IPC_TIMEOUT_MS` env override for the 30s per-request IPC timeout
+- `LAQRUMCODE_IPC_TIMEOUT_MS` env override for the 30s per-request IPC timeout
   (clamped 1s–10min; explicit per-call/per-client opts win) — operator knob for
   CPU-only machines where long gem batches legitimately exceed 30s.
 - ensureEdgeIndexes hardening (src/engine/edge-indexes.ts): per-op 15s timeout
@@ -884,7 +884,7 @@ defects fixed before tagging).
   consults HNSW via the `<|n|>` operator) + a stale schema line pin.
 
 ### Operational notes
-- KONGCODE_LOG_LEVEL defaults to `warn`: `log.info` lines never reach
+- LAQRUMCODE_LOG_LEVEL defaults to `warn`: `log.info` lines never reach
   daemon.log. Diagnosing by log-absence is a trap; verify daemon behavior by
   direct DB probes.
 - :8000 SurrealDB wedged under the day's load (migration + suites + a daemon
@@ -899,7 +899,7 @@ defects fixed before tagging).
 Wave-2 remediation: ~20 confirmed bugs from the full-source QA waterfall (4-agent audit, findings inventory memory:65eoe78c151tot1eecdc). Four tranches; QA-reviewed with one CONCERN (coverage gap) closed pre-tag.
 
 ### Fixed — live behavior (T1)
-- **Transport/transform deadline inversion** — hook-proxy abandoned at a flat 15 s while CPU-mode transforms legitimately run to 45 s, so every slow turn discarded its context, injected a **false "kongcode daemon is unreachable" warning, and forked a doomed daemon**. Now: per-event proxy budgets (55 s UPS/PreCompact, 25 s session-start/post-compact, 8 s short events; invariant `45 transform < 55 proxy < 60 hooks.json` — hooks.json UPS/PreCompact raised 15→60), and `postJson` distinguishes **timeout (slow ≠ down: fail-open `{}`, no respawn, no warning)** from connect-class failures (genuinely down → respawn + warning).
+- **Transport/transform deadline inversion** — hook-proxy abandoned at a flat 15 s while CPU-mode transforms legitimately run to 45 s, so every slow turn discarded its context, injected a **false "laqrumcode daemon is unreachable" warning, and forked a doomed daemon**. Now: per-event proxy budgets (55 s UPS/PreCompact, 25 s session-start/post-compact, 8 s short events; invariant `45 transform < 55 proxy < 60 hooks.json` — hooks.json UPS/PreCompact raised 15→60), and `postJson` distinguishes **timeout (slow ≠ down: fail-open `{}`, no respawn, no warning)** from connect-class failures (genuinely down → respawn + warning).
 - **hook-proxy NaN pid-guard** — `Number(JSON pid-marker)` = NaN made the don't-double-spawn guard dead for ~50 releases; every unreachable-socket hook event forked a doomed daemon. JSON-or-bare parse + a 30 s cross-process spawn-attempt cooldown file.
 - **`guaranteed:` synthetic-id leak** — guaranteed-inclusion recent turns crashed `updateUtilityCache` every turn ("Invalid record ID format" spam); record-shape gate added.
 - **Phantom pending counts ×6** — every counting surface (memory-health, introspect, auto-drain `getPendingCount`, session-start "DRAIN NOW" banner, user-prompt-submit, http-api health cache) now filters `active`, matching `fetch_pending_work` — soft-archived forensic rows no longer read as backlog (live: old predicate 5 → new 0), ending phantom-drain churn and false banners.
@@ -925,7 +925,7 @@ Wave-2 remediation: ~20 confirmed bugs from the full-source QA waterfall (4-agen
 - **Seed skills: 0 → all** — every curated seed CREATE failed on `preconditions/postconditions: null`; **fresh installs seeded 0 of 15 skills**. Conditional CONTENT builds. Same fix class: workspace skill-file migration (`last_used: null` killed every migration CREATE), `createSession`'s kc-less fallback, and `createTask`/`createSession` NULL-poisoning of `project_id` (stored NULL ≠ NONE made rows permanently un-backfillable).
 
 ### Tests
-- `test/wave2-fixes.test.ts` (7, live `kong_test`): index arming + dirty-table flagging, relate idempotency (2 calls → 1 edge), decay-once (0.4 stays 0.4), **seed skills count == curated set**, the archive guard query (referenced turn excluded), null-omission builders. Fixtures across 6 suites updated to the new signatures and *strengthened* (existed-flags pinned; Reflexion mocks mirror the real two-query sequence). Suite: **1140 passing**. QA-reviewed; the one CONCERN (three residual unfiltered counters) fixed before tagging.
+- `test/wave2-fixes.test.ts` (7, live `laqrum_test`): index arming + dirty-table flagging, relate idempotency (2 calls → 1 edge), decay-once (0.4 stays 0.4), **seed skills count == curated set**, the archive guard query (referenced turn excluded), null-omission builders. Fixtures across 6 suites updated to the new signatures and *strengthened* (existed-flags pinned; Reflexion mocks mirror the real two-query sequence). Suite: **1140 passing**. QA-reviewed; the one CONCERN (three residual unfiltered counters) fixed before tagging.
 
 ### Operational notes
 - `ensureEdgeIndexes` will flag the duplicated tables on existing installs — run `scripts/dedup-edges.mjs` (next release) to clean them; indexes arm on the following boot. hooks.json timeout changes activate on plugin reload.
@@ -943,7 +943,7 @@ Knowledge-write-tool fixes — the spec-gem linking incident (memory:ety7rj662y9
 - **Same-session save-then-recall lag**: a new test pins that a just-created concept is *immediately* top-1 findable by vector search — and no code path queries the HNSW index at all (reads are brute-force cosine), so index-refresh lag is ruled out by construction. The reported lag is pipeline-side (scoring/caching) — documented follow-up.
 
 ### Tests
-- `test/knowledge-write-guards.test.ts` (7, live `kong_test`, deterministic fake-embedder vectors with exact cosines). Discriminating: **5/7 fail against pre-fix source**. Suite: **1133 passing**. Independently QA-reviewed — CLEAN (boundary semantics, injection audit, empirical no-op proof for the old linkToProject guard, production untouched).
+- `test/knowledge-write-guards.test.ts` (7, live `laqrum_test`, deterministic fake-embedder vectors with exact cosines). Discriminating: **5/7 fail against pre-fix source**. Suite: **1133 passing**. Independently QA-reviewed — CLEAN (boundary semantics, injection audit, empirical no-op proof for the old linkToProject guard, production untouched).
 
 ### Known follow-ups
 - Report exact-short-circuit exclusions (≥0.70 non-exact candidates) in `skipped_by_guard` too; inverse ratio asymmetry (long `old_text` vs short concept) unguarded; UNIQUE index on edge `(in, out)` as the durable dedup; prune two stale D2 whitelist pins; correct stale "HNSW KNN" comments; pre-existing duplicate `relevant_to`/`used_in` edges in production await a separate migration.
@@ -954,15 +954,15 @@ Drain-storm post-mortem fixes (2 big + 2 smaller bugs) + the CPU-mode knob.
 
 ### Fixed
 - **Auto-drain failure backoff** — with every extractor dying instantly (the account hit its weekly API limit), the scheduler respawned on every trigger and burned the *entire* 50/day budget in ~20 minutes after UTC midnight, five days running (spend ledger: exactly 50/day Jun 5–9, 250 spawns, zero work, weekly quota destroyed). `spawnHeadlessDrainer` now tracks consecutive *fast* failures (exit with no queue progress in <120s) and refuses to spawn during an exponential cooldown (30 min → 6 h after 3); long runs without progress are classified neutral so slow legitimate work never accrues cooldown; any progress resets the state.
-- **Auto-drain SessionEnd self-trigger** — each drain child's *own* SessionEnd hook re-triggered the next spawn (~25 s storm cadence, `reason=session-end`). Drain subprocesses are now tagged (`KONGCODE_DRAIN_SESSION=1` in `buildDrainEnv`); `hook-proxy.cjs` — which runs inside the child's env — stamps `kongcode_drain_session: true` into the hook payload, and `handleSessionEnd` closes the drain session's row (so deferred cleanup can't enqueue extraction for it later) and skips the queue/handoff/re-trigger pipeline. Normal sessions' hook payloads are byte-identical (QA-verified — the tag branch is gated on the env var only drain children carry).
+- **Auto-drain SessionEnd self-trigger** — each drain child's *own* SessionEnd hook re-triggered the next spawn (~25 s storm cadence, `reason=session-end`). Drain subprocesses are now tagged (`LAQRUMCODE_DRAIN_SESSION=1` in `buildDrainEnv`); `hook-proxy.cjs` — which runs inside the child's env — stamps `laqrumcode_drain_session: true` into the hook payload, and `handleSessionEnd` closes the drain session's row (so deferred cleanup can't enqueue extraction for it later) and skips the queue/handoff/re-trigger pipeline. Normal sessions' hook payloads are byte-identical (QA-verified — the tag branch is gated on the env var only drain children carry).
 - **`getPreviousSessionTurns` was silently dead** (a double defect, spamming 1,922 `Could not cast into 'record'` lines in the live daemon.log): it cast the kc-session UUID with `type::record()` (throws — all three callers pass kc UUIDs) and bound the previous session's Thing as a *string* into `part_of.out` (string bindings never match records). Now compares `kc_session_id` (pre-kc rows stay eligible via `IS NONE`) and binds `type::record($sid)`. Previous-session context injection works for the first time through this path.
-- **`graphTransformContext` hard 15 s deadline** — tuned for GPU-era embed+rerank latency, it tripped constantly after the daemon moved to CPU-only mode (Jun 4), degrading prompts to raw-message passthrough. New `resolveTransformTimeoutMs()`: `KONGCODE_TRANSFORM_TIMEOUT_MS` override wins, else 45 s when `KONGCODE_NO_GPU=1` (auto-set by gpu-pin in CPU mode), else 15 s; the timeout log now includes elapsed ms.
+- **`graphTransformContext` hard 15 s deadline** — tuned for GPU-era embed+rerank latency, it tripped constantly after the daemon moved to CPU-only mode (Jun 4), degrading prompts to raw-message passthrough. New `resolveTransformTimeoutMs()`: `LAQRUMCODE_TRANSFORM_TIMEOUT_MS` override wins, else 45 s when `LAQRUMCODE_NO_GPU=1` (auto-set by gpu-pin in CPU mode), else 15 s; the timeout log now includes elapsed ms.
 
 ### Added
-- **CPU-mode sentinel for the GPU knob** (uncommitted since Jun 4, riding along): `~/.kongcode/cuda-visible-devices` (or `KONGCODE_CUDA_VISIBLE_DEVICES`) now accepts `cpu`/`none`/`off`/`false`/`-1` → sets `KONGCODE_NO_GPU=1` at daemon module-load (before `detectResourceProfile`) → genuine CPU-only mode (`gpu:false`), not a CUDA-hide. Device pins (GPU UUIDs) work as before; still strictly opt-in/no-op by default.
+- **CPU-mode sentinel for the GPU knob** (uncommitted since Jun 4, riding along): `~/.laqrumcode/cuda-visible-devices` (or `LAQRUMCODE_CUDA_VISIBLE_DEVICES`) now accepts `cpu`/`none`/`off`/`false`/`-1` → sets `LAQRUMCODE_NO_GPU=1` at daemon module-load (before `detectResourceProfile`) → genuine CPU-only mode (`gpu:false`), not a CUDA-hide. Device pins (GPU UUIDs) work as before; still strictly opt-in/no-op by default.
 
 ### Tests
-- +18: `drain-backoff` (8, pure), `transform-timeout` (5, pure), `session-end-drain-guard` (3, mocked — incl. a strict-boolean coercion pin via log-spy), `prev-session-turns` (2, live `kong_test`; the pre-fix cast-throw was reproduced empirically by QA). Suite: **1126 passing**. Independently QA-reviewed — CLEAN (hook-proxy blast radius, backoff races, NONE-semantics probe, production-untouched diff).
+- +18: `drain-backoff` (8, pure), `transform-timeout` (5, pure), `session-end-drain-guard` (3, mocked — incl. a strict-boolean coercion pin via log-spy), `prev-session-turns` (2, live `laqrum_test`; the pre-fix cast-throw was reproduced empirically by QA). Suite: **1126 passing**. Independently QA-reviewed — CLEAN (hook-proxy blast radius, backoff races, NONE-semantics probe, production-untouched diff).
 
 ### Known follow-ups
 - Drain-session rows keep their `cleanup_claim_token` (cosmetic; one UUID per spawn).
@@ -974,10 +974,10 @@ Drain-storm post-mortem fixes (2 big + 2 smaller bugs) + the CPU-mode knob.
 Selective forget — reversible privacy controls (GH #16 item 2, Phase A).
 
 ### Added
-- **`scripts/forget.mjs` + `kongcode-forget` skill** — selectively and reversibly forget stored content for privacy/declutter. Honors the D4 founder rule ("nothing should be deleted"): **nothing is DELETEd** — matching `memory` (→ `status='archived'`) and `concept` (→ `superseded_at` set) rows are soft-deactivated with `archive_reason='forget:…'`, so they stop surfacing in retrieval *immediately* (the live retrieval candidate query already filters those flags — no hot-path change) while the rows survive for forensic recovery. Selectors: `--query "<substr>"` (case-insensitive) and `--before <ISO-date>`, on `memory` + `concept`. **Dry-run by default** (prints match counts + samples); `--commit` applies; `--undo --commit` reactivates everything this tool forgot — scoped strictly to `forget:`-tagged rows (verified by a live probe not to disturb genuine supersedes or GC-archived rows).
+- **`scripts/forget.mjs` + `laqrumcode-forget` skill** — selectively and reversibly forget stored content for privacy/declutter. Honors the D4 founder rule ("nothing should be deleted"): **nothing is DELETEd** — matching `memory` (→ `status='archived'`) and `concept` (→ `superseded_at` set) rows are soft-deactivated with `archive_reason='forget:…'`, so they stop surfacing in retrieval *immediately* (the live retrieval candidate query already filters those flags — no hot-path change) while the rows survive for forensic recovery. Selectors: `--query "<substr>"` (case-insensitive) and `--before <ISO-date>`, on `memory` + `concept`. **Dry-run by default** (prints match counts + samples); `--commit` applies; `--undo --commit` reactivates everything this tool forgot — scoped strictly to `forget:`-tagged rows (verified by a live probe not to disturb genuine supersedes or GC-archived rows).
 
 ### Tests
-- `test/forget.test.ts` (4, live `kong_test`-isolated) — dry-run no-op, soft-forget with the production retrieval filter then excluding the forgotten rows (and keeping the benign), rows-still-exist (D4), and `--undo` reactivation. Independently QA-reviewed (D4-no-delete, dry-run-default safety, live undo-scoping probe, production-graph-untouched before/after diff) — CLEAN. Suite: **1108 passing**.
+- `test/forget.test.ts` (4, live `laqrum_test`-isolated) — dry-run no-op, soft-forget with the production retrieval filter then excluding the forgotten rows (and keeping the benign), rows-still-exist (D4), and `--undo` reactivation. Independently QA-reviewed (D4-no-delete, dry-run-default safety, live undo-scoping probe, production-graph-untouched before/after diff) — CLEAN. Suite: **1108 passing**.
 
 ### Known follow-ups
 - A `--max` count cap / confirmation prompt for a deliberately-broad `--query` (currently mitigated by dry-run-default + samples + full reversibility).
@@ -989,22 +989,22 @@ Explicit retrieval feedback (GH #16 item 5, Phase A) + opt-in GPU pinning.
 
 ### Added
 - **`record_retrieval_feedback` MCP tool** — the agent records explicit feedback on an injected memory or concept (the highest-signal retrieval training data). Signals: `helpful`/`irrelevant`/`outdated` UPDATE the current session's `retrieval_outcome` row(s) for that item (set `llm_relevance`/`llm_relevant`/`llm_reason`/`feedback_source='explicit'`) — and since ACAN training already prefers `llm_relevance` over the implicit cross-encoder utilization (`acan.ts`), this relabels the training sample with **no `acan.ts` change**. `outdated` also decays the table-appropriate priority field (memory→`importance`, concept→`stability`) and hints `supersede`; `pin` boosts it. Record ids are bound via `type::record($table,$id)` (no injection); the relabel uses `RETURN id` so the 1024-dim `query_embedding` never leaves the DB. New `feedback_source` field on `retrieval_outcome`. (`mute` is a later increment — it touches the hot retrieval path.)
-- **Opt-in GPU pinning (`src/daemon/gpu-pin.ts`)** — pin *only* the kongcode daemon's node-llama-cpp CUDA context to specific GPU(s) without forcing other CUDA apps onto them (e.g. keep a training GPU free). `node-llama-cpp`'s `getLlama({gpu})` picks the backend, not a device, so by default it grabs **all** CUDA GPUs. Set `KONGCODE_CUDA_VISIBLE_DEVICES` (or write a GPU UUID to `~/.kongcode/cuda-visible-devices` — handy to re-pin a running daemon) and the daemon applies it at startup before CUDA init, also defaulting `CUDA_DEVICE_ORDER=PCI_BUS_ID`. **Strictly opt-in — a no-op by default**, so single-GPU and CPU-only setups are unaffected; an already-set `CUDA_VISIBLE_DEVICES` is left untouched. Documented under README → Configuration → "GPU selection".
+- **Opt-in GPU pinning (`src/daemon/gpu-pin.ts`)** — pin *only* the laqrumcode daemon's node-llama-cpp CUDA context to specific GPU(s) without forcing other CUDA apps onto them (e.g. keep a training GPU free). `node-llama-cpp`'s `getLlama({gpu})` picks the backend, not a device, so by default it grabs **all** CUDA GPUs. Set `LAQRUMCODE_CUDA_VISIBLE_DEVICES` (or write a GPU UUID to `~/.laqrumcode/cuda-visible-devices` — handy to re-pin a running daemon) and the daemon applies it at startup before CUDA init, also defaulting `CUDA_DEVICE_ORDER=PCI_BUS_ID`. **Strictly opt-in — a no-op by default**, so single-GPU and CPU-only setups are unaffected; an already-set `CUDA_VISIBLE_DEVICES` is left untouched. Documented under README → Configuration → "GPU selection".
 
 ### Tests
-- `test/record-retrieval-feedback.test.ts` (7, live `kong_test`-isolated) + `test/gpu-pin.test.ts` (7, pure — no DB/GPU, CI-safe). Both independently QA-reviewed (the feedback tool's live IPC dispatch + SQL-injection safety; the GPU pin's no-op-by-default safety + live single-GPU placement). Suite: **1104 passing**.
+- `test/record-retrieval-feedback.test.ts` (7, live `laqrum_test`-isolated) + `test/gpu-pin.test.ts` (7, pure — no DB/GPU, CI-safe). Both independently QA-reviewed (the feedback tool's live IPC dispatch + SQL-injection safety; the GPU pin's no-op-by-default safety + live single-GPU placement). Suite: **1104 passing**.
 
 ## [0.7.111] — 2026-06-03
 
 Read-only **web UI** for the memory graph (GH #15, v1).
 
 ### Added
-- **Local web UI** — a read-only browser view of the kongcode graph, served by the daemon on a dedicated loopback TCP port (`28900 + uid%10000`; `KONGCODE_UI_PORT` to override; never binds beyond `127.0.0.1`). Launch with `node scripts/open-ui.mjs` (also the `kongcode-web-ui` skill): it reads the daemon's auth token and opens `/ui/auth?token=…`, which sets an `HttpOnly; SameSite=Strict` cookie so the token never lingers in the URL bar. Four views (Preact + Vite, fully bundled/offline, no CDN): **Dashboard** (per-table counts + embedding coverage + daemon uptime), **Memory browser** and **Concept browser** (search + paginate + click-to-inspect; embeddings are never sent to the browser), and an interactive **Graph explorer** (Cytoscape; click a concept node to expand its `related_to`/`broader`/`narrower` neighborhood).
+- **Local web UI** — a read-only browser view of the laqrumcode graph, served by the daemon on a dedicated loopback TCP port (`28900 + uid%10000`; `LAQRUMCODE_UI_PORT` to override; never binds beyond `127.0.0.1`). Launch with `node scripts/open-ui.mjs` (also the `laqrumcode-web-ui` skill): it reads the daemon's auth token and opens `/ui/auth?token=…`, which sets an `HttpOnly; SameSite=Strict` cookie so the token never lingers in the URL bar. Four views (Preact + Vite, fully bundled/offline, no CDN): **Dashboard** (per-table counts + embedding coverage + daemon uptime), **Memory browser** and **Concept browser** (search + paginate + click-to-inspect; embeddings are never sent to the browser), and an interactive **Graph explorer** (Cytoscape; click a concept node to expand its `related_to`/`broader`/`narrower` neighborhood).
 - New `src/ui-server.ts`: the loopback server + read-only `/api/ui/*` endpoints (dashboard, memories, concepts, graph, node-detail) wrapping `SurrealStore` SELECTs. Auth reuses the hook API's bearer secret (`timingSafeEqual`); every route is gated except the one-time `/ui/auth` cookie mint; non-GET → 405; static serving is path-traversal-guarded. Wired into `startHttpApi`/`stopHttpApi` (EADDRINUSE-tolerant; inert until `dist/ui/` exists). **No write path exists** — the browser cannot mutate the graph.
 - `vite`/`preact`/`cytoscape` are build-time **devDependencies** only; the daemon serves the pre-built `dist/ui/` bundle as static bytes and never imports them at runtime. `build:ui` is folded into `npm run build`.
 
 ### Tests
-- `test/ui-server.test.ts` (6, live `kong_test`-isolated) — dashboard counts/coverage, concept list + search (+ no embedding leak), case-insensitive memory search, graph neighborhood (edge + endpoint nodes), node-detail (embedding stripped), and allowlist rejection. The `beforeAll` races a 10s probe so CI's no-DB env skips cleanly (~11s, no hook timeout). Suite: **1090 passing**. Independently QA-reviewed (security surface: loopback-only bind, auth completeness, read-only enforcement, path-traversal, token handling) — CLEAN.
+- `test/ui-server.test.ts` (6, live `laqrum_test`-isolated) — dashboard counts/coverage, concept list + search (+ no embedding leak), case-insensitive memory search, graph neighborhood (edge + endpoint nodes), node-detail (embedding stripped), and allowlist rejection. The `beforeAll` races a 10s probe so CI's no-DB env skips cleanly (~11s, no hook timeout). Suite: **1090 passing**. Independently QA-reviewed (security surface: loopback-only bind, auth completeness, read-only enforcement, path-traversal, token handling) — CLEAN.
 
 ### Notes
 - v1 is read-only by design; write surfaces (inline edit/deactivate, core-directives manager) and the retrieval-debugger views from #15 are later increments. Multi-user / remote access remains out of scope (→ 0.8.0).
@@ -1021,7 +1021,7 @@ CI recovery for v0.7.109 (test-only; the import/restore feature is unchanged).
 Data ownership — JSONL **import/restore** (GH #16 item 1), completing the export↔import round-trip.
 
 ### Added
-- **`scripts/restore-jsonl.mjs` + `kongcode-restore-jsonl` skill** — reads a `backup-jsonl` dump back into a graph: the import half of the data-ownership story (export shipped earlier; this closes #16-1). Node tables restore before edge tables. Default merge is skip-if-exists by id; flags `--overwrite` (UPDATE by id), `--merge-by-hash` (skip rows whose `content_hash` already exists in the target), and `--dry-run` (report would-create/skip counts, write nothing). Type fidelity on re-insert: the computed `pending_work.dedup_key` is stripped, 27 schema-derived datetime fields are re-wrapped ISO→`DateTime`, 5 `record<>` fields → `RecordId`, and record ids are preserved. Edges are `RELATE`d only when both endpoints exist (missing-endpoint rows skipped + logged — never a dangling edge). A warn-only `schema_version` check flags a major/minor mismatch without hard-failing.
+- **`scripts/restore-jsonl.mjs` + `laqrumcode-restore-jsonl` skill** — reads a `backup-jsonl` dump back into a graph: the import half of the data-ownership story (export shipped earlier; this closes #16-1). Node tables restore before edge tables. Default merge is skip-if-exists by id; flags `--overwrite` (UPDATE by id), `--merge-by-hash` (skip rows whose `content_hash` already exists in the target), and `--dry-run` (report would-create/skip counts, write nothing). Type fidelity on re-insert: the computed `pending_work.dedup_key` is stripped, 27 schema-derived datetime fields are re-wrapped ISO→`DateTime`, 5 `record<>` fields → `RecordId`, and record ids are preserved. Edges are `RELATE`d only when both endpoints exist (missing-endpoint rows skipped + logged — never a dangling edge). A warn-only `schema_version` check flags a major/minor mismatch without hard-failing.
 
 ### Fixed
 - **Backup silently dropped wide tables** — `backup-jsonl`'s `dumpTable` built the whole table as one `rs.map(rowToJsonLine).join("\n")` string, which throws "Invalid string length" past V8's ~512 MB max-string cap; the per-table `catch` then omitted the table from the dump with nothing surfaced in the data. Confirmed live: `retrieval_outcome` is **42,270 rows / 836 MB** on the production graph — a guaranteed throw, so it was being left out of every backup. Rewritten to stream row-by-row via `createWriteStream` (backpressure-aware; `error`/`finish` awaited so a real write failure still surfaces as the per-table error). Output is byte-identical (one JSON object + `\n` per row); any table size now exports.
@@ -1039,7 +1039,7 @@ Data ownership — JSONL **import/restore** (GH #16 item 1), completing the expo
 ## [0.7.108] — 2026-06-03
 
 ### Fixed
-- **`introspect stats` `db_size` now correct for discovered-external DBs** — the report stat'd the managed `dataDir` even when the connected DB was an external one bootstrap *discovered* (e.g. an :8000 Docker container with no `SURREAL_URL`), showing a misleading on-disk size for a DB it doesn't own. New `isConnectedDbExternal(url)` keys "external" on the connected port (∉ `{pickPort(), 18765}`) plus the `SURREAL_URL` override — mirroring how `findExistingKongcodeSurreal` decides managed-vs-external — so `db_size` reports `n/a (external)` for adopted external DBs and only walks `dataDir` for a truly managed instance. Closes the recurring `SURREAL_URL`-only detection gap before the 0.8.0 remote/cloud work.
+- **`introspect stats` `db_size` now correct for discovered-external DBs** — the report stat'd the managed `dataDir` even when the connected DB was an external one bootstrap *discovered* (e.g. an :8000 Docker container with no `SURREAL_URL`), showing a misleading on-disk size for a DB it doesn't own. New `isConnectedDbExternal(url)` keys "external" on the connected port (∉ `{pickPort(), 18765}`) plus the `SURREAL_URL` override — mirroring how `findExistingLaqrumcodeSurreal` decides managed-vs-external — so `db_size` reports `n/a (external)` for adopted external DBs and only walks `dataDir` for a truly managed instance. Closes the recurring `SURREAL_URL`-only detection gap before the 0.8.0 remote/cloud work.
 
 ### Tests
 - `test/stats-action.test.ts`: +4 `isConnectedDbExternal` cases (discovered :8000/:8042 → external; managed `pickPort()`/18765 → not; `SURREAL_URL` → external; unparseable → managed). Suite: **1080 passing**.
@@ -1049,7 +1049,7 @@ Data ownership — JSONL **import/restore** (GH #16 item 1), completing the expo
 Cost/usage visibility — `introspect action="stats"` (GH #16 item 3).
 
 ### Added
-- **`introspect action="stats"`** — a read-only usage/cost report: last-7d & last-30d sessions, turns, token usage (in/out, summed from the `session` ledger), and concepts/memories/skills extracted; auto-drain spawns today vs the daily budget (50, `KONGCODE_AUTO_DRAIN_MAX_DAILY`) + 7d/30d totals; graph counts; managed-DB size on disk (`n/a (external)` when `SURREAL_URL` is set); and alerts for drain budget ≥80% and DB size over threshold (default 2GB, `KONGCODE_DB_SIZE_ALERT_GB`). No schema change — it aggregates data already tracked. The spending-ledger reader is a layering-clean local parser (no engine→daemon import) that mirrors `auto-drain.ts`'s ndjson format (verified field-by-field). The pre-existing `trends` action was also surfaced in the tool enum.
+- **`introspect action="stats"`** — a read-only usage/cost report: last-7d & last-30d sessions, turns, token usage (in/out, summed from the `session` ledger), and concepts/memories/skills extracted; auto-drain spawns today vs the daily budget (50, `LAQRUMCODE_AUTO_DRAIN_MAX_DAILY`) + 7d/30d totals; graph counts; managed-DB size on disk (`n/a (external)` when `SURREAL_URL` is set); and alerts for drain budget ≥80% and DB size over threshold (default 2GB, `LAQRUMCODE_DB_SIZE_ALERT_GB`). No schema change — it aggregates data already tracked. The spending-ledger reader is a layering-clean local parser (no engine→daemon import) that mirrors `auto-drain.ts`'s ndjson format (verified field-by-field). The pre-existing `trends` action was also surfaced in the tool enum.
 
 ### Tests
 - `test/stats-action.test.ts` (10) — ledger 7d/30d/today bucketing, malformed-line tolerance, legacy-file merge, recursive dir-size, and live-DB window aggregation + budget math. Suite: **1076 passing**.
@@ -1071,7 +1071,7 @@ Quick-fix batch (low-risk, no data-model change).
 Multi-user auth — Phase 2 of 5: per-user credentials for managed SurrealDB instances.
 
 ### Added
-- **Per-user managed credential** — a kongcode-auto-spawned SurrealDB no longer uses `root:root`. `getOrCreateManagedCred` mints a random credential (`randomBytes(24)` base64url; user `kong_<uid>` on POSIX / `kong` on Windows) stored `0600` at `~/.kongcode/surreal-cred.json`, and the managed instance is spawned + connected with it — defense-in-depth atop Phase 1's port-owner guard (a reachable managed instance still can't be accessed without the secret). `BootstrapResult.surrealServer` now carries `{user, pass}`, resolved per-target by the pure `resolveReusedTargetCred`.
+- **Per-user managed credential** — a laqrumcode-auto-spawned SurrealDB no longer uses `root:root`. `getOrCreateManagedCred` mints a random credential (`randomBytes(24)` base64url; user `laqrum_<uid>` on POSIX / `laqrum` on Windows) stored `0600` at `~/.laqrumcode/surreal-cred.json`, and the managed instance is spawned + connected with it — defense-in-depth atop Phase 1's port-owner guard (a reachable managed instance still can't be accessed without the secret). `BootstrapResult.surrealServer` now carries `{user, pass}`, resolved per-target by the pure `resolveReusedTargetCred`.
 
 ### Unchanged (by design, QA-verified)
 - **External / `SURREAL_URL` auth is untouched** — a discovered external DB (8000/8042) or an explicit `SURREAL_URL` keeps the user-configured creds (`root` or `SURREAL_USER`/`SURREAL_PASS`), verbatim. Two independent QA streams confirmed the external arms never return a generated cred (no production-graph auth regression). Hardening an external DB's own creds remains the operator's infra config.
@@ -1093,11 +1093,11 @@ Multi-user auth — Phase 2 of 5: per-user credentials for managed SurrealDB ins
 Multi-user auth — Phase 1 of 5 (GH #13): strict per-OS-user isolation so two users on one machine can't collide on ports or read each other's memory graph.
 
 ### Fixed
-- **Daemon no longer crashes for a 2nd OS user** — when UDS is the primary transport (POSIX default), the daemon no longer binds the fixed TCP port (18764); the 2nd user previously died with `EADDRINUSE`. Honors an explicit `KONGCODE_DAEMON_PORT`; Windows keeps TCP as sole transport. (`src/daemon/index.ts`)
-- **Managed SurrealDB port is UID-derived** — `pickPort()` returns `18765 + getuid()%10000` (override via `KONGCODE_SURREAL_PORT`; Windows keeps flat 18765), so two users' managed instances don't collide on 18765. (`src/engine/bootstrap.ts`)
+- **Daemon no longer crashes for a 2nd OS user** — when UDS is the primary transport (POSIX default), the daemon no longer binds the fixed TCP port (18764); the 2nd user previously died with `EADDRINUSE`. Honors an explicit `LAQRUMCODE_DAEMON_PORT`; Windows keeps TCP as sole transport. (`src/daemon/index.ts`)
+- **Managed SurrealDB port is UID-derived** — `pickPort()` returns `18765 + getuid()%10000` (override via `LAQRUMCODE_SURREAL_PORT`; Windows keeps flat 18765), so two users' managed instances don't collide on 18765. (`src/engine/bootstrap.ts`)
 
 ### Added
-- **Cross-user ownership guard** — `findExistingKongcodeSurreal` resolves the OS owner UID of each fingerprinted SurrealDB (`/proc/net/tcp` → socket inode → PID → owner; `lsof`/`ps` fallback) and refuses to attach to one owned by another UID. Undetermined owner → conservative skip on managed-surface ports (unless we hold our own pid file), allow on external opt-in ports (8000/8042 — root-owned Docker / shared instances stay reachable). Non-POSIX: guard skipped (account-level isolation). Threat model: OS user B reading user A's private graph.
+- **Cross-user ownership guard** — `findExistingLaqrumcodeSurreal` resolves the OS owner UID of each fingerprinted SurrealDB (`/proc/net/tcp` → socket inode → PID → owner; `lsof`/`ps` fallback) and refuses to attach to one owned by another UID. Undetermined owner → conservative skip on managed-surface ports (unless we hold our own pid file), allow on external opt-in ports (8000/8042 — root-owned Docker / shared instances stay reachable). Non-POSIX: guard skipped (account-level isolation). Threat model: OS user B reading user A's private graph.
 - Legacy `18765` re-added to the discovery candidates (gated by the guard) so a pre-upgrade single-user install's data is still found after the UID-offset lands — no data loss on upgrade.
 
 ### Tests
@@ -1124,7 +1124,7 @@ Fix the `pending_work` drain wedge — a systemic UNIQUE-index collision that br
 Stop `migrateWorkspace` from deleting the curated slash-command skill stubs.
 
 ### Fixed
-- **Skill stubs survive workspace migration** — `archiveFiles` now skips `SKILL.md` (like `SOUL.md`), so the DB-resident slash-discovery stubs at `skills/<name>/SKILL.md` are never unlinked. An `introspect action=migrate` had been archiving all 15 curated stubs (audit-drift, kongcode-release, …) into `.kongbrain-archive/`, silently removing their slash commands.
+- **Skill stubs survive workspace migration** — `archiveFiles` now skips `SKILL.md` (like `SOUL.md`), so the DB-resident slash-discovery stubs at `skills/<name>/SKILL.md` are never unlinked. An `introspect action=migrate` had been archiving all 15 curated stubs (audit-drift, laqrumcode-release, …) into `.laqrumbrain-archive/`, silently removing their slash commands.
 - **No junk re-ingest** — new `isSkillStub()` detects an already-DB-resident stub (body referencing `get_skill_body`); the migrate loop leaves it in place and mints no duplicate skill row instead of parsing the pointer text into a skill.
 - **Stub generation** — new `writeSkillStub()` writes the canonical 6-line stub; after ingesting a genuinely-full `SKILL.md`, `ingestSkill` replaces the on-disk file with a stub (body→DB, stub→disk) instead of archiving it away.
 
@@ -1206,7 +1206,7 @@ Deep-dive audit loop. Thirteen commits across nine phases (including 2 pre-audit
 
 ### Fixed — hot-path embed swallows → swallow.warn (5 sites)
 
-`commit.ts:457/553/601/681/883` upgraded from `swallow(...)` (hidden behind `KONGCODE_DEBUG=1`) to `swallow.warn(...)` so embed failures are operator-visible.
+`commit.ts:457/553/601/681/883` upgraded from `swallow(...)` (hidden behind `LAQRUMCODE_DEBUG=1`) to `swallow.warn(...)` so embed failures are operator-visible.
 
 ### Added — causal_graduate skills carry source + body
 
@@ -1218,7 +1218,7 @@ Explicit MCP-tool fetches now register as usage signal (fire-and-forget UPDATE).
 
 ### Added — `qa-fix-6-agents` skill rebuilt
 
-The skill had self-superseded its own row in the DB. Rebuilt with 6665-char kongcode-grounded body covering the 2-pair-then-implementer-+-verifier pattern, convergence interpretation, wave-loop semantics, and four real-incident references.
+The skill had self-superseded its own row in the DB. Rebuilt with 6665-char laqrumcode-grounded body covering the 2-pair-then-implementer-+-verifier pattern, convergence interpretation, wave-loop semantics, and four real-incident references.
 
 ### Added — `db-state.test.ts` integration suite + MCP_TO_IPC_METHOD value-side lint
 
@@ -1308,8 +1308,8 @@ Reconciled with the live code per v0.7.93's audit findings:
 
 - Tests badge: 970 → 997 (matches `npm test` output post-v0.7.94).
 - WMR signal description: "six hand-tuned signals" → "seven weighted signals" with cosine listed as the largest. Matches `graph-context.ts:671-674`.
-- LongMemEval 98.2% R@5 claim attributed to the upstream `kongclaw` project (which carries the eval harness); kongcode inherits the design but does not bundle the harness. No more unverifiable in-repo claim.
-- Auto-drain default agent: `kongcode:memory-extractor` → `kongcode:memory-extractor-lite` (matches `auto-drain.ts:608`). `KONGCODE_AUTO_DRAIN_MODEL=opus` documented for the heavier variant.
+- LongMemEval 98.2% R@5 claim attributed to the upstream `laqrumclaw` project (which carries the eval harness); laqrumcode inherits the design but does not bundle the harness. No more unverifiable in-repo claim.
+- Auto-drain default agent: `laqrumcode:memory-extractor` → `laqrumcode:memory-extractor-lite` (matches `auto-drain.ts:608`). `LAQRUMCODE_AUTO_DRAIN_MODEL=opus` documented for the heavier variant.
 - Auto-drain cadence: mentions the constrained-tier 15-min sweep (per `resource-tier.ts:43,53,63`).
 - MCP tool list extended with `create_skill` and `get_skill_body` (matches `daemon/index.ts:774-775`).
 - `pre-push` hook clarification: it's per-clone (not tracked in repo). Documented the install one-liner. Also noted the new D1-D4 lints in the test-suite description.
@@ -1336,7 +1336,7 @@ The append-only conversion. Founder rule (saved Tier-0 as `core_memory:c7hcrruue
 
 > "Nothing should be getting deleted."
 
-A two-session, multi-subagent sweep across kongcode surfaced 11 DELETE sites on content-bearing tables plus 8 other silent-data-loss patterns. The destructive consolidate/GC/dedup patterns were inherited from the KongBrain fork in `5b93d73` (2026-04-06) and had been silently destroying user-supplied memory content for ~6 weeks. v0.7.92's skill-supersede fix was one instance of the same broader architectural bug.
+A two-session, multi-subagent sweep across laqrumcode surfaced 11 DELETE sites on content-bearing tables plus 8 other silent-data-loss patterns. The destructive consolidate/GC/dedup patterns were inherited from the LaqrumBrain fork in `5b93d73` (2026-04-06) and had been silently destroying user-supplied memory content for ~6 weeks. v0.7.92's skill-supersede fix was one instance of the same broader architectural bug.
 
 ### Fixed — DELETE → soft-deactivate across content tables
 
@@ -1400,11 +1400,11 @@ Two bugs that had been silently corrupting graph state for weeks. Both surfaced 
 
 - `src/engine/maintenance.ts` — added `backfillArtifactEmbeddings()` and `backfillConceptEmbeddings()`, called from Group 3 (deferred-heavy phase, after `consolidateMemories`, where `state.embeddings.isAvailable()` is guaranteed true). The original `consolidateMemories` Pass 2 at `src/engine/surreal.ts:1869` was hardcoded `FROM memory`, so artifact + concept rows whose embed call was swallowed by `commitArtifact` / `commitConcept` had no recovery path. 29 artifacts (book PDFs ingested 2026-04-04) and 4 concept rows had been sitting unembedded indefinitely. Verified post-fix: `memory_health.metrics.artifact_count: 1318, artifact_embedded: 1318`. Group-2 placement was attempted first and failed because `state.embeddings.isAvailable()` returns false at Group-2 time — verified by 217KB of daemon log with zero `[maintenance] backfilling skill embeddings` entries from `backfillSkillEmbeddings` (same gate). Group-3 placement uses the same warm-embed window as `consolidateMemories`.
 - Backfill functions match hot-path embed targets: artifact uses ``${path} ${description}`` (commit.ts:599), concept uses `name` (commit.ts:454). 6000-char truncation guard mirrors `src/engine/surreal.ts:1892`. UPDATE `WHERE embedding IS NONE OR array::len(embedding) = 0` mirrors the SELECT predicate so empty-array rows also heal.
-- Manual heal path for stuck sediment: trigger `hook.sessionStart` over `~/.kongcode-daemon.sock` — runs the full `runBootstrapMaintenance(state)` chain on demand.
+- Manual heal path for stuck sediment: trigger `hook.sessionStart` over `~/.laqrumcode-daemon.sock` — runs the full `runBootstrapMaintenance(state)` chain on demand.
 
 ### Fixed (supersedeOldSkills name-blind deactivation)
 
-- `src/engine/skills.ts:44-90` — `supersedeOldSkills` was deactivating ANY skill with cosine similarity ≥ 0.82 to a newly-committed skill's embedding, regardless of name. Long procedural-skill bodies share enough structural language that unrelated skills routinely cleared 0.82. Verified victim chain: `dockex-docker-build` (skill:gb1rh59mei5hvkk59olm, created 2026-05-16T17:48:03 with body_len=9058) wrongly deactivated 3 unrelated skills — `kongcode-health` (body_len=4920), `extract-pdf-gems` (body_len=7392), `kongcode-backup-semantic` (body_len=4730). `test/integration/daemon-tool-roundtrip.test.ts:102` had been failing for ~21h on the kongcode-health symptom.
+- `src/engine/skills.ts:44-90` — `supersedeOldSkills` was deactivating ANY skill with cosine similarity ≥ 0.82 to a newly-committed skill's embedding, regardless of name. Long procedural-skill bodies share enough structural language that unrelated skills routinely cleared 0.82. Verified victim chain: `dockex-docker-build` (skill:gb1rh59mei5hvkk59olm, created 2026-05-16T17:48:03 with body_len=9058) wrongly deactivated 3 unrelated skills — `laqrumcode-health` (body_len=4920), `extract-pdf-gems` (body_len=7392), `laqrumcode-backup-semantic` (body_len=4730). `test/integration/daemon-tool-roundtrip.test.ts:102` had been failing for ~21h on the laqrumcode-health symptom.
 - Fix: `supersedeOldSkills` now takes a `newName: string` parameter, with `AND name = $newName` in the candidate SELECT. Only caller `src/engine/commit.ts:949` passes `data.name`. Skills with different names are coexistent siblings — supersession means replacement, which requires name equality.
 - `scripts/restore-wrongly-superseded-skills.mjs` — new one-shot heal (dry-run default, `--apply` to mutate). Re-activates any inactive body-bearing skill whose superseder has a different name. Idempotent. Ran with `--apply` to restore the 3 documented victims.
 - Stale unused imports removed in `src/tools/pending-work.ts` and `src/engine/memory-daemon.ts` (auditor flagged as MINOR; cleanup landed in same commit).
@@ -1425,7 +1425,7 @@ Two bugs that had been silently corrupting graph state for weeks. Both surfaced 
 - `npm test`: **Test Files 64 passed (64) / Tests 991 passed (991)**, up from 988/989 (the previously-failing `test/integration/daemon-tool-roundtrip.test.ts:102` now passes plus 2 new regression tests).
 - Auditor agent findings: 0 CRITICAL, 0 MAJOR, 2 MINOR (both addressed). Validator agent: 7/7 VERIFIED, 0 CONCERN.
 - Direct DB after restore: 3 victim rows `active: true, superseded_by: NONE`. Active skill count: 2733 (= pre-fix 2730 + 3 restored).
-- Synthetic probe of the new guard: SELECT with nonexistent name returns 0 candidates; positive control with `name='kongcode-health'` returns 1.
+- Synthetic probe of the new guard: SELECT with nonexistent name returns 0 candidates; positive control with `name='laqrumcode-health'` returns 1.
 
 ### Known follow-ups
 
@@ -1444,13 +1444,13 @@ Both lint tests target bug classes that produced same-day follow-up commits earl
 
 ### Added (DB-resident skill updates)
 
-- **`kongcode-release` skill body** (DB row, name=`kongcode-release`): appended three new sections marked `(added v0.7.91)` — (1) the `gh run list --limit 1 --json databaseId --jq` form for run-id extraction, replacing the awk-on-text pattern that grabbed "QA" from a commit title earlier today; (2) the mandatory live-exercise gate (daemon restart + 2-min wait + grep for original bug signature in post-respawn log window, must return 0) before declaring done; (3) the canonical list of pre-push lint tests that gate `npm test`.
+- **`laqrumcode-release` skill body** (DB row, name=`laqrumcode-release`): appended three new sections marked `(added v0.7.91)` — (1) the `gh run list --limit 1 --json databaseId --jq` form for run-id extraction, replacing the awk-on-text pattern that grabbed "QA" from a commit title earlier today; (2) the mandatory live-exercise gate (daemon restart + 2-min wait + grep for original bug signature in post-respawn log window, must return 0) before declaring done; (3) the canonical list of pre-push lint tests that gate `npm test`.
 - **`pre-flight-done-check` skill** (new DB row): 7-step checklist invoked before ANY use of the words "shipped", "verified", "fixed", "done" in a user-facing reply. Catches the "tests passed locally so shipped" failure mode that produced 6 same-day follow-up commits on 2026-05-16. Anti-pattern list at the bottom flags "Agent reported VERIFIED_FIXED" as needing independent verification of the diff + live log, not just acceptance of the agent's summary.
 
 ### Process
 
 - Added `scripts/update-skills-v091.mjs` for the DB body updates. Idempotent — re-running on already-updated rows is a no-op via the `(added v0.7.91)` marker.
-- The `kongcode-release` skill body now ends with: "If a new bug class costs the project a same-day follow-up commit, the response is 'add a lint test that would have caught it' — not 'be more careful next time.'"
+- The `laqrumcode-release` skill body now ends with: "If a new bug class costs the project a same-day follow-up commit, the response is 'add a lint test that would have caught it' — not 'be more careful next time.'"
 
 ### Verified
 
@@ -1496,7 +1496,7 @@ All sites converted to either `.split(/\r?\n/)` or `path.isAbsolute()`. No behav
 
 ### Fixed (Wave 2 QA waterfall: auto-drain timer was silently dead)
 
-Four-fix wave restoring auto-drain to actually firing periodically + on SessionEnd. Symptom: `~/.kongcode/cache/auto-drain.log` had its last spawn timestamp 2+ hours stale on a live install even with pending_work above threshold; no periodic spawns showed up in `auto-drain-spending.ndjson`. Pre-0.7.89 the scheduler was being called near the END of `initializeStack()` after `await store.initialize()`, `await embeddings.initialize()`, and `initReranker()` — any one of those taking long meant the scheduler never armed, and there was zero positive-signal logging to tell us so.
+Four-fix wave restoring auto-drain to actually firing periodically + on SessionEnd. Symptom: `~/.laqrumcode/cache/auto-drain.log` had its last spawn timestamp 2+ hours stale on a live install even with pending_work above threshold; no periodic spawns showed up in `auto-drain-spending.ndjson`. Pre-0.7.89 the scheduler was being called near the END of `initializeStack()` after `await store.initialize()`, `await embeddings.initialize()`, and `initReranker()` — any one of those taking long meant the scheduler never armed, and there was zero positive-signal logging to tell us so.
 
 **Root causes (each independent — fixed all four for defense-in-depth):**
 
@@ -1504,9 +1504,9 @@ Four-fix wave restoring auto-drain to actually firing periodically + on SessionE
 
 2. **`src/hook-handlers/session-end.ts` — `triggerDrainCheck` ran after a retry-with-1s-backoff loop that could blow past the 60s Claude Code hook timeout.** Reordered so `triggerDrainCheck(state, opts, "session-end")` fires BEFORE `await store.clearSessionClaim(...)`. The trigger is fire-and-forget (returns immediately; the actual drain happens in a detached child), so moving it earlier doesn't change correctness — it just guarantees the call site executes regardless of how slow the clear-claim retry is. Pre-0.7.89, a degraded SurrealDB blip causing the clear to retry could exceed the hook budget and the SessionEnd handler would be cancelled before triggerDrainCheck ran.
 
-3. **`src/daemon/auto-drain.ts` `buildDrainEnv` — `CLAUDE_PLUGIN_ROOT` propagation was only conditional.** The previous code relied on the ALLOWED_CLAUDE loop pulling `CLAUDE_PLUGIN_ROOT` from `process.env` — which only worked if the daemon's own env carried the var. For daemons spawned from a context that lost the var (e.g. detached `nohup`), the subprocess inherited no plugin dir and the headless drain silently failed inside Claude Code with "kongcode tools are not available". Now `CLAUDE_PLUGIN_ROOT: PLUGIN_DIR` is explicitly seeded in the base `env` object before the conditional loop runs. The loop afterwards still lets the parent's value win if present — belt-and-suspenders, not override.
+3. **`src/daemon/auto-drain.ts` `buildDrainEnv` — `CLAUDE_PLUGIN_ROOT` propagation was only conditional.** The previous code relied on the ALLOWED_CLAUDE loop pulling `CLAUDE_PLUGIN_ROOT` from `process.env` — which only worked if the daemon's own env carried the var. For daemons spawned from a context that lost the var (e.g. detached `nohup`), the subprocess inherited no plugin dir and the headless drain silently failed inside Claude Code with "laqrumcode tools are not available". Now `CLAUDE_PLUGIN_ROOT: PLUGIN_DIR` is explicitly seeded in the base `env` object before the conditional loop runs. The loop afterwards still lets the parent's value win if present — belt-and-suspenders, not override.
 
-4. **`src/daemon/auto-drain.ts` `startDrainScheduler` — zero positive-signal logging meant we couldn't tell the timer had armed.** The previous code only logged on FAILURE inside the startup spawn `.then(r => { if (!r.spawned && r.reason) log.info(...) })`. Added: (a) `log.info("[auto-drain] arming periodic timer (intervalMs=..., threshold=..., maxDaily=...)")` right before `setInterval`, (b) `log.info("[auto-drain] startup spawn succeeded")` when startup spawn worked, (c) `log.info("[auto-drain] periodic check: skip (...)")` on every periodic tick that no-ops so a daemon-log reader can see the timer is alive even when there's nothing to drain, (d) `log.warn("[auto-drain] startDrainScheduler called twice; ignoring")` on the double-arm guard so an init-order bug surfaces instead of being silently no-op'd, (e) `log.info("[auto-drain] periodic timer NOT armed (intervalMs=0)")` when the env disables periodic ticks. These run at `info` level so are suppressed at the default `warn` level — but they're the receipt you need when troubleshooting via `KONGCODE_LOG_LEVEL=info`.
+4. **`src/daemon/auto-drain.ts` `startDrainScheduler` — zero positive-signal logging meant we couldn't tell the timer had armed.** The previous code only logged on FAILURE inside the startup spawn `.then(r => { if (!r.spawned && r.reason) log.info(...) })`. Added: (a) `log.info("[auto-drain] arming periodic timer (intervalMs=..., threshold=..., maxDaily=...)")` right before `setInterval`, (b) `log.info("[auto-drain] startup spawn succeeded")` when startup spawn worked, (c) `log.info("[auto-drain] periodic check: skip (...)")` on every periodic tick that no-ops so a daemon-log reader can see the timer is alive even when there's nothing to drain, (d) `log.warn("[auto-drain] startDrainScheduler called twice; ignoring")` on the double-arm guard so an init-order bug surfaces instead of being silently no-op'd, (e) `log.info("[auto-drain] periodic timer NOT armed (intervalMs=0)")` when the env disables periodic ticks. These run at `info` level so are suppressed at the default `warn` level — but they're the receipt you need when troubleshooting via `LAQRUMCODE_LOG_LEVEL=info`.
 
 ### Verified
 
@@ -1514,11 +1514,11 @@ Four-fix wave restoring auto-drain to actually firing periodically + on SessionE
   - `test/auto-drain.test.ts`: 2 static-source ordering assertions for Fix #1, 2 `buildDrainEnv` propagation assertions for Fix #3, 3 `startDrainScheduler` lifecycle-logging assertions for Fix #4.
   - `test/session-end.test.ts` (NEW): 5 call-order assertions verifying `triggerDrainCheck` runs before `clearSessionClaim` on the happy path, fires exactly once, runs before clear even when clear is slow, and is SKIPPED on the lost-claim / empty-surrealSessionId early-return paths (Fix #2).
 
-- **Live respawn verification** on the workstation daemon: manually started a daemon at PID **2734006** with `KONGCODE_LOG_LEVEL=info KONGCODE_AUTO_DRAIN_INTERVAL_MS=20000 KONGCODE_AUTO_DRAIN_THRESHOLD=1`. Captured log shows:
+- **Live respawn verification** on the workstation daemon: manually started a daemon at PID **2734006** with `LAQRUMCODE_LOG_LEVEL=info LAQRUMCODE_AUTO_DRAIN_INTERVAL_MS=20000 LAQRUMCODE_AUTO_DRAIN_THRESHOLD=1`. Captured log shows:
   - `[auto-drain] arming periodic timer (intervalMs=20000, threshold=1, maxDaily=50)` BEFORE `[daemon] SurrealDB connected` — confirms Fix #1 placement (scheduler arms before store init completes).
   - `[auto-drain] startup check: skip (queue=0 < threshold=1)` — startup check fires.
-  - After 20s: `[auto-drain] spawning headless extractor (queue=4, agent=kongcode:memory-extractor-lite, reason=periodic)` + `[auto-drain] periodic spawn` — periodic timer fired and consumed the live pending_work queue (4 → spawned). Then on the next tick: `[auto-drain] periodic check: skip (another extractor already running)` — Fix #4's new skip-log fires.
-  - `~/.kongcode/cache/auto-drain.log` got a new header at `2026-05-16T15:02:29.212Z` with `reason=periodic`, confirming the spawned subprocess actually wrote its banner.
+  - After 20s: `[auto-drain] spawning headless extractor (queue=4, agent=laqrumcode:memory-extractor-lite, reason=periodic)` + `[auto-drain] periodic spawn` — periodic timer fired and consumed the live pending_work queue (4 → spawned). Then on the next tick: `[auto-drain] periodic check: skip (another extractor already running)` — Fix #4's new skip-log fires.
+  - `~/.laqrumcode/cache/auto-drain.log` got a new header at `2026-05-16T15:02:29.212Z` with `reason=periodic`, confirming the spawned subprocess actually wrote its banner.
 
 ### Migration notes
 
@@ -1540,7 +1540,7 @@ The 3-wave waterfall that shipped in 0.7.87 left one residual: `commit:subagent:
 ### Verified
 
 - `npm test`: **973 passed (973)**, up from 972. New regression test `test/commit.test.ts > derived_from treats empty-string taskId as unset and falls back to surrealSessionId (v0.7.88 Wave 4)` asserts (a) the fallback fires when `taskId: ""` is passed and (b) `store.relate` is NEVER invoked with an empty third argument.
-- Live respawn on the workstation daemon over a 2-minute natural-traffic window: `grep -c "Invalid record ID format"` against `~/.kongcode/cache/daemon.log` = 0 (was 2+ on prior respawns); `grep -c "derived_from_session_fallback"` = 0.
+- Live respawn on the workstation daemon over a 2-minute natural-traffic window: `grep -c "Invalid record ID format"` against `~/.laqrumcode/cache/daemon.log` = 0 (was 2+ on prior respawns); `grep -c "derived_from_session_fallback"` = 0.
 
 ### Migration notes
 
@@ -1561,9 +1561,9 @@ Three waves of independent audit + validate + implement + verify cleaned up the 
 
 **Wave 2 (3 fixes):**
 
-- `src/daemon/auto-drain.ts` `buildDrainEnv`: force `env.KONGCODE_SESSION_ID = randomUUID()` for every drain subprocess so it never collides with the parent's `"mcp-default"` SessionState in the daemon's session map. Also added `CLAUDE_PLUGIN_ROOT` to `ALLOWED_CLAUDE` so the subprocess's hook-proxy can locate the daemon socket without falling back to its own `__dirname`.
+- `src/daemon/auto-drain.ts` `buildDrainEnv`: force `env.LAQRUMCODE_SESSION_ID = randomUUID()` for every drain subprocess so it never collides with the parent's `"mcp-default"` SessionState in the daemon's session map. Also added `CLAUDE_PLUGIN_ROOT` to `ALLOWED_CLAUDE` so the subprocess's hook-proxy can locate the daemon socket without falling back to its own `__dirname`.
 - `src/hook-handlers/session-start.ts`: log loudly if `await store.createSession(...)` returns an empty string, surfacing the originating failure at its actual point instead of letting it propagate downstream as "Invalid record ID format" hundreds of frames away.
-- `src/hook-handlers/subagent.ts`: silent-skip Stop events whose `agent_type` starts with `kongcode:memory-extractor`. These are auto-drain subprocesses that live outside the PreToolUse → SubagentStop hook lifecycle (the daemon spawns them directly via `node:child_process.spawn`, so no PreToolUse fires and no spawn row exists by design). Returns `{}` with `log.debug` instead of writing orphan rows and warn-logging.
+- `src/hook-handlers/subagent.ts`: silent-skip Stop events whose `agent_type` starts with `laqrumcode:memory-extractor`. These are auto-drain subprocesses that live outside the PreToolUse → SubagentStop hook lifecycle (the daemon spawns them directly via `node:child_process.spawn`, so no PreToolUse fires and no spawn row exists by design). Returns `{}` with `log.debug` instead of writing orphan rows and warn-logging.
 
 **Wave 3 (1 fix):**
 
@@ -1572,17 +1572,17 @@ Three waves of independent audit + validate + implement + verify cleaned up the 
 ### Verified
 
 - `npm test`: 972 passed (972).
-- Wave 2 verifier ran against the live daemon (PID 2540071 v0.7.86 at the time) and confirmed `0` occurrences of `orphan stop.*kongcode:memory-extractor` and `0` occurrences of `store.createSession returned empty surrealSessionId` in the post-respawn log window.
+- Wave 2 verifier ran against the live daemon (PID 2540071 v0.7.86 at the time) and confirmed `0` occurrences of `orphan stop.*laqrumcode:memory-extractor` and `0` occurrences of `store.createSession returned empty surrealSessionId` in the post-respawn log window.
 - Wave 3 audit cited live DB rows from the actual broken state (94 in-progress real spawns + 177 orphans for one session) as the load-bearing receipt for the agent_id-vs-tool_use_id root cause.
 
 ### Known follow-ups
 
-- `commit:subagent:<agent_type>:derived_from_session_fallback: Invalid record ID format:` may still occasionally fire for non-`kongcode:memory-extractor` agent types when `commitSubagent` is called with a `surrealSessionId` that passes the truthy guard but fails `assertRecordId` inside `store.relate`. Wave 4 follow-up: audit `session-start.ts`'s `store.createSession` return-shape under partial-failure modes.
+- `commit:subagent:<agent_type>:derived_from_session_fallback: Invalid record ID format:` may still occasionally fire for non-`laqrumcode:memory-extractor` agent types when `commitSubagent` is called with a `surrealSessionId` that passes the truthy guard but fails `assertRecordId` inside `store.relate`. Wave 4 follow-up: audit `session-start.ts`'s `store.createSession` return-shape under partial-failure modes.
 
 ## [0.7.86] — 2026-05-16
 
 ### Fixed (auto-drain spawn was missing --plugin-dir)
-`src/daemon/auto-drain.ts` `spawnHeadlessDrainer` was silently failing for two days. The subprocess started by `claude --agent kongcode:memory-extractor-lite` did not have the kongcode plugin loaded — the spawn args lacked `--plugin-dir`, so Claude Code's plugin discovery never wired up the kongcode MCP server, and the only two tools the drain agent uses (`mcp__plugin_kongcode_kongcode__fetch_pending_work` and `..._commit_work_results`) didn't exist in its environment. The agent correctly refused to fake-drain and exited code 0 with stdout reading "The KongCode tools are not available in this environment". Because the spawn used `stdio: "ignore"`, that error was invisible in every log. The `auto-drain-spending.ndjson` log went silent on 2026-05-14 even with 606+ pending_work rows backed up.
+`src/daemon/auto-drain.ts` `spawnHeadlessDrainer` was silently failing for two days. The subprocess started by `claude --agent laqrumcode:memory-extractor-lite` did not have the laqrumcode plugin loaded — the spawn args lacked `--plugin-dir`, so Claude Code's plugin discovery never wired up the laqrumcode MCP server, and the only two tools the drain agent uses (`mcp__plugin_laqrumcode_laqrumcode__fetch_pending_work` and `..._commit_work_results`) didn't exist in its environment. The agent correctly refused to fake-drain and exited code 0 with stdout reading "The LaqrumCode tools are not available in this environment". Because the spawn used `stdio: "ignore"`, that error was invisible in every log. The `auto-drain-spending.ndjson` log went silent on 2026-05-14 even with 606+ pending_work rows backed up.
 
 Fix: pass `--plugin-dir PLUGIN_DIR` where `PLUGIN_DIR = resolve(fileURLToPath(import.meta.url), "..", "..", "..")`. This derives the plugin install dir from the daemon's own running code location, which is the correct source — `process.env.CLAUDE_PLUGIN_ROOT` would be wrong because the daemon is shared across attached Claude Code sessions and that env reflects whichever mcp-client spawned the daemon first, not necessarily the install we want a subprocess pointed at. Same pattern v0.7.84's `seedSkillsFromJson` uses for `.claude-plugin/skills-seed.json`.
 
@@ -1591,7 +1591,7 @@ The same spawn block now opens `<cacheDir>/auto-drain.log` with `O_APPEND` and u
 
 ### Verified
 - `npm test`: **962 passed (962)** — wiring + integration tests still green.
-- Smoke spawn with `--plugin-dir`: agent replied `TOOLS_VISIBLE` confirming `mcp__plugin_kongcode_kongcode__fetch_pending_work` is in the subprocess's tool list.
+- Smoke spawn with `--plugin-dir`: agent replied `TOOLS_VISIBLE` confirming `mcp__plugin_laqrumcode_laqrumcode__fetch_pending_work` is in the subprocess's tool list.
 - Prior smoke spawn without `--plugin-dir` (from session pre-patch): same agent replied "tools are not available in this environment" — the literal failure mode this fix repairs.
 - Live drain decremented `pending_work` from 606 → 596 during the smoke test window.
 
@@ -1608,7 +1608,7 @@ v0.7.84 shipped `create_skill` and `get_skill_body` MCP tools that compiled, pas
 - **`test/lint-mcp-tool-wiring-invariant.test.ts`** — static lint that walks `src/mcp-server.ts`, `src/shared/tool-defs.ts`, `src/shared/ipc-types.ts`, and `src/daemon/index.ts`, extracts the tool name set from each, and fails if any tool is missing from any surface. The error message lists the missing surface per tool so a future contributor can fix in one pass. Future MCP tool additions either touch all 5 surfaces or `npm test` fails immediately.
 
 ### Added (live daemon round-trip integration test)
-- **`test/integration/daemon-tool-roundtrip.test.ts`** — connects to the live `kongcode-daemon.sock` via the production `IpcClient` from `src/mcp-client/ipc-client.ts` and exercises 4 read-only round-trips: `tool.getSkillBody` for `kongcode-release` (~7000 char body), for `kongcode-health`, for a missing name (returns "no skill found"), and with empty name (validation error). Skips cleanly when no daemon socket exists (e.g. CI without a started daemon) via `describe.skipIf(!RUN_LIVE)`. The static lint above runs unconditionally and catches the v0.7.84 failure class.
+- **`test/integration/daemon-tool-roundtrip.test.ts`** — connects to the live `laqrumcode-daemon.sock` via the production `IpcClient` from `src/mcp-client/ipc-client.ts` and exercises 4 read-only round-trips: `tool.getSkillBody` for `laqrumcode-release` (~7000 char body), for `laqrumcode-health`, for a missing name (returns "no skill found"), and with empty name (validation error). Skips cleanly when no daemon socket exists (e.g. CI without a started daemon) via `describe.skipIf(!RUN_LIVE)`. The static lint above runs unconditionally and catches the v0.7.84 failure class.
 
 ### Verification
 - `npm test`: **962 passed (962)** — 957 prior + 1 new lint test + 4 new integration tests. All integration tests ran against the live daemon at PID 1941796 (respawned from updated `dist/` after killing PID 891819 which was started before the v0.7.84 wiring fix).
@@ -1621,8 +1621,8 @@ Founder directive: no more SKILL.md proliferation. Skill bodies move into the ve
 - **`create_skill` MCP tool** — writes a new skill row with name, description, body, optional preconditions / steps / postconditions. Embeds inline via `commitKnowledge`. Rejects duplicate names. Source: `src/tools/create-skill.ts`.
 - **`get_skill_body` MCP tool** — fetches the full markdown body of a skill by name. Returns reconstructed frontmatter + body. Called from the 5-line SKILL.md stubs to load real instructions. Source: `src/tools/get-skill-body.ts`.
 - **`scripts/migrate-skills-to-db.mjs`** — one-shot migration that parsed every `skills/*/SKILL.md` on disk and inserted them as `skill` rows tagged `source="migration-from-md"`. Idempotent dedup by name. Uses directory slug as canonical name (matches Claude Code's slash-command discovery convention); frontmatter `name:` preserved as `title`.
-- **`scripts/finalize-skill-migration.mjs`** — generates `.claude-plugin/skills-seed.json` (15 skills, ~74KB) from the migrated rows and rewrites each `skills/<name>/SKILL.md` as a 5-line stub: frontmatter (name + description) + a one-line body that points at `mcp__plugin_kongcode_kongcode__get_skill_body`. Auto-fixes any rows where `name` was set to the human-readable title instead of the directory slug.
-- **`seedSkillsFromJson` maintenance hook** — on every daemon bootstrap, reads `.claude-plugin/skills-seed.json` and CREATEs any missing skill rows tagged `source="seed"`. Idempotent (per-row dedup by name). Makes fresh kongcode installs auto-hydrate the DB on first start without manual migration.
+- **`scripts/finalize-skill-migration.mjs`** — generates `.claude-plugin/skills-seed.json` (15 skills, ~74KB) from the migrated rows and rewrites each `skills/<name>/SKILL.md` as a 5-line stub: frontmatter (name + description) + a one-line body that points at `mcp__plugin_laqrumcode_laqrumcode__get_skill_body`. Auto-fixes any rows where `name` was set to the human-readable title instead of the directory slug.
+- **`seedSkillsFromJson` maintenance hook** — on every daemon bootstrap, reads `.claude-plugin/skills-seed.json` and CREATEs any missing skill rows tagged `source="seed"`. Idempotent (per-row dedup by name). Makes fresh laqrumcode installs auto-hydrate the DB on first start without manual migration.
 - **`backfillSkillEmbeddings` maintenance hook** — embeds any skill rows with NULL embedding (LIMIT 50 per run). Closes the gap from migrations that write rows without inline embeddings.
 
 ### Changed
@@ -1631,27 +1631,27 @@ Founder directive: no more SKILL.md proliferation. Skill bodies move into the ve
 
 ### Known follow-ups (carried from v0.7.83)
 - `collectProjectRefs` SurrealQL UNION bug in `scripts/backup-semantic.mjs` (returns 0 project_ids).
-- Hardcoded absolute `/home/zero/voidorigin/kongcode/node_modules/surrealdb/...` import paths in `scripts/backup-jsonl.mjs`, `scripts/backup-semantic.mjs`, `scripts/migrate-skills-to-db.mjs`, and `scripts/finalize-skill-migration.mjs`. Breaks plugin distribution; needs a portability sweep.
+- Hardcoded absolute `/home/zero/voidorigin/laqrumcode/node_modules/surrealdb/...` import paths in `scripts/backup-jsonl.mjs`, `scripts/backup-semantic.mjs`, `scripts/migrate-skills-to-db.mjs`, and `scripts/finalize-skill-migration.mjs`. Breaks plugin distribution; needs a portability sweep.
 
 ## [0.7.83] — 2026-05-15
 
 ### Added (backup skills)
-Three new skills for exporting the kongcode database, each tuned to a different destination shape. The agent (or the user via slash command) picks whichever matches the receiving system.
+Three new skills for exporting the laqrumcode database, each tuned to a different destination shape. The agent (or the user via slash command) picks whichever matches the receiving system.
 
-- **`kongcode-backup-native`** — invokes `surreal export` against the kongcode DB for lossless SurrealDB-to-SurrealDB transfer. Preserves vector embeddings + edge provenance + schema. One-command operation, no script required.
-- **`kongcode-backup-jsonl`** — dumps every table to one `.jsonl` file per table under a timestamped output directory. For non-SurrealDB targets (pgvector, Neo4j, OpenSearch, custom stores). Script at `scripts/backup-jsonl.mjs`. Smoke-tested against the live DB.
-- **`kongcode-backup-semantic`** — exports only the 9 knowledge node tables (concept, memory, skill, reflection, artifact, monologue, causal_chain, soul, identity_chunk) and 12 knowledge edges (mentions, about_concept, artifact_mentions, broader, narrower, related_to, derived_from, relevant_to, used_in, supersedes, skill_from_task, skill_uses_concept). Excludes transcripts (`turn`), retrieval telemetry (`retrieval_outcome`), orchestrator metrics, and runtime caches. Script at `scripts/backup-semantic.mjs`. Live smoke-test on this workstation exported 234,088 rows + an `IMPORT.md` guide for the receiving system.
+- **`laqrumcode-backup-native`** — invokes `surreal export` against the laqrumcode DB for lossless SurrealDB-to-SurrealDB transfer. Preserves vector embeddings + edge provenance + schema. One-command operation, no script required.
+- **`laqrumcode-backup-jsonl`** — dumps every table to one `.jsonl` file per table under a timestamped output directory. For non-SurrealDB targets (pgvector, Neo4j, OpenSearch, custom stores). Script at `scripts/backup-jsonl.mjs`. Smoke-tested against the live DB.
+- **`laqrumcode-backup-semantic`** — exports only the 9 knowledge node tables (concept, memory, skill, reflection, artifact, monologue, causal_chain, soul, identity_chunk) and 12 knowledge edges (mentions, about_concept, artifact_mentions, broader, narrower, related_to, derived_from, relevant_to, used_in, supersedes, skill_from_task, skill_uses_concept). Excludes transcripts (`turn`), retrieval telemetry (`retrieval_outcome`), orchestrator metrics, and runtime caches. Script at `scripts/backup-semantic.mjs`. Live smoke-test on this workstation exported 234,088 rows + an `IMPORT.md` guide for the receiving system.
 
-Each script reads env-var overrides for source DB (SURREAL_URL/USER/PASS/NS/DB) and output directory (KONGCODE_BACKUP_DIR). Each emits a `metadata.json` with per-table row counts, timestamp, source DB, and (for semantic) the embedding-model spec.
+Each script reads env-var overrides for source DB (SURREAL_URL/USER/PASS/NS/DB) and output directory (LAQRUMCODE_BACKUP_DIR). Each emits a `metadata.json` with per-table row counts, timestamp, source DB, and (for semantic) the embedding-model spec.
 
 ### Known follow-up
 - `backup-semantic.mjs`'s `collectProjectRefs` helper uses SurrealQL UNION which doesn't return the expected result shape; in the smoke test it reported 0 project ids referenced when 9523 relevant_to + 101 used_in edges exist. Functional impact: `project_ids` in metadata.json is always empty in this release. Workaround: receiving systems map projects manually. Fix planned for v0.7.84.
-- The hardcoded `node_modules/surrealdb` import paths in both scripts assume the plugin is checked out at `/home/zero/voidorigin/kongcode`. Plugin installs at other paths would break the scripts. Matches the existing pattern in `migrate-orphan-reflections.mjs` etc.; portability fix planned as a separate sweep.
+- The hardcoded `node_modules/surrealdb` import paths in both scripts assume the plugin is checked out at `/home/zero/voidorigin/laqrumcode`. Plugin installs at other paths would break the scripts. Matches the existing pattern in `migrate-orphan-reflections.mjs` etc.; portability fix planned as a separate sweep.
 
 ## [0.7.82] — 2026-05-15
 
 ### Fixed
-- **Cross-platform: lint guard `test/lint-auto-seal-invariant.test.ts` now normalizes Windows backslashes to forward slashes** before comparing against `APPROVED_RELATE_CALLERS`. v0.7.81 CI failed on `Build kongcode-win32-x64` because the Set contained forward-slash paths (`src/engine/concept-links.ts`) while `relative()` on Windows returned backslash paths (`src\engine\concept-links.ts`). Every approved file then flagged as a violation. Same cross-platform-path bug class as v0.7.70/v0.7.71's CRLF regex fixes; same one-line shape: `relative(REPO_ROOT, file).replace(/\\\\/g, "/")`. POSIX runners unaffected.
+- **Cross-platform: lint guard `test/lint-auto-seal-invariant.test.ts` now normalizes Windows backslashes to forward slashes** before comparing against `APPROVED_RELATE_CALLERS`. v0.7.81 CI failed on `Build laqrumcode-win32-x64` because the Set contained forward-slash paths (`src/engine/concept-links.ts`) while `relative()` on Windows returned backslash paths (`src\engine\concept-links.ts`). Every approved file then flagged as a violation. Same cross-platform-path bug class as v0.7.70/v0.7.71's CRLF regex fixes; same one-line shape: `relative(REPO_ROOT, file).replace(/\\\\/g, "/")`. POSIX runners unaffected.
 
 This release re-confirms the auto-sealing campaign's CI-enforced contract — v0.7.81's lint guard logic was correct, just non-portable to Windows.
 
@@ -1844,7 +1844,7 @@ Graph-integrity sweep: 4-stage QA waterfall (AUDITOR / VALIDATOR / IMPLEMENTER /
 ## [0.7.71] — 2026-05-14
 
 ### Fixed
-- **Cross-platform CI: gate reaper test suite to Linux only** (`test/http-api-sweep.test.ts`): the `sweepStaleSockets` reaper relies on `/proc/<pid>/cmdline` to verify a sibling is a kongcode MCP before SIGTERM; on macOS/Windows it returns null and the sweep deliberately skips, so the SIGTERM assertions only make sense on Linux. Wrapped the describe block in `describe.runIf(process.platform === "linux")`. Other suites remain cross-platform.
+- **Cross-platform CI: gate reaper test suite to Linux only** (`test/http-api-sweep.test.ts`): the `sweepStaleSockets` reaper relies on `/proc/<pid>/cmdline` to verify a sibling is a laqrumcode MCP before SIGTERM; on macOS/Windows it returns null and the sweep deliberately skips, so the SIGTERM assertions only make sense on Linux. Wrapped the describe block in `describe.runIf(process.platform === "linux")`. Other suites remain cross-platform.
 
 ## [0.7.70] — 2026-05-14
 
@@ -1855,8 +1855,8 @@ Graph-integrity sweep: 4-stage QA waterfall (AUDITOR / VALIDATOR / IMPLEMENTER /
 - **`isUniqueViolation`, `isTransactionConflict`, `RECORD_ID_RE`, `errMsg`** in `src/engine/errors.ts`: single canonical source replaces 4-5 duplicated copies across hooks and store layers.
 - **`src/engine/math.ts`** with `clamp`/`clamp01` (replaces 8 inline `Math.max(0, Math.min(1, ...))` sites).
 - **Shared `probeEmbeddingService`** in `src/engine/embeddings.ts` (replaces 2 near-identical copies in introspect + memory-health).
-- **Daemon singleton lock** (`src/daemon/index.ts`): O_EXCL on `daemon.pid` with cmdline-verify stale recovery + JSON marker (refuses to start if another live kongcode daemon owns the file).
-- **`/health` + `/health/detailed`** auth-tiered HTTP endpoints (`src/http-api.ts`): public minimal status + bearer-gated full diagnostics with `cmdlineLooksLikeKongcodeMcp` PID-recycle protection on `sweepStaleSockets`.
+- **Daemon singleton lock** (`src/daemon/index.ts`): O_EXCL on `daemon.pid` with cmdline-verify stale recovery + JSON marker (refuses to start if another live laqrumcode daemon owns the file).
+- **`/health` + `/health/detailed`** auth-tiered HTTP endpoints (`src/http-api.ts`): public minimal status + bearer-gated full diagnostics with `cmdlineLooksLikeLaqrumcodeMcp` PID-recycle protection on `sweepStaleSockets`.
 - **Atomic auth-token write** (`src/http-api.ts`): per-PID tmpfile + O_EXCL + fsync + rename + startup sweep for orphans.
 - **Substrate detectors**: `cache_write_failures`, `db_unreachable`, `embedding_service_down`, memory-pressure breadcrumb in `src/engine/observability.ts`.
 - **`clearSessionClaim` retry-once** wiring on success paths in `src/hook-handlers/session-end.ts` and `src/engine/deferred-cleanup.ts`.
@@ -1882,7 +1882,7 @@ Graph-integrity sweep: 4-stage QA waterfall (AUDITOR / VALIDATOR / IMPLEMENTER /
 - **`memory_utility_cache.memory_id` retyped** to union `record<memory|concept|turn>` (1,656 rows migrated); `runMemoryMaintenance` no longer needs `string::concat(meta::tb, meta::id)` coercion.
 - **`concept.superseded_by` retyped** from `none|string` to `option<record<memory>>` (13 rows migrated via `migrate-concept-superseded-by.mjs`).
 - **`maturity_quality_drift` detector** correctly labels post-graduation quality signal (previously misframed as "graduation_close" alert).
-- **ACAN weights forward-migrate** from `~/.kongbrain/acan_weights.json` → `~/.kongcode/cache/` on startup (`src/engine/maintenance.ts`).
+- **ACAN weights forward-migrate** from `~/.laqrumbrain/acan_weights.json` → `~/.laqrumcode/cache/` on startup (`src/engine/maintenance.ts`).
 - **Idempotent schema** (`src/engine/schema.surql`): all `DEFINE INDEX`/`DEFINE FIELD` use `IF NOT EXISTS` so daemon restart no longer crashes with "already exists".
 - **Concept hierarchy + dedup KNN** (`src/engine/concept-links.ts`, `src/engine/surreal.ts:upsertConcept`): replaced first-50-insertion-order scan (`LIMIT 50` with no ORDER BY) and O(N) `string::lowercase` equality with two-stage KNN (`concept_vec_idx` top-N + in-process precise check).
 - **Stale-recovery race** in `src/tools/pending-work.ts`: per-row branch wrapped in BEGIN/COMMIT with `ORDER BY created_at ASC` on sibling probe.
@@ -1892,7 +1892,7 @@ Graph-integrity sweep: 4-stage QA waterfall (AUDITOR / VALIDATOR / IMPLEMENTER /
 - **6 dead exports**: `getGlobalState`, `IpcResponse`, `MetaHandshakeRequest`, `MetaRequestSupersedeRequest`, `MetaRequestSupersedeResponse`, `ExtractionResult`.
 - **6 dead class methods**: `SurrealStore.getConnection`, `endSession`, `deactivateSessionMemories`; `EmbeddingService.resetCircuitBreaker`; `GlobalPluginState.allSessions`; `HandlerContext.getIdentity`.
 - **2 dead helpers**: `graph-context.ts` `msgRole()` + inner `makeResult()`.
-- **3 stale env flags**: `KONGCODE_RERANKER_KEEP_TAIL` (no legitimate use case per CHANGELOG), `KONGCODE_DETACH_SURREAL=0` opt-out, `KongBrainConfig` deprecated alias (renamed all callers to `KongCodeConfig`).
+- **3 stale env flags**: `LAQRUMCODE_RERANKER_KEEP_TAIL` (no legitimate use case per CHANGELOG), `LAQRUMCODE_DETACH_SURREAL=0` opt-out, `LaqrumBrainConfig` deprecated alias (renamed all callers to `LaqrumCodeConfig`).
 - **Deprecated shim**: `SurrealStore.updateSessionStats` (caller in `hooks/llm-output.ts` rewritten to `bumpSessionTurn` + `addSessionTokens`).
 - **3 `TODO(post-0.8)` drain-compat branches** in `src/tools/pending-work.ts` (extraction, reflection, handoff_note); 2 `TODO(post-0.5.0)` blocks in observability.ts.
 - **Pre-0.5.5 `backfillOrphanKcSessionIds`** call site + underlying method.
@@ -1952,12 +1952,12 @@ Graph-integrity sweep: 4-stage QA waterfall (AUDITOR / VALIDATOR / IMPLEMENTER /
 - **`subagent:stop` crash on null `spawned_at`** (`src/hook-handlers/subagent.ts`): `time::unix(spawned_at)` failed when `spawned_at` was NONE despite IF guard (SurrealDB evaluates both branches). Replaced with `spawned_at ?? time::now()` coalesce.
 
 ### Added
-- **`graphTransformContext` timeout alerting** (`src/engine/observability.ts`, `src/engine/graph-context.ts`): Sliding-window error-rate tracker (`getTransformErrorRate()`) + `detectContextTransformFailures` anomaly detector. Surfaces a `<kongcode-alert>` when failure rate exceeds 30% over 10 minutes. Previously, all 39 timeout errors were silently swallowed — the pipeline returned raw messages with zero user visibility.
+- **`graphTransformContext` timeout alerting** (`src/engine/observability.ts`, `src/engine/graph-context.ts`): Sliding-window error-rate tracker (`getTransformErrorRate()`) + `detectContextTransformFailures` anomaly detector. Surfaces a `<laqrumcode-alert>` when failure rate exceeds 30% over 10 minutes. Previously, all 39 timeout errors were silently swallowed — the pipeline returned raw messages with zero user visibility.
 
 ## [0.7.64] — 2026-05-08
 
 ### Added
-- **Extensible gate registry** (`src/engine/hooks/gate-registry.ts`): New `GateDefinition` interface and registry that replaces hardcoded if-blocks in `pre-tool-use.ts`. Built-in gates (config-protection, edit-gate, bash-gate) auto-register at priorities 10/20/30. User-defined gates load from `~/.kongcode/gates.json` at daemon start — no code changes required to add arbitrary tool-call gates. Each config gate specifies tools, profiles, a regex match on any toolInput field, and a deny message. Gates are disableable via `KONGCODE_DISABLED_HOOKS` like built-ins.
+- **Extensible gate registry** (`src/engine/hooks/gate-registry.ts`): New `GateDefinition` interface and registry that replaces hardcoded if-blocks in `pre-tool-use.ts`. Built-in gates (config-protection, edit-gate, bash-gate) auto-register at priorities 10/20/30. User-defined gates load from `~/.laqrumcode/gates.json` at daemon start — no code changes required to add arbitrary tool-call gates. Each config gate specifies tools, profiles, a regex match on any toolInput field, and a deny message. Gates are disableable via `LAQRUMCODE_DISABLED_HOOKS` like built-ins.
 - **Dynamic profile directive** (`src/engine/hooks/profile.ts`): `seedHookProfileDirective` accepts the registered gate list and dynamically builds the Tier-0 status line, so custom gates appear in the agent's context.
 
 ### Changed
@@ -1966,15 +1966,15 @@ Graph-integrity sweep: 4-stage QA waterfall (AUDITOR / VALIDATOR / IMPLEMENTER /
 ## [0.7.63] — 2026-05-08
 
 ### Security
-- **Prompt injection defense** (`src/engine/sanitize.ts`): New `stripStructuralTags()` strips all kongcode structural XML tags (`<system-reminder>`, `<active_directives>`, `<recalled_memory>`, etc.) from stored content. Applied at both write (core-memory, record-finding, knowledge-gems, memory-daemon) and read (context injection, recall, cluster_scan, what_is_missing) paths.
-- **Bearer token auth on HTTP API** (`src/http-api.ts`): Random 48-char hex token generated at startup, written to `~/.kongcode/cache/auth-token` (mode 0600), validated on every POST. Hook-proxy reads token and includes Authorization header.
+- **Prompt injection defense** (`src/engine/sanitize.ts`): New `stripStructuralTags()` strips all laqrumcode structural XML tags (`<system-reminder>`, `<active_directives>`, `<recalled_memory>`, etc.) from stored content. Applied at both write (core-memory, record-finding, knowledge-gems, memory-daemon) and read (context injection, recall, cluster_scan, what_is_missing) paths.
+- **Bearer token auth on HTTP API** (`src/http-api.ts`): Random 48-char hex token generated at startup, written to `~/.laqrumcode/cache/auth-token` (mode 0600), validated on every POST. Hook-proxy reads token and includes Authorization header.
 - **Body/buffer size limits**: 8 MB cap on HTTP API request bodies and daemon IPC line buffers.
 - **Edit gate cold-path restricted to user turns** (`src/engine/hooks/edit-gates.ts`): DB query filters `AND role = 'user'` so the LLM cannot self-authorize edits by mentioning paths in its own output.
 - **Hardened bash gate regex patterns**: Covers separated flags, long flags, absolute binary paths, git config flags, `git clean -f`, `git checkout -- .`.
 - **SHA256 verification for all downloads** (`bin-manifest.json`): Populated hashes for 5 SurrealDB platform binaries and 2 GGUF model files.
 - **SurrealDB credentials via env vars** (`src/engine/bootstrap.ts`): Passes `SURREAL_USER`/`SURREAL_PASS` instead of `--user`/`--pass` CLI args, hiding creds from `/proc/<pid>/cmdline`.
 - **Restricted file permissions**: Sockets (0600), auth token (0600), data/cache directories (0700) — set in bootstrap on every daemon startup.
-- **Auto-drain hardening** (`src/daemon/auto-drain.ts`): Security warning in DRAIN_PROMPT, atomic spending file writes, `statSync().isFile()` validation for KONGCODE_CLAUDE_BIN.
+- **Auto-drain hardening** (`src/daemon/auto-drain.ts`): Security warning in DRAIN_PROMPT, atomic spending file writes, `statSync().isFile()` validation for LAQRUMCODE_CLAUDE_BIN.
 - **Error disclosure reduction**: Stack traces truncated to first frame in production, HTTP API logs only `err.message`, startup warning when LOG_LEVEL=debug.
 - **eval() removed** (`src/engine/schema-loader.ts`): Replaced with `typeof globalThis.require`.
 - **Path normalization**: `resolve()` applied in config-protection, port file, and lock file paths.
@@ -2037,7 +2037,7 @@ Graph-integrity sweep: 4-stage QA waterfall (AUDITOR / VALIDATOR / IMPLEMENTER /
 - **Bump script** (`scripts/bump-version.sh`): Atomically bumps all 6 version surfaces (package.json, plugin.json, DAEMON_VERSION, CLIENT_VERSION, README version badge, README tests badge) and rebuilds dist/. Prevents the recurring bug where versions drift between surfaces.
 - **Handoff concept promotion**: Both LLM-generated and heuristic handoff notes now create a searchable concept via `commitKnowledge` with auto-sealed hierarchy edges. Bridges the gap between implementation-specific concepts and the natural language users search for later.
 - **Extraction prompt improvement**: Concept extraction now explicitly asks for project-level descriptions alongside implementation details, and names concepts in natural search language ("migrating trading crons to Docker" not just "apps.yaml schema").
-- **Plugin cache auto-cleanup**: `pruneStalePluginCache()` runs on daemon startup, removes old version directories from `~/.claude/plugins/cache/kongcode-marketplace/kongcode/` keeping only the current DAEMON_VERSION. Prevents ~1GB/version disk accumulation.
+- **Plugin cache auto-cleanup**: `pruneStalePluginCache()` runs on daemon startup, removes old version directories from `~/.claude/plugins/cache/laqrumcode-marketplace/laqrumcode/` keeping only the current DAEMON_VERSION. Prevents ~1GB/version disk accumulation.
 - **Implicit citation detection**: If the response mentions a file path or backtick-quoted identifier from an injected item without explicit `[#N]` citation, utilization is boosted to 0.4.
 
 ### Fixed — retrieval utilization accuracy
@@ -2102,7 +2102,7 @@ Retrieval was returning 0 nodes on many turns due to overly aggressive filters, 
 - **Reflection dedup at write**: `processShortReflection` in heuristic-drain now checks for existing similar reflections (>0.85 cosine) before creating new ones.
 - **Reflection dedup in maintenance**: `consolidateMemories` Pass 3 deduplicates the reflection table with the same 0.88 cosine threshold used for memories.
 - **Fixed tier-0 compaction duplication**: `injectedSections.clear()` on window rotation now preserves the `"tier0"` flag, preventing tier-0 directives from appearing in both system prompt and `active_directives`.
-- **Consolidated tier-0 directives**: Reduced from 8 entries (~2KB) to 3 entries (~800 bytes). Merged MEMORY REFLEX, GRAPH-AWARE SAVING, AUTO-SEAL CONTRACT, and KONGCODE-ONLY MEMORY into a single "SAVE TO GRAPH" directive. Demoted MEMORY TOOLS and GRAPH SCHEMA REFERENCE to tier-1.
+- **Consolidated tier-0 directives**: Reduced from 8 entries (~2KB) to 3 entries (~800 bytes). Merged MEMORY REFLEX, GRAPH-AWARE SAVING, AUTO-SEAL CONTRACT, and LAQRUMCODE-ONLY MEMORY into a single "SAVE TO GRAPH" directive. Demoted MEMORY TOOLS and GRAPH SCHEMA REFERENCE to tier-1.
 
 ## [0.7.52] — 2026-05-03
 
@@ -2128,23 +2128,23 @@ Graduation quality score was stuck at 0.76/0.85 with retrieval utilization at 19
 
 Every feature now adapts to the hardware it runs on instead of assuming workstation-class resources.
 
-**Resource tier detection** (`src/engine/resource-tier.ts`): auto-detects RAM/CPUs at startup, produces a `constrained` / `standard` / `generous` profile that configures thread counts, GPU usage, idle timeout, and drain interval. Override with `KONGCODE_RESOURCE_TIER`.
+**Resource tier detection** (`src/engine/resource-tier.ts`): auto-detects RAM/CPUs at startup, produces a `constrained` / `standard` / `generous` profile that configures thread counts, GPU usage, idle timeout, and drain interval. Override with `LAQRUMCODE_RESOURCE_TIER`.
 
 **Shared Llama instance** (`src/engine/llama-loader.ts`): embeddings and reranker share one native binding instead of creating separate `getLlama()` calls with doubled thread pools.
 
 **Lazy reranker**: 607MB model deferred from daemon boot to first recall call. Constrained boxes that never trigger recall never pay the load cost.
 
-**Embed watchdog + circuit breaker** (`src/engine/embeddings.ts`): `Promise.race` with 30s timeout; 3 consecutive timeouts opens circuit breaker. Prevents multi-hour stalls from blocking the daemon. `KONGCODE_EMBED_TIMEOUT_MS` override.
+**Embed watchdog + circuit breaker** (`src/engine/embeddings.ts`): `Promise.race` with 30s timeout; 3 consecutive timeouts opens circuit breaker. Prevents multi-hour stalls from blocking the daemon. `LAQRUMCODE_EMBED_TIMEOUT_MS` override.
 
 **Persistent L2 embedding cache**: SurrealDB-backed `embedding_cache` table (sha256-keyed, model-version-aware). Daemon restarts after idle reaper no longer re-compute previously-seen embeddings. 30-day auto-purge in maintenance.
 
-**Chunked reranking**: `setImmediate` yields between chunks of 6 candidates so IPC heartbeats and concurrent sessions aren't starved. `KONGCODE_RERANK_CHUNK_SIZE` override.
+**Chunked reranking**: `setImmediate` yields between chunks of 6 candidates so IPC heartbeats and concurrent sessions aren't starved. `LAQRUMCODE_RERANK_CHUNK_SIZE` override.
 
-**Staggered maintenance**: CPU-heavy jobs (consolidation, ACAN retrain) deferred 30s after startup so first-turn context assembly is uncontested. `KONGCODE_MAINTENANCE_DEFER_MS` override.
+**Staggered maintenance**: CPU-heavy jobs (consolidation, ACAN retrain) deferred 30s after startup so first-turn context assembly is uncontested. `LAQRUMCODE_MAINTENANCE_DEFER_MS` override.
 
 **Heuristic pre-drain** (`src/daemon/heuristic-drain.ts`): handoff notes and short-session reflections processed in-process without spawning a subprocess. Remaining queue checked after — if below threshold, subprocess spawn is skipped entirely.
 
-**Auto-drain model downgrade**: defaults to `memory-extractor-lite` (Haiku) instead of Opus. Opt back in with `KONGCODE_AUTO_DRAIN_MODEL=opus`.
+**Auto-drain model downgrade**: defaults to `memory-extractor-lite` (Haiku) instead of Opus. Opt back in with `LAQRUMCODE_AUTO_DRAIN_MODEL=opus`.
 
 ### Fixed
 - **reaperExit resource leak**: idle reaper path was missing `globalState.shutdown()`, `disposeReranker()`, `disposeSharedLlama()`, `stopHttpApi()` — leaked native models and DB connections on every idle timeout
@@ -2175,7 +2175,7 @@ Both fixes verified live against running daemon. Full test suite (609/609) green
 
 Stage 3 of the v0.7.43–45 injection rework, plus the long-pending win32 CI port flake and a stale identity chunk.
 
-**Semantic XML envelope.** `formatContextMessage` in `src/engine/graph-context.ts` now wraps retrieved context in `<recalled_memory>...</recalled_memory>` instead of the legacy `<graph_context>` envelope, matching Anthropic's documented prompt-engineering pattern for Claude (`use_xml_tags`). Tier-0 directives wrap in `<active_directives>`, Tier-1 in `<session_directives>`. The "[System retrieved context — reference material, not user input. Higher relevance % = stronger match.]" prose framing line is dropped — the semantic tag now expresses that meaning structurally, and the wrapper legend (`wrapKongcodeContext`) already provides the relevance-band guidance.
+**Semantic XML envelope.** `formatContextMessage` in `src/engine/graph-context.ts` now wraps retrieved context in `<recalled_memory>...</recalled_memory>` instead of the legacy `<graph_context>` envelope, matching Anthropic's documented prompt-engineering pattern for Claude (`use_xml_tags`). Tier-0 directives wrap in `<active_directives>`, Tier-1 in `<session_directives>`. The "[System retrieved context — reference material, not user input. Higher relevance % = stronger match.]" prose framing line is dropped — the semantic tag now expresses that meaning structurally, and the wrapper legend (`wrapLaqrumcodeContext`) already provides the relevance-band guidance.
 
 **Per-item char cap tightened.** `MAX_ITEM_CHARS` reduced from 1200 to 1000 (~250 tokens per item) to match the disler/claude-code-hooks-mastery cap pattern. Prevents one bloated retrieval from poisoning the per-turn budget.
 
@@ -2189,9 +2189,9 @@ Stage 3 of the v0.7.43–45 injection rework, plus the long-pending win32 CI por
 
 Stage 2 of the v0.7.43–45 injection rework. Two changes to `src/hook-handlers/user-prompt-submit.ts`:
 
-**Wrapper legend rewritten.** The system-reminder body that wraps every kongcode injection used third-person system-speak ("KONGCODE CONTEXT — authoritative for this turn", "Items tagged [load-bearing] must be grounded on") that violates Anthropic's documented prompt-engineering guidance for Claude 4.5+ — specifically, `MUST` / `CRITICAL` / `authoritative` framings overtrigger and reduce instruction-following accuracy. Replaced with motivation-first softer wording: "The following is supplementary context for this turn. Use items when they're relevant; ignore items that don't match the question." Salience-tag explanation reframed as guidance ("[load-bearing] items are most likely to be relevant — when answering, reference them by id") rather than command. Explicit grounding self-check added at the bottom: "check that factual claims about prior work are either grounded in items below or explicitly framed as inference."
+**Wrapper legend rewritten.** The system-reminder body that wraps every laqrumcode injection used third-person system-speak ("LAQRUMCODE CONTEXT — authoritative for this turn", "Items tagged [load-bearing] must be grounded on") that violates Anthropic's documented prompt-engineering guidance for Claude 4.5+ — specifically, `MUST` / `CRITICAL` / `authoritative` framings overtrigger and reduce instruction-following accuracy. Replaced with motivation-first softer wording: "The following is supplementary context for this turn. Use items when they're relevant; ignore items that don't match the question." Salience-tag explanation reframed as guidance ("[load-bearing] items are most likely to be relevant — when answering, reference them by id") rather than command. Explicit grounding self-check added at the bottom: "check that factual claims about prior work are either grounded in items below or explicitly framed as inference."
 
-**Bypass sigil.** Prefix the prompt with `* ` (asterisk + space) or `/raw ` to skip kongcode's injection for that turn. Useful when the user wants a clean shot at the model without substrate competing for attention. Turn ingestion still fires — only the retrieval + injection pipeline is skipped. The sigil is matched at the start of the prompt; an asterisk used mid-prompt for emphasis (e.g., `*important*`) is not affected.
+**Bypass sigil.** Prefix the prompt with `* ` (asterisk + space) or `/raw ` to skip laqrumcode's injection for that turn. Useful when the user wants a clean shot at the model without substrate competing for attention. Turn ingestion still fires — only the retrieval + injection pipeline is skipped. The sigil is matched at the start of the prompt; an asterisk used mid-prompt for emphasis (e.g., `*important*`) is not affected.
 
 Stage 3+ (XML semantic tags, intent-gated directives, per-source char cap, Skill deferral) remain queued.
 
@@ -2203,7 +2203,7 @@ Stage 3+ (XML semantic tags, intent-gated directives, per-source char cap, Skill
 
 **Default behavior changed**: tail items are now dropped entirely. Only items the cross-encoder actually scored (and that cleared `BAND_DROP_BELOW = 0.15`) reach the injection. Eliminates the "where did this 5-day-old concept come from?" failure mode where retrieved context contained items unrelated to prompt keywords.
 
-**Opt-out**: set `KONGCODE_RERANKER_KEEP_TAIL=true` to revert. No legitimate use case is known; the env var exists in case anyone discovers one in the field.
+**Opt-out**: set `LAQRUMCODE_RERANKER_KEEP_TAIL=true` to revert. No legitimate use case is known; the env var exists in case anyone discovers one in the field.
 
 This is the first stage of an Anthropic-aligned context-injection rework planned across v0.7.43–v0.7.45. Subsequent stages will address directive wording (`MUST` → softer language per Anthropic 4.5+ guidance), motivation-first directive structure (`Why:` lines), Skill deferral for non-load-bearing directives, per-item char cap, and a user bypass sigil.
 
@@ -2248,7 +2248,7 @@ The acceptance bar — "every documented IPC/hook surface exercised live" — is
 
 User-driven request: stop discovering wiring gaps reactively in conversation; build a runner that exercises *every synapse* of the system against a live daemon and reports green/red per IPC method.
 
-**`scripts/live-fire.mjs`** — connects to `/home/zero/.kongcode-daemon.sock` via the IPC protocol and fires representative payloads at every registered method:
+**`scripts/live-fire.mjs`** — connects to `/home/zero/.laqrumcode-daemon.sock` via the IPC protocol and fires representative payloads at every registered method:
 
 - **3 meta.*** (handshake, health, requestSupersede; skip shutdown)
 - **12 tool.*** (memoryHealth, introspect status/count/query/trends/migrate-projectid/migrate-derivedfrom, recall, clusterScan, whatIsMissing, coreMemory list, fetchPendingWork — skip commitWorkResults which needs a valid pending work_id)
@@ -2317,7 +2317,7 @@ User-driven request after the v0.7.36-39 cleanup train: expose the recovery prim
 
 **Refactored:** `introspect.ts` `backfillProjectIdAction` and `backfillDerivedFromAction` are now thin reporting wrappers over the helpers (~225 lines of inline implementation removed). The user-facing migrate API is unchanged.
 
-**Why it matters:** the recovery logic was previously trapped inside the introspect tool's migrate handler — only callable via `mcp__kongcode__introspect action=migrate`. Now any code path (a maintenance hook, an importer, a startup-time data quality check) can `import { runFullRecovery } from "engine/recovery"` and call it directly.
+**Why it matters:** the recovery logic was previously trapped inside the introspect tool's migrate handler — only callable via `mcp__laqrumcode__introspect action=migrate`. Now any code path (a maintenance hook, an importer, a startup-time data quality check) can `import { runFullRecovery } from "engine/recovery"` and call it directly.
 
 ### Tests
 - New `test/recovery.test.ts` — 9 cases pinning helper contracts: centroid match, placeholder synthesis (existing-task path, new-task path, error path), return-shape contracts for both individual recovery functions + the orchestrator.
@@ -2327,7 +2327,7 @@ User-driven request after the v0.7.36-39 cleanup train: expose the recovery prim
 
 ### Added — placeholder-task synthesis for pre-substrate import orphans
 
-After v0.7.38's daemon-orphan repair recovered 67 of 206 concepts, 139 remained whose source `daemon:<sessionid>` referenced sessions that don't exist in this DB at all (pre-kongcode-substrate import residue from old kongbrain/whatsapp gateway data). User chose option 2 (synthesize placeholders) over option 1 (leave-as-is) — restoring edge structure rather than carrying the gap forward.
+After v0.7.38's daemon-orphan repair recovered 67 of 206 concepts, 139 remained whose source `daemon:<sessionid>` referenced sessions that don't exist in this DB at all (pre-laqrumcode-substrate import residue from old laqrumbrain/whatsapp gateway data). User chose option 2 (synthesize placeholders) over option 1 (leave-as-is) — restoring edge structure rather than carrying the gap forward.
 
 `backfill_derived_from` migrate sub-mode now adds Path 3:
 - For each unique `daemon:<sessionid>` that has no resolvable session row, look up an existing placeholder task by `description = "[pre-substrate import] session <sid>"`.
@@ -2379,7 +2379,7 @@ RELATE failed (total):     N
 
 ### Changed — `pending_work_purged` post-mortem alert → `pending_work_aging` pre-purge warning
 
-User correction: the existing `substrate.pending_work_purged` alert fired AFTER pending_work items were already deleted (>7d old). By the time the alert surfaced in `<kongcode-alert>`, there was nothing to do — the data was gone. A tombstone reminder, not an actionable warning.
+User correction: the existing `substrate.pending_work_purged` alert fired AFTER pending_work items were already deleted (>7d old). By the time the alert surfaced in `<laqrumcode-alert>`, there was nothing to do — the data was gone. A tombstone reminder, not an actionable warning.
 
 **The fix:** `observability.ts` — replaced the post-mortem detector with `detectPendingWorkAging`. Fires when pending_work items exist that are 5+ days old (the purge threshold is 7 days), giving ~2 days of actionable runway to drain the queue before data loss. Message includes a countdown: *"will purge in 1.4d if not processed"*.
 
@@ -2409,7 +2409,7 @@ After sampling actual content, the orphan rows turned out to be high-signal engi
 
 **Why this is real recovery, not relabeling:** the orphan rows now have a queryable, deterministic project_id derived from their semantic content. A future query for project-scoped memories will pull them via the canonical `project_id = $pid` clause, not via the catch-all `project_id IS NONE` fallback. The substrate now treats them as first-class citizens of their home project.
 
-**Idempotent + reusable:** the migration only touches rows with `project_id=NONE`, so re-runs are safe. Anyone (any user) hitting the X-close orphan pattern (sessions purged before DB write) can run `introspect.action=migrate, filter=backfill_project_id` and benefit identically — the centroid pass needs only a populated `project` table and `concept`s with `relevant_to` edges, both of which any active kongcode workspace has.
+**Idempotent + reusable:** the migration only touches rows with `project_id=NONE`, so re-runs are safe. Anyone (any user) hitting the X-close orphan pattern (sessions purged before DB write) can run `introspect.action=migrate, filter=backfill_project_id` and benefit identically — the centroid pass needs only a populated `project` table and `concept`s with `relevant_to` edges, both of which any active laqrumcode workspace has.
 
 **Threshold tuning:** 0.5 cosine on bge-m3 embeddings is a meaningful-overlap threshold (per the v0.7.27 lexical-fallback at the same value). Below that, the row genuinely doesn't belong to any project the user has ever worked on, so global is the honest tag.
 
@@ -2650,7 +2650,7 @@ Adopting the Anthropic-Citations-API / Perplexity numbered-marker pattern: items
 
 ### Fixed (cross-project bleed — context-grounding plan phase 1)
 
-Retrieval was global by default — `vectorSearch` and `retrieveReflections` had **zero project-scoped WHERE clauses**, so `<reflection_context>` and recall blocks routinely injected lessons from unrelated projects (finance/trading, WhatsApp tooling, heartbeat polls) into kongcode-engineering turns. ICLR 2025 ("Long-Context LLMs Meet RAG") confirms cross-domain hard negatives hurt accuracy more than no retrieval at all. The substrate already had project pillars (`session.projectId` populated at session-start, `relevant_to`/`used_in` edges) — the retriever just wasn't honoring them.
+Retrieval was global by default — `vectorSearch` and `retrieveReflections` had **zero project-scoped WHERE clauses**, so `<reflection_context>` and recall blocks routinely injected lessons from unrelated projects (finance/trading, WhatsApp tooling, heartbeat polls) into laqrumcode-engineering turns. ICLR 2025 ("Long-Context LLMs Meet RAG") confirms cross-domain hard negatives hurt accuracy more than no retrieval at all. The substrate already had project pillars (`session.projectId` populated at session-start, `relevant_to`/`used_in` edges) — the retriever just wasn't honoring them.
 
 **Read path:**
 - `surreal.ts:vectorSearch` — accepts optional `projectId`; soft filter `(project_id IS NONE OR project_id = $pid OR scope = 'global')` applied to concept, memory, artifact subqueries. NONE-on-row preserves pre-migration data.
@@ -2705,7 +2705,7 @@ Retrieval was global by default — `vectorSearch` and `retrieveReflections` had
 
 ### Added
 - **`schema-edge-integrity` regression test** (`test/schema-edge-integrity.test.ts`) — parses `schema.surql` for every `RELATION` definition and statically checks every `store.relate(<from>, "<edge>", <to>)` call site against the schema's allowed IN/OUT types. Catches future bugs of the 0.7.22 class at PR time.
-- **`orphan_concepts` introspect query** — concepts older than 1h with no outgoing `derived_from` edge. Runtime visibility into provenance gaps so the next regression of this class shows up in `kongcode-status` instead of being silently absorbed.
+- **`orphan_concepts` introspect query** — concepts older than 1h with no outgoing `derived_from` edge. Runtime visibility into provenance gaps so the next regression of this class shows up in `laqrumcode-status` instead of being silently absorbed.
 
 ### Notes
 - Test suite: 555 tests pass (was 548). New schema-edge-integrity contributes 3.
@@ -2719,15 +2719,15 @@ Retrieval was global by default — `vectorSearch` and `retrieveReflections` had
 ## [0.7.14] — 2026-04-29
 
 ### Added
-- **Auto-drain scheduler restored.** Daemon now spawns `claude --agent kongcode:memory-extractor -p ...` as a headless subprocess when the `pending_work` queue exceeds threshold. Restores the auto-extraction behavior that lived in the in-process MemoryDaemon before commit `4f7b962` removed the Anthropic SDK.
-- New env vars: `KONGCODE_AUTO_DRAIN`, `KONGCODE_AUTO_DRAIN_THRESHOLD` (default 5), `KONGCODE_AUTO_DRAIN_INTERVAL_MS` (default 300000), `KONGCODE_CLAUDE_BIN`
+- **Auto-drain scheduler restored.** Daemon now spawns `claude --agent laqrumcode:memory-extractor -p ...` as a headless subprocess when the `pending_work` queue exceeds threshold. Restores the auto-extraction behavior that lived in the in-process MemoryDaemon before commit `4f7b962` removed the Anthropic SDK.
+- New env vars: `LAQRUMCODE_AUTO_DRAIN`, `LAQRUMCODE_AUTO_DRAIN_THRESHOLD` (default 5), `LAQRUMCODE_AUTO_DRAIN_INTERVAL_MS` (default 300000), `LAQRUMCODE_CLAUDE_BIN`
 - New `src/daemon/auto-drain.ts` with PID-file-locked scheduler
 - SessionEnd hook triggers an immediate debounced drain check
 
 ## [0.7.13] — 2026-04-29
 
 ### Changed
-- Default idle reap timeout: 60s → 6s. Anything longer was just holding ~150MB of BGE-M3 in RAM for nobody. Configurable via `KONGCODE_DAEMON_IDLE_TIMEOUT_MS`.
+- Default idle reap timeout: 60s → 6s. Anything longer was just holding ~150MB of BGE-M3 in RAM for nobody. Configurable via `LAQRUMCODE_DAEMON_IDLE_TIMEOUT_MS`.
 
 ## [0.7.12] — 2026-04-29
 
@@ -2741,7 +2741,7 @@ Retrieval was global by default — `vectorSearch` and `retrieveReflections` had
 ## [0.7.11] — 2026-04-29
 
 ### Added
-- `KONGCODE_DAEMON_IDLE_TIMEOUT_MS` env var (default 60s) to tune the idle reaper introduced in 0.7.10.
+- `LAQRUMCODE_DAEMON_IDLE_TIMEOUT_MS` env var (default 60s) to tune the idle reaper introduced in 0.7.10.
 
 ## [0.7.10] — 2026-04-29
 
@@ -2797,15 +2797,15 @@ Retrieval was global by default — `vectorSearch` and `retrieveReflections` had
 ## [0.7.1] — 2026-04-29
 
 ### Added
-- Daemon now exposes the legacy HTTP API on a per-PID Unix socket (`~/.kongcode-<pid>.sock`) so `hook-proxy.cjs` can find it. Without this, hooks silently no-op'd in the daemon-arch path.
+- Daemon now exposes the legacy HTTP API on a per-PID Unix socket (`~/.laqrumcode-<pid>.sock`) so `hook-proxy.cjs` can find it. Without this, hooks silently no-op'd in the daemon-arch path.
 - `.mcp.json` flipped from `node dist/mcp-server.js` (legacy monolith) to `node dist/mcp-client/index.js` (daemon-arch thin client).
 
 ## [0.7.0] — 2026-04-28
 
 ### Added
 - **Daemon-split architecture.** Two cooperating processes:
-  - `kongcode-daemon`: long-lived background process owning `SurrealStore`, `EmbeddingService`, ACAN weights, all 12 tool + 10 hook handlers
-  - `kongcode-mcp`: thin per-Claude-Code-session client; forwards MCP RPC to daemon via JSON-RPC 2.0 over Unix socket (TCP loopback fallback for Windows)
+  - `laqrumcode-daemon`: long-lived background process owning `SurrealStore`, `EmbeddingService`, ACAN weights, all 12 tool + 10 hook handlers
+  - `laqrumcode-mcp`: thin per-Claude-Code-session client; forwards MCP RPC to daemon via JSON-RPC 2.0 over Unix socket (TCP loopback fallback for Windows)
 - Multiple Claude Code sessions share one daemon; one BGE-M3 in RAM regardless of session count
 - Daemon survives plugin updates, MCP restarts, and Claude Code crashes via `detached: true, unref()`
 - SEA binaries built for linux-x64/arm64, macOS-arm64, win32-x64 (macOS-x64 still falls back to JS)
@@ -2816,7 +2816,7 @@ Self-contained first-run bootstrap shipped:
 
 - `src/engine/bootstrap.ts` provisions SurrealDB binary, BGE-M3 GGUF model, node-llama-cpp native bindings on first run
 - `bin-manifest.json` pins versions and per-platform sha256 hashes
-- Auto-detects existing kongcode SurrealDB on legacy ports (8000, 8042) before spawning a managed child
+- Auto-detects existing laqrumcode SurrealDB on legacy ports (8000, 8042) before spawning a managed child
 - Various Windows-specific fixes (npm.cmd shell:true, PATH propagation guidance)
 
 ## [0.5.x series and earlier]
@@ -2828,4 +2828,4 @@ See `git log` for pre-0.6.0 history. Highlights:
 - **0.4.0**: auto-seal contract — `commitKnowledge` auto-fires `narrower`/`broader`/`related_to`/`about_concept`/`mentions` edges on every write
 - **0.3.0**: full Option A multi-MCP hardening (atomic weights save, training lockfile, mtime hot-reload)
 - **0.2.0**: skill suite + grounding metric instrumentation
-- **0.1.x**: initial port from KongBrain
+- **0.1.x**: initial port from LaqrumBrain

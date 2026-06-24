@@ -1,7 +1,7 @@
 /**
  * Live tests for the record_retrieval_feedback tool handler (GH #16-5, Phase A).
  *
- * Calls the handler against a seeded kong_test DB and verifies the SQL effects:
+ * Calls the handler against a seeded laqrum_test DB and verifies the SQL effects:
  *   - helpful/irrelevant/outdated relabel the session's retrieval_outcome row
  *     (llm_relevance/llm_relevant/feedback_source) — the ACAN training sample,
  *   - outdated decays the table-appropriate priority field (memory.importance,
@@ -11,7 +11,7 @@
  *   - feedback on a memory not retrieved this session reports 0 relabels + note.
  *
  * Requires a live SurrealDB; the beforeAll probe races a 10s timeout so CI's
- * no-DB env skips cleanly. ns=kong_test is isolated from production.
+ * no-DB env skips cleanly. ns=laqrum_test is isolated from production.
  */
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { readFile } from "node:fs/promises";
@@ -24,7 +24,7 @@ import type { GlobalPluginState, SessionState } from "../src/engine/state.js";
 const URL = process.env.SURREAL_URL ?? "ws://127.0.0.1:8000/rpc";
 const USER = process.env.SURREAL_USER ?? "root";
 const PASS = process.env.SURREAL_PASS ?? "root";
-const TEST_NS = "kong_test";
+const TEST_NS = "laqrum_test";
 const TEST_DB = `rrf_test_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 const SID = `sess_${Math.random().toString(36).slice(2, 8)}`;
 const SCHEMA = resolve(dirname(fileURLToPath(import.meta.url)), "..", "src", "engine", "schema.surql");
@@ -82,7 +82,7 @@ function itDb(name: string, fn: () => Promise<void>) {
   it(name, async () => { if (!store) return; await fn(); }, 30_000);
 }
 
-describe("record_retrieval_feedback (live, kong_test)", () => {
+describe("record_retrieval_feedback (live, laqrum_test)", () => {
   itDb("helpful relabels the retrieval_outcome row as the explicit ACAN training label", async () => {
     const r = await call("memory:rrf_m1", "helpful", "spot on");
     expect(r.ok).toBe(true);

@@ -15,7 +15,7 @@
  *   E14 — create-then-narrow race on the managed-SurrealDB root credential.
  *     Before the fix, getOrCreateManagedCred() wrote the cred with a plain
  *     writeFileSync (default 0666 & umask) and only THEN chmod-narrowed to 0600
- *     — a window where the secret was world-readable. And the parent (~/.kongcode)
+ *     — a window where the secret was world-readable. And the parent (~/.laqrumcode)
  *     was mkdir'd without narrowing to 0700. The fix writes with {mode:0o600}
  *     (created at 0600 atomically) and chmods the parent dir to 0700.
  *
@@ -90,14 +90,14 @@ function withUsername<T>(username: string | (() => never), fn: () => T): T {
 // ── E5: per-user Windows managed-SurrealDB port ─────────────────────────────
 
 describe("E5: pickPort derives a PER-USER managed port on Windows (no more flat 18765)", () => {
-  const origPort = process.env.KONGCODE_SURREAL_PORT;
+  const origPort = process.env.LAQRUMCODE_SURREAL_PORT;
   afterEach(() => {
-    if (origPort === undefined) delete process.env.KONGCODE_SURREAL_PORT;
-    else process.env.KONGCODE_SURREAL_PORT = origPort;
+    if (origPort === undefined) delete process.env.LAQRUMCODE_SURREAL_PORT;
+    else process.env.LAQRUMCODE_SURREAL_PORT = origPort;
   });
 
   it("two DIFFERENT usernames yield DISTINCT ports in the uid===null (Windows) path", () => {
-    delete process.env.KONGCODE_SURREAL_PORT;
+    delete process.env.LAQRUMCODE_SURREAL_PORT;
     const portFor = (name: string) =>
       withGetuid(undefined, () => withUsername(name, () => pickPort()));
     const alice = portFor("alice");
@@ -113,14 +113,14 @@ describe("E5: pickPort derives a PER-USER managed port on Windows (no more flat 
   });
 
   it("the Windows derivation is DETERMINISTIC (same username → same port)", () => {
-    delete process.env.KONGCODE_SURREAL_PORT;
+    delete process.env.LAQRUMCODE_SURREAL_PORT;
     const a = withGetuid(undefined, () => withUsername("zero", () => pickPort()));
     const b = withGetuid(undefined, () => withUsername("zero", () => pickPort()));
     expect(a).toBe(b);
   });
 
   it("every Windows-derived port stays inside the managed-SurrealDB window [18765, 28764]", () => {
-    delete process.env.KONGCODE_SURREAL_PORT;
+    delete process.env.LAQRUMCODE_SURREAL_PORT;
     for (const name of ["alice", "bob", "Administrator", "SYSTEM", "zero", "x".repeat(64)]) {
       const p = withGetuid(undefined, () => withUsername(name, () => pickPort()));
       expect(p).toBeGreaterThanOrEqual(LEGACY_MANAGED_SURREAL_PORT);
@@ -132,14 +132,14 @@ describe("E5: pickPort derives a PER-USER managed port on Windows (no more flat 
     }
   });
 
-  it("an explicit KONGCODE_SURREAL_PORT override still wins on Windows (operator intent)", () => {
-    process.env.KONGCODE_SURREAL_PORT = "29999";
+  it("an explicit LAQRUMCODE_SURREAL_PORT override still wins on Windows (operator intent)", () => {
+    process.env.LAQRUMCODE_SURREAL_PORT = "29999";
     const p = withGetuid(undefined, () => withUsername("alice", () => pickPort()));
     expect(p).toBe(29999);
   });
 
   it("degenerate case (no getuid AND no/empty username) falls back to flat 18765", () => {
-    delete process.env.KONGCODE_SURREAL_PORT;
+    delete process.env.LAQRUMCODE_SURREAL_PORT;
     // Empty username → flat default (the only safe choice; isolation then leans
     // on the per-install cred + process-owner guard).
     const empty = withGetuid(undefined, () => withUsername("", () => pickPort()));
@@ -152,7 +152,7 @@ describe("E5: pickPort derives a PER-USER managed port on Windows (no more flat 
   });
 
   it("the POSIX uid path is unchanged (regression guard for the non-Windows branch)", () => {
-    delete process.env.KONGCODE_SURREAL_PORT;
+    delete process.env.LAQRUMCODE_SURREAL_PORT;
     withGetuid(1234, () => expect(pickPort()).toBe(LEGACY_MANAGED_SURREAL_PORT + 1234));
     withGetuid(412345, () => expect(pickPort()).toBe(LEGACY_MANAGED_SURREAL_PORT + 2345)); // %10000
   });
@@ -169,7 +169,7 @@ function mkCacheDir(label: string): string {
   return cacheDir;
 }
 // The cred lands at the PARENT of cacheDir (<root>/surreal-cred.json), mirroring
-// production's ~/.kongcode/surreal-cred.json sitting beside ~/.kongcode/cache.
+// production's ~/.laqrumcode/surreal-cred.json sitting beside ~/.laqrumcode/cache.
 function credPathFor(cacheDir: string): string {
   return join(dirname(cacheDir), "surreal-cred.json");
 }
@@ -189,7 +189,7 @@ describe("E14: managed cred is created at 0600 (no create-then-narrow race) and 
   posixOnly("writes the cred file with owner-only 0600 perms", () => {
     const cacheDir = mkCacheDir("perms");
     const cred = getOrCreateManagedCred(cacheDir);
-    expect(cred.user).toMatch(/^kong/);
+    expect(cred.user).toMatch(/^laqrum/);
     expect(cred.pass.length).toBeGreaterThan(0);
     const p = credPathFor(cacheDir);
     const mode = statSync(p).mode;
@@ -199,7 +199,7 @@ describe("E14: managed cred is created at 0600 (no create-then-narrow race) and 
     expect(mode & 0o600).toBe(0o600);
   });
 
-  posixOnly("narrows the parent (~/.kongcode) directory to 0700", () => {
+  posixOnly("narrows the parent (~/.laqrumcode) directory to 0700", () => {
     const cacheDir = mkCacheDir("parentdir");
     getOrCreateManagedCred(cacheDir);
     const parent = dirname(credPathFor(cacheDir)); // == <root>, the cred's dir

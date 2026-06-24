@@ -1,7 +1,7 @@
 node_modules/
-.kongcode.sock
-.kongcode-port
-.kongcode-handoff.json
+.laqrumcode.sock
+.laqrumcode-port
+.laqrumcode-handoff.json
 .orphaned_at
 
 # SurrealQL CLI scratchpad — accumulates working queries from probe/audit

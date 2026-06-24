@@ -1,5 +1,5 @@
 {
-  "$comment": "SEA config for kongcode-mcp — the thin per-Claude-Code-session client. Forwards MCP RPC to kongcode-daemon over local IPC. No assets needed (no schema, no DB) — daemon owns all heavy state.",
+  "$comment": "SEA config for laqrumcode-mcp — the thin per-Claude-Code-session client. Forwards MCP RPC to laqrumcode-daemon over local IPC. No assets needed (no schema, no DB) — daemon owns all heavy state.",
   "main": "dist/mcp-client/bundle.cjs",
   "output": "dist/mcp-sea-prep.blob",
   "useSnapshot": false,

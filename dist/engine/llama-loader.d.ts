@@ -9,7 +9,7 @@
  *   2. Node SEA single-executable (0.7.0+ ship target): there's no
  *      node_modules adjacent to the binary. The bootstrap downloads
  *      node-llama-cpp + its platform binding into <cacheDir>/native/, sets
- *      KONGCODE_NODE_LLAMA_CPP_PATH to the absolute path of the main
+ *      LAQRUMCODE_NODE_LLAMA_CPP_PATH to the absolute path of the main
  *      package's index.js, and we import from that path.
  *
  * Keeping this in one place isolates the layout logic from embeddings.ts so

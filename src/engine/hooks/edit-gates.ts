@@ -19,7 +19,7 @@
  *
  * Idle timeout: a session that hasn't gated anything in 30 minutes
  * resets its in-memory cache (the agent's intent has likely shifted).
- * Configurable via KONGCODE_GATE_TIMEOUT_MS.
+ * Configurable via LAQRUMCODE_GATE_TIMEOUT_MS.
  *
  * Override: a user message containing the file path verbatim acts as
  * authorization (the user just told the agent what to do).
@@ -33,7 +33,7 @@ import { log } from "../log.js";
 const DEFAULT_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
 
 function readIdleTimeout(): number {
-  const raw = process.env.KONGCODE_GATE_TIMEOUT_MS;
+  const raw = process.env.LAQRUMCODE_GATE_TIMEOUT_MS;
   if (!raw) return DEFAULT_IDLE_TIMEOUT_MS;
   const parsed = Number.parseInt(raw, 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_IDLE_TIMEOUT_MS;
@@ -206,7 +206,7 @@ export async function checkFileEditGate(
   if (investigated) return null;
 
   return denyResponse(
-    `kongcode/edit-gate: first edit to ${filePath} this session. ` +
+    `laqrumcode/edit-gate: first edit to ${filePath} this session. ` +
       `Use the Read tool on this exact path before editing — that registers the ` +
       `path with the gate immediately. (Recall and Grep do NOT clear the gate; ` +
       `only a Read/Edit/Write of this path or the path appearing in the user's ` +
@@ -234,7 +234,7 @@ export async function checkBashGate(
   if (investigated) return null;
 
   return denyResponse(
-    `kongcode/bash-gate: destructive pattern detected: ${match.name}. ` +
+    `laqrumcode/bash-gate: destructive pattern detected: ${match.name}. ` +
       `Either the user must authorize this command, or you must surface context ` +
       `establishing why the destructive operation is correct (recall the target path or ` +
       `the relevant decision). Once acknowledged, retry — the gate fires once per pattern ` +

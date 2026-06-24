@@ -6,7 +6,7 @@
  * briefing. The briefing is injected into the system prompt so the agent
  * "wakes up" knowing who it is and what it was doing.
  *
- * Ported from kongbrain — takes SurrealStore as param.
+ * Ported from laqrumbrain — takes SurrealStore as param.
  */
 import { hasSoul, getSoul, checkGraduation } from "./soul.js";
 import { readAndDeleteHandoffFile } from "./handoff-file.js";

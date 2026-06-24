@@ -33,12 +33,12 @@ function makeState(): GlobalPluginState {
 const STALE_MS = 60_000;
 
 describe("R13: stale-session reaper skips live + in-progress sessions", () => {
-  // KONGCODE_MAX_SESSIONS large so the cap never interferes with these.
-  const original = process.env.KONGCODE_MAX_SESSIONS;
-  beforeEach(() => { process.env.KONGCODE_MAX_SESSIONS = "1000"; });
+  // LAQRUMCODE_MAX_SESSIONS large so the cap never interferes with these.
+  const original = process.env.LAQRUMCODE_MAX_SESSIONS;
+  beforeEach(() => { process.env.LAQRUMCODE_MAX_SESSIONS = "1000"; });
   afterEach(() => {
-    if (original === undefined) delete process.env.KONGCODE_MAX_SESSIONS;
-    else process.env.KONGCODE_MAX_SESSIONS = original;
+    if (original === undefined) delete process.env.LAQRUMCODE_MAX_SESSIONS;
+    else process.env.LAQRUMCODE_MAX_SESSIONS = original;
   });
 
   it("reaps a genuinely idle session (no client, no in-progress turn)", () => {

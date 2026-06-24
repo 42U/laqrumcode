@@ -1,5 +1,5 @@
 /**
- * KongCode MCP Server — entry point.
+ * LaqrumCode MCP Server — entry point.
  *
  * Long-lived stdio process that owns:
  * - SurrealDB connection
@@ -298,11 +298,11 @@ const TOOLS = [
   },
   {
     name: "create_skill",
-    description: "Create a new skill row in the kongcode DB. Skills are DB-resident vector-indexed procedural knowledge invokable via slash command. The full body is stored in the `skill` table and recallable via recall(scope=\"skills\"). Use this instead of authoring a SKILL.md file on disk.",
+    description: "Create a new skill row in the laqrumcode DB. Skills are DB-resident vector-indexed procedural knowledge invokable via slash command. The full body is stored in the `skill` table and recallable via recall(scope=\"skills\"). Use this instead of authoring a SKILL.md file on disk.",
     inputSchema: {
       type: "object" as const,
       properties: {
-        name: { type: "string", description: "Kebab-case skill name (matches the slash command, e.g. 'kongcode-release')" },
+        name: { type: "string", description: "Kebab-case skill name (matches the slash command, e.g. 'laqrumcode-release')" },
         description: { type: "string", description: "One-line summary used for slash-command suggestion and embedding target. Be specific about when to invoke." },
         body: { type: "string", description: "Full markdown body of the skill (procedural instructions, steps, examples). Min 20 chars." },
         preconditions: { type: "string", description: "Optional structured preconditions text." },
@@ -325,7 +325,7 @@ const TOOLS = [
   },
   {
     name: "update_skill",
-    description: "Revise an EXISTING skill in the kongcode DB (counterpart to create_skill, which rejects name collisions). Patches the provided fields on the skill matched by `name` and RE-EMBEDS so recall(scope=\"skills\") reflects the new content — a raw SurrealQL UPDATE would leave the old embedding stale. `name` identifies the skill and is not changed; provide at least one mutable field.",
+    description: "Revise an EXISTING skill in the laqrumcode DB (counterpart to create_skill, which rejects name collisions). Patches the provided fields on the skill matched by `name` and RE-EMBEDS so recall(scope=\"skills\") reflects the new content — a raw SurrealQL UPDATE would leave the old embedding stale. `name` identifies the skill and is not changed; provide at least one mutable field.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -343,9 +343,9 @@ const TOOLS = [
 
 // ── Tool handlers ─────────────────────────────────────────────────────────────
 
-/** Get or create a session for tool calls. Uses KONGCODE_SESSION_ID env var or a default. */
+/** Get or create a session for tool calls. Uses LAQRUMCODE_SESSION_ID env var or a default. */
 function getSession(): import("./engine/state.js").SessionState {
-  const sessionId = process.env.KONGCODE_SESSION_ID ?? "mcp-default";
+  const sessionId = process.env.LAQRUMCODE_SESSION_ID ?? "mcp-default";
   return globalState!.getOrCreateSession(sessionId, sessionId);
 }
 
@@ -357,19 +357,19 @@ async function handleToolCall(
     const elapsed = Math.round((Date.now() - bootstrapStartedAt) / 1000);
     let msg: string;
     if (bootstrapPhase === "failed" && bootstrapError) {
-      msg = `KongCode bootstrap failed: ${bootstrapError.message}. Check stderr for details, or set KONGCODE_SKIP_BOOTSTRAP=1 and provide your own SurrealDB via SURREAL_URL.`;
+      msg = `LaqrumCode bootstrap failed: ${bootstrapError.message}. Check stderr for details, or set LAQRUMCODE_SKIP_BOOTSTRAP=1 and provide your own SurrealDB via SURREAL_URL.`;
     } else if (bootstrapPhase === "starting" || bootstrapPhase === "npm-install") {
-      msg = `kongcode is provisioning first-run dependencies (npm install, ~${elapsed}s elapsed). First-run setup typically takes 2-5 minutes total. Try again in 30s.`;
+      msg = `laqrumcode is provisioning first-run dependencies (npm install, ~${elapsed}s elapsed). First-run setup typically takes 2-5 minutes total. Try again in 30s.`;
     } else if (bootstrapPhase === "downloading-surreal") {
-      msg = `kongcode is downloading SurrealDB binary (~80MB, ~${elapsed}s elapsed). Try again in 30s.`;
+      msg = `laqrumcode is downloading SurrealDB binary (~80MB, ~${elapsed}s elapsed). Try again in 30s.`;
     } else if (bootstrapPhase === "downloading-model") {
-      msg = `kongcode is downloading the BGE-M3 embedding model (~420MB, ~${elapsed}s elapsed). Try again in 60s.`;
+      msg = `laqrumcode is downloading the BGE-M3 embedding model (~420MB, ~${elapsed}s elapsed). Try again in 60s.`;
     } else if (bootstrapPhase === "starting-surreal" || bootstrapPhase === "connecting-store") {
-      msg = `kongcode is starting its managed SurrealDB child (~${elapsed}s elapsed). Try again in 10s.`;
+      msg = `laqrumcode is starting its managed SurrealDB child (~${elapsed}s elapsed). Try again in 10s.`;
     } else if (bootstrapPhase === "loading-embeddings") {
-      msg = `kongcode is loading the embedding model (cold start, ~${elapsed}s elapsed). Try again in 30s.`;
+      msg = `laqrumcode is loading the embedding model (cold start, ~${elapsed}s elapsed). Try again in 30s.`;
     } else {
-      msg = `kongcode is still initializing (phase=${bootstrapPhase}, ${elapsed}s elapsed). Try again in 30s.`;
+      msg = `laqrumcode is still initializing (phase=${bootstrapPhase}, ${elapsed}s elapsed). Try again in 30s.`;
     }
     return { content: [{ type: "text", text: msg }] };
   }
@@ -432,7 +432,7 @@ async function handleToolCall(
 // ── Lifecycle ─────────────────────────────────────────────────────────────────
 
 async function initialize(): Promise<void> {
-  log.info("Initializing KongCode MCP server...");
+  log.info("Initializing LaqrumCode MCP server...");
   bootstrapStartedAt = Date.now();
   setBootstrapPhase("starting");
 
@@ -441,8 +441,8 @@ async function initialize(): Promise<void> {
 
   // First-run bootstrap: provision npm deps, SurrealDB binary + child process,
   // and embedding model. Idempotent — fast path when artifacts already exist.
-  // KONGCODE_SKIP_BOOTSTRAP=1 disables; SURREAL_URL override skips the child.
-  if (process.env.KONGCODE_SKIP_BOOTSTRAP !== "1") {
+  // LAQRUMCODE_SKIP_BOOTSTRAP=1 disables; SURREAL_URL override skips the child.
+  if (process.env.LAQRUMCODE_SKIP_BOOTSTRAP !== "1") {
     // npm-install is by far the longest first-run step (1-3 min vs <10s for
     // the binary downloads). Tagging the phase as "npm-install" gives the
     // user-facing error message the right hint when they probe mid-bootstrap.
@@ -486,7 +486,7 @@ async function initialize(): Promise<void> {
       setBootstrapPhase("failed", err instanceof Error ? err : new Error(String(err)));
     }
   } else {
-    log.info("[bootstrap] skipped (KONGCODE_SKIP_BOOTSTRAP=1)");
+    log.info("[bootstrap] skipped (LAQRUMCODE_SKIP_BOOTSTRAP=1)");
   }
 
   // Create services
@@ -495,7 +495,7 @@ async function initialize(): Promise<void> {
 
   // Build global state
   globalState = new GlobalPluginState(config, store, embeddings);
-  globalState.workspaceDir = process.env.KONGCODE_PROJECT_DIR ?? process.cwd();
+  globalState.workspaceDir = process.env.LAQRUMCODE_PROJECT_DIR ?? process.cwd();
 
   // Connect to SurrealDB
   setBootstrapPhase("connecting-store");
@@ -530,14 +530,14 @@ async function initialize(): Promise<void> {
 
   // Start internal HTTP API for hook communication.
   // Per-PID socket path so multiple concurrent MCPs don't race on a shared
-  // file. hook-proxy.sh enumerates .kongcode-*.sock in $HOME and picks the
+  // file. hook-proxy.sh enumerates .laqrumcode-*.sock in $HOME and picks the
   // newest one whose owning PID is still alive. Killing one MCP no longer
   // takes down others' hook routing.
   const homeDir = process.env.HOME || process.env.USERPROFILE || "/tmp";
-  const socketPath = `${homeDir}/.kongcode-${process.pid}.sock`;
+  const socketPath = `${homeDir}/.laqrumcode-${process.pid}.sock`;
   await startHttpApi(globalState, socketPath, homeDir);
 
-  log.info("KongCode MCP server ready");
+  log.info("LaqrumCode MCP server ready");
 
   // Fire background maintenance once per MCP process boot. This is the
   // reliable trigger — it fires regardless of whether Claude Code delivers
@@ -549,21 +549,21 @@ async function initialize(): Promise<void> {
 }
 
 async function shutdown(): Promise<void> {
-  log.info("Shutting down KongCode MCP server...");
+  log.info("Shutting down LaqrumCode MCP server...");
   await stopHttpApi();
   if (globalState) {
     await globalState.shutdown();
     globalState = null;
   }
   shutdownManagedSurreal();
-  log.info("KongCode shutdown complete");
+  log.info("LaqrumCode shutdown complete");
 }
 
 // ── Main ──────────────────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
   const server = new Server(
-    { name: "kongcode", version: "0.7.130" },
+    { name: "laqrumcode", version: "0.7.130" },
     { capabilities: { tools: {} } },
   );
 
@@ -598,7 +598,7 @@ async function main(): Promise<void> {
   // a moment later and gets a working tool. Issue #4.
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  log.info("KongCode MCP server running on stdio");
+  log.info("LaqrumCode MCP server running on stdio");
 
   // Now initialize services — slow embedding load no longer blocks handshake.
   await initialize();

@@ -161,19 +161,19 @@ describe("handleSubagentStop", () => {
     expect(state.store.queryExec).not.toHaveBeenCalled();
   });
 
-  // Wave 2: auto-drain internal subprocess agents (kongcode:memory-extractor
-  // and kongcode:memory-extractor-lite) live outside the PreToolUse →
+  // Wave 2: auto-drain internal subprocess agents (laqrumcode:memory-extractor
+  // and laqrumcode:memory-extractor-lite) live outside the PreToolUse →
   // SubagentStop lifecycle. The daemon spawn()s them directly, so no
   // spawn row ever exists. SubagentStop for these agent_types must be
   // SILENTLY skipped — never an orphan-row write, never a warn-channel log.
-  it("silently skips stop events for kongcode:memory-extractor (auto-drain internal)", async () => {
+  it("silently skips stop events for laqrumcode:memory-extractor (auto-drain internal)", async () => {
     const session = mockSession();
     const state = mockState(session, []);
 
     const result = await handleSubagentStop(state, {
       session_id: session.sessionId,
       tool_use_id: "tool-use-internal-drain",
-      agent_type: "kongcode:memory-extractor",
+      agent_type: "laqrumcode:memory-extractor",
       result: "extracted 7 gems",
       outcome: "completed",
     });
@@ -185,14 +185,14 @@ describe("handleSubagentStop", () => {
     expect(state.store.queryExec).not.toHaveBeenCalled();
   });
 
-  it("silently skips stop events for kongcode:memory-extractor-lite (auto-drain internal)", async () => {
+  it("silently skips stop events for laqrumcode:memory-extractor-lite (auto-drain internal)", async () => {
     const session = mockSession();
     const state = mockState(session, []);
 
     const result = await handleSubagentStop(state, {
       session_id: session.sessionId,
       tool_use_id: "tool-use-internal-drain-lite",
-      agent_type: "kongcode:memory-extractor-lite",
+      agent_type: "laqrumcode:memory-extractor-lite",
       outcome: "completed",
     });
 
@@ -246,7 +246,7 @@ describe("handleSubagentStop", () => {
     const result = await handleSubagentStop(state, {
       session_id: session.sessionId,
       tool_use_id: "tool-use-st",
-      subagent_type: "kongcode:memory-extractor",
+      subagent_type: "laqrumcode:memory-extractor",
       outcome: "completed",
     });
 

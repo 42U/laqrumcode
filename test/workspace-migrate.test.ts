@@ -38,7 +38,7 @@ function mockEmbeddings(available = false) {
 // --- Temp workspace helper ---
 
 async function makeTempWorkspace(): Promise<string> {
-  return mkdtemp(join(tmpdir(), "kongbrain-test-"));
+  return mkdtemp(join(tmpdir(), "laqrumbrain-test-"));
 }
 
 // ── hasMigratableFiles ───────────────────────────────────────────────────────
@@ -167,7 +167,7 @@ description: Deploy the application
     // The stub stays on disk for slash discovery — NOT moved into the archive.
     const stubExists = await stat(join(dir, "skills", "deploy", "SKILL.md")).then(() => true).catch(() => false);
     expect(stubExists).toBe(true);
-    const archived = await stat(join(dir, ".kongbrain-archive", "skills", "deploy", "SKILL.md")).then(() => true).catch(() => false);
+    const archived = await stat(join(dir, ".laqrumbrain-archive", "skills", "deploy", "SKILL.md")).then(() => true).catch(() => false);
     expect(archived).toBe(false);
 
     // Its on-disk body is now the 5-line stub pointing at get_skill_body.
@@ -178,26 +178,26 @@ description: Deploy the application
   });
 
   it("skips an already-DB-resident stub SKILL.md (mints no duplicate row, leaves it untouched)", async () => {
-    await mkdir(join(dir, "skills", "kongcode-release"), { recursive: true });
+    await mkdir(join(dir, "skills", "laqrumcode-release"), { recursive: true });
     const stub = `---
-name: kongcode-release
-description: Ship a new kongcode version
+name: laqrumcode-release
+description: Ship a new laqrumcode version
 ---
 
-Body in kongcode DB. Call \`mcp__plugin_kongcode_kongcode__get_skill_body\` with \`name="kongcode-release"\` to load full instructions.
+Body in laqrumcode DB. Call \`mcp__plugin_laqrumcode_laqrumcode__get_skill_body\` with \`name="laqrumcode-release"\` to load full instructions.
 `;
-    await writeFile(join(dir, "skills", "kongcode-release", "SKILL.md"), stub);
+    await writeFile(join(dir, "skills", "laqrumcode-release", "SKILL.md"), stub);
     const store = mockStore();
     const result = await migrateWorkspace(dir, store as any, mockEmbeddings() as any);
 
     // Already a stub → not re-ingested as a junk skill row.
     expect(result.skills).toBe(0);
-    expect(store._records.some(r => (r as any).name === "kongcode-release")).toBe(false);
+    expect(store._records.some(r => (r as any).name === "laqrumcode-release")).toBe(false);
 
     // Stub left byte-identical on disk, not archived.
-    const onDisk = await readFile(join(dir, "skills", "kongcode-release", "SKILL.md"), "utf-8");
+    const onDisk = await readFile(join(dir, "skills", "laqrumcode-release", "SKILL.md"), "utf-8");
     expect(onDisk).toBe(stub);
-    const archived = await stat(join(dir, ".kongbrain-archive", "skills", "kongcode-release", "SKILL.md")).then(() => true).catch(() => false);
+    const archived = await stat(join(dir, ".laqrumbrain-archive", "skills", "laqrumcode-release", "SKILL.md")).then(() => true).catch(() => false);
     expect(archived).toBe(false);
   });
 
@@ -269,7 +269,7 @@ Body in kongcode DB. Call \`mcp__plugin_kongcode_kongcode__get_skill_body\` with
     expect(store._records.some(r => (r as any).path === "HEARTBEAT.md")).toBe(false);
   });
 
-  it("archives ingested files to .kongbrain-archive/", async () => {
+  it("archives ingested files to .laqrumbrain-archive/", async () => {
     await writeFile(join(dir, "IDENTITY.md"), "I am an agent with many skills.");
     await migrateWorkspace(dir, mockStore() as any, mockEmbeddings() as any);
 
@@ -278,7 +278,7 @@ Body in kongcode DB. Call \`mcp__plugin_kongcode_kongcode__get_skill_body\` with
     expect(origExists).toBe(false);
 
     // Archive should exist
-    const archiveExists = await stat(join(dir, ".kongbrain-archive", "IDENTITY.md")).then(() => true).catch(() => false);
+    const archiveExists = await stat(join(dir, ".laqrumbrain-archive", "IDENTITY.md")).then(() => true).catch(() => false);
     expect(archiveExists).toBe(true);
   });
 

@@ -1,5 +1,5 @@
 {
-  "description": "KongCode lifecycle hooks — graph memory orchestration",
+  "description": "LaqrumCode lifecycle hooks — graph memory orchestration",
   "hooks": {
     "SessionStart": [
       {

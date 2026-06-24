@@ -4,8 +4,8 @@
  * Every `spawn(claudeBin, ...)` call inside `src/daemon/auto-drain.ts` MUST:
  *
  *   1. Include `"--plugin-dir"` in the argv array. v0.7.85 omitted this and
- *      the spawned `claude --agent kongcode:memory-extractor-lite` subprocess
- *      had no kongcode plugin loaded, so its `fetch_pending_work` and
+ *      the spawned `claude --agent laqrumcode:memory-extractor-lite` subprocess
+ *      had no laqrumcode plugin loaded, so its `fetch_pending_work` and
  *      `commit_work_results` tools didn't exist. Drain failed silently for
  *      two days because `stdio: "ignore"` hid the "tools are not available"
  *      stderr from any log.
@@ -63,7 +63,7 @@ describe("drain spawn completeness invariant (v0.7.91)", () => {
         `Found ${violations.length} spawn() call(s) in auto-drain.ts that don't pass --plugin-dir:\n\n` +
         details +
         `\n\nEvery spawn(claudeBin, ...) MUST include "--plugin-dir" in argv. Without it the spawned\n` +
-        `claude subprocess has no kongcode plugin loaded and its memory-extractor agent can't call\n` +
+        `claude subprocess has no laqrumcode plugin loaded and its memory-extractor agent can't call\n` +
         `fetch_pending_work or commit_work_results. v0.7.85 shipped this gap; drain silently failed\n` +
         `for two days. Pass the plugin dir via the module-level PLUGIN_DIR constant.`,
       );

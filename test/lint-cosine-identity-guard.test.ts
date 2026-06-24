@@ -16,7 +16,7 @@
  *   - the file:line is whitelisted as a READ-ONLY cosine site (search,
  *     ranking, edge-creation) that doesn't feed a destructive op.
  *
- * v0.7.93 verified: every destructive cosine site in kongcode has a guard.
+ * v0.7.93 verified: every destructive cosine site in laqrumcode has a guard.
  * This lint prevents drift.
  */
 

@@ -2,7 +2,7 @@
  * Soul — the emergent identity document system.
  *
  * Unlike hardcoded identity chunks, the Soul document is written BY the agent
- * based on its own graph data. It lives in SurrealDB as `soul:kongbrain` and
+ * based on its own graph data. It lives in SurrealDB as `soul:laqrumbrain` and
  * evolves over time through experience-grounded revisions.
  *
  * Graduation is a staged process, not a binary gate. There are 8 gates total:
@@ -19,7 +19,7 @@
  * An agent that meets all 7 volume thresholds but has terrible quality scores
  * will NOT graduate — it needs to improve before self-authoring makes sense.
  *
- * Ported from kongbrain — takes SurrealStore/EmbeddingService as params.
+ * Ported from laqrumbrain — takes SurrealStore/EmbeddingService as params.
  */
 import type { SurrealStore } from "./surreal.js";
 export type MaturityStage = "nascent" | "developing" | "emerging" | "maturing" | "ready";

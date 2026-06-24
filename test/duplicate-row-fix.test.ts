@@ -1,5 +1,5 @@
 /**
- * Unit tests for the engine-layer primitives introduced by the kongcode
+ * Unit tests for the engine-layer primitives introduced by the laqrumcode
  * duplicate-row fix (Agent 17 / v0.7.69).
  *
  * Five distinct primitives are exercised here, each tested in isolation
@@ -34,7 +34,7 @@ import { seedCognitiveBootstrap } from "../src/engine/cognitive-bootstrap.js";
 // ── Live-DB harness for SurrealStore tests ────────────────────────────────
 
 const SKIP = process.env.SKIP_INTEGRATION === "1";
-const TEST_NS = "kong_test";
+const TEST_NS = "laqrum_test";
 const TEST_DB = `dup_fix_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 
 let store: SurrealStore;

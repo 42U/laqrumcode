@@ -6,7 +6,7 @@
  *   - rollupDailyMetrics: idempotent UPSERT keyed on day, handles empty days
  *   - computeTrends: aggregates rollups + computes window summary
  *   - detectAnomalies: each absolute-threshold detector + cooldown behavior
- *   - formatAnomalyBlock: emits a [kongcode-alert] block when flags exist
+ *   - formatAnomalyBlock: emits a [laqrumcode-alert] block when flags exist
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
@@ -487,14 +487,14 @@ describe("formatAnomalyBlock", () => {
     expect(formatAnomalyBlock([])).toBe("");
   });
 
-  it("emits a kongcode-alert block with severity markers", () => {
+  it("emits a laqrumcode-alert block with severity markers", () => {
     const flags: AnomalyFlag[] = [
       { code: "substrate.x", severity: "critical", message: "broken", evidence: "n=0", suggestion: "restart" },
       { code: "gate.close", severity: "info", message: "close", evidence: "q=0.84" },
     ];
     const block = formatAnomalyBlock(flags);
-    expect(block).toContain("<kongcode-alert>");
-    expect(block).toContain("</kongcode-alert>");
+    expect(block).toContain("<laqrumcode-alert>");
+    expect(block).toContain("</laqrumcode-alert>");
     expect(block).toContain("[!!] substrate.x: broken");
     expect(block).toContain("[info] gate.close: close");
     expect(block).toContain("suggestion: restart");
@@ -534,7 +534,7 @@ describe("graduation detectors: output-contract regression", () => {
   // Mirror of detectGraduationReady in src/engine/observability.ts.
   // Branches on hasSoul: once the soul exists, the "graduation_ready" flag
   // must suppress — graduation is a ONE-TIME event tied to the existence of
-  // soul:kongbrain and re-announcing it months later is misleading.
+  // soul:laqrumbrain and re-announcing it months later is misleading.
   function deriveGraduationReadyFlag(report: GraduationReportShape, soulExists: boolean): AnomalyFlag | null {
     if (soulExists) return null;
     if (!report.ready) return null;

@@ -10,19 +10,19 @@ import { sweepStaleSockets, __testing as httpApiTesting } from "../src/http-api.
 // is process.ppid here) and kill the suite mid-run. Force keep-siblings
 // semantics for those tests; the reaper has its own dedicated suite below
 // where a controlled child process is the SIGTERM target.
-const ORIGINAL_KEEP = process.env.KONGCODE_KEEP_SIBLINGS;
+const ORIGINAL_KEEP = process.env.LAQRUMCODE_KEEP_SIBLINGS;
 
-describe("sweepStaleSockets — keep-siblings semantics (KONGCODE_KEEP_SIBLINGS=1)", () => {
+describe("sweepStaleSockets — keep-siblings semantics (LAQRUMCODE_KEEP_SIBLINGS=1)", () => {
   let dir: string;
 
   beforeEach(() => {
-    process.env.KONGCODE_KEEP_SIBLINGS = "1";
-    dir = mkdtempSync(join(tmpdir(), "kongcode-sweep-"));
+    process.env.LAQRUMCODE_KEEP_SIBLINGS = "1";
+    dir = mkdtempSync(join(tmpdir(), "laqrumcode-sweep-"));
   });
 
   afterEach(() => {
-    if (ORIGINAL_KEEP === undefined) delete process.env.KONGCODE_KEEP_SIBLINGS;
-    else process.env.KONGCODE_KEEP_SIBLINGS = ORIGINAL_KEEP;
+    if (ORIGINAL_KEEP === undefined) delete process.env.LAQRUMCODE_KEEP_SIBLINGS;
+    else process.env.LAQRUMCODE_KEEP_SIBLINGS = ORIGINAL_KEEP;
     rmSync(dir, { recursive: true, force: true });
   });
 
@@ -32,49 +32,49 @@ describe("sweepStaleSockets — keep-siblings semantics (KONGCODE_KEEP_SIBLINGS=
 
   it("removes socket files whose PID is dead (ESRCH)", () => {
     // PID 99999999 is well above the typical pid_max and effectively guaranteed dead.
-    touch(".kongcode-99999999.sock");
+    touch(".laqrumcode-99999999.sock");
     sweepStaleSockets(dir, process.pid);
-    expect(existsSync(join(dir, ".kongcode-99999999.sock"))).toBe(false);
+    expect(existsSync(join(dir, ".laqrumcode-99999999.sock"))).toBe(false);
   });
 
   it("preserves the own-pid socket", () => {
-    touch(`.kongcode-${process.pid}.sock`);
+    touch(`.laqrumcode-${process.pid}.sock`);
     sweepStaleSockets(dir, process.pid);
-    expect(existsSync(join(dir, `.kongcode-${process.pid}.sock`))).toBe(true);
+    expect(existsSync(join(dir, `.laqrumcode-${process.pid}.sock`))).toBe(true);
   });
 
   it("preserves a socket whose PID is currently alive", () => {
     // Use the parent pid — guaranteed alive while this test runs.
     const aliveParent = process.ppid;
-    touch(`.kongcode-${aliveParent}.sock`);
+    touch(`.laqrumcode-${aliveParent}.sock`);
     sweepStaleSockets(dir, process.pid);
-    expect(existsSync(join(dir, `.kongcode-${aliveParent}.sock`))).toBe(true);
+    expect(existsSync(join(dir, `.laqrumcode-${aliveParent}.sock`))).toBe(true);
   });
 
-  it("ignores files that don't match the .kongcode-<pid>.sock pattern", () => {
-    touch(".kongcode.sock"); // legacy single-socket name — no pid
-    touch(".kongcode-port"); // port file
+  it("ignores files that don't match the .laqrumcode-<pid>.sock pattern", () => {
+    touch(".laqrumcode.sock"); // legacy single-socket name — no pid
+    touch(".laqrumcode-port"); // port file
     touch("random.txt");
     sweepStaleSockets(dir, process.pid);
-    expect(existsSync(join(dir, ".kongcode.sock"))).toBe(true);
-    expect(existsSync(join(dir, ".kongcode-port"))).toBe(true);
+    expect(existsSync(join(dir, ".laqrumcode.sock"))).toBe(true);
+    expect(existsSync(join(dir, ".laqrumcode-port"))).toBe(true);
     expect(existsSync(join(dir, "random.txt"))).toBe(true);
   });
 
   it("mixed case: sweeps dead, keeps alive + own + non-matching in one pass", () => {
-    touch(".kongcode-99999999.sock"); // dead
-    touch(".kongcode-99999998.sock"); // dead
-    touch(`.kongcode-${process.pid}.sock`); // own
-    touch(`.kongcode-${process.ppid}.sock`); // alive
-    touch(".kongcode.sock"); // legacy
+    touch(".laqrumcode-99999999.sock"); // dead
+    touch(".laqrumcode-99999998.sock"); // dead
+    touch(`.laqrumcode-${process.pid}.sock`); // own
+    touch(`.laqrumcode-${process.ppid}.sock`); // alive
+    touch(".laqrumcode.sock"); // legacy
 
     sweepStaleSockets(dir, process.pid);
 
-    expect(existsSync(join(dir, ".kongcode-99999999.sock"))).toBe(false);
-    expect(existsSync(join(dir, ".kongcode-99999998.sock"))).toBe(false);
-    expect(existsSync(join(dir, `.kongcode-${process.pid}.sock`))).toBe(true);
-    expect(existsSync(join(dir, `.kongcode-${process.ppid}.sock`))).toBe(true);
-    expect(existsSync(join(dir, ".kongcode.sock"))).toBe(true);
+    expect(existsSync(join(dir, ".laqrumcode-99999999.sock"))).toBe(false);
+    expect(existsSync(join(dir, ".laqrumcode-99999998.sock"))).toBe(false);
+    expect(existsSync(join(dir, `.laqrumcode-${process.pid}.sock`))).toBe(true);
+    expect(existsSync(join(dir, `.laqrumcode-${process.ppid}.sock`))).toBe(true);
+    expect(existsSync(join(dir, ".laqrumcode.sock"))).toBe(true);
   });
 
   it("is a no-op on a non-existent directory", () => {
@@ -82,7 +82,7 @@ describe("sweepStaleSockets — keep-siblings semantics (KONGCODE_KEEP_SIBLINGS=
   });
 });
 
-// The reaper's SIGTERM path depends on `cmdlineLooksLikeKongcodeMcp` returning
+// The reaper's SIGTERM path depends on `cmdlineLooksLikeLaqrumcodeMcp` returning
 // a definitive true/false, which it only does on Linux via /proc/<pid>/cmdline.
 // On macOS/Windows the helper returns null and the sweep deliberately skips
 // SIGTERM (defense-in-depth on PID recycling). Tests in this suite assert the
@@ -96,20 +96,20 @@ describe.runIf(process.platform === "linux")("sweepStaleSockets — reaper (defa
   }
 
   function spawnSleeper(): Promise<ChildProcess> {
-    // Round-2 safety patch added cmdlineLooksLikeKongcodeMcp(pid): before
+    // Round-2 safety patch added cmdlineLooksLikeLaqrumcodeMcp(pid): before
     // SIGTERMing a sibling PID, /proc/<pid>/cmdline must contain "node" AND
-    // one of the kongcode-MCP markers ("mcp-client/index.js", "kongcode-mcp",
-    // or "kongcode" + "mcp"). A bare `bash -c "sleep 30"` won't match and the
+    // one of the laqrumcode-MCP markers ("mcp-client/index.js", "laqrumcode-mcp",
+    // or "laqrumcode" + "mcp"). A bare `bash -c "sleep 30"` won't match and the
     // reaper correctly refuses to SIGTERM it (PID-recycle protection).
     //
     // To exercise the reaper end-to-end we spawn node with a marker argument
     // so the cmdline check passes. The argv is purely cosmetic from node's
-    // perspective — it never reads "kongcode-mcp" — but /proc/PID/cmdline
+    // perspective — it never reads "laqrumcode-mcp" — but /proc/PID/cmdline
     // sees the exact bytes we exec'd with.
     return new Promise((resolve, reject) => {
       const c = spawn(
         process.execPath,
-        ["-e", "setTimeout(()=>{}, 30000)", "kongcode-mcp"],
+        ["-e", "setTimeout(()=>{}, 30000)", "laqrumcode-mcp"],
         { stdio: "ignore", detached: false },
       );
       c.on("error", reject);
@@ -126,8 +126,8 @@ describe.runIf(process.platform === "linux")("sweepStaleSockets — reaper (defa
   }
 
   beforeEach(() => {
-    delete process.env.KONGCODE_KEEP_SIBLINGS; // ensure default-on
-    dir = mkdtempSync(join(tmpdir(), "kongcode-reap-"));
+    delete process.env.LAQRUMCODE_KEEP_SIBLINGS; // ensure default-on
+    dir = mkdtempSync(join(tmpdir(), "laqrumcode-reap-"));
   });
 
   afterEach(() => {
@@ -135,14 +135,14 @@ describe.runIf(process.platform === "linux")("sweepStaleSockets — reaper (defa
       try { child.kill("SIGKILL"); } catch { /* ignore */ }
     }
     child = null;
-    if (ORIGINAL_KEEP !== undefined) process.env.KONGCODE_KEEP_SIBLINGS = ORIGINAL_KEEP;
+    if (ORIGINAL_KEEP !== undefined) process.env.LAQRUMCODE_KEEP_SIBLINGS = ORIGINAL_KEEP;
     rmSync(dir, { recursive: true, force: true });
   });
 
   it("SIGTERMs an alive sibling MCP and removes its socket file", async () => {
     child = await spawnSleeper();
     const siblingPid = child.pid!;
-    touch(`.kongcode-${siblingPid}.sock`);
+    touch(`.laqrumcode-${siblingPid}.sock`);
 
     sweepStaleSockets(dir, process.pid);
 
@@ -157,39 +157,39 @@ describe.runIf(process.platform === "linux")("sweepStaleSockets — reaper (defa
     } else {
       expect(child.signalCode).toBe("SIGTERM");
     }
-    expect(existsSync(join(dir, `.kongcode-${siblingPid}.sock`))).toBe(false);
+    expect(existsSync(join(dir, `.laqrumcode-${siblingPid}.sock`))).toBe(false);
   });
 
-  it("opt-out via KONGCODE_KEEP_SIBLINGS=1 leaves the sibling alive", async () => {
-    process.env.KONGCODE_KEEP_SIBLINGS = "1";
+  it("opt-out via LAQRUMCODE_KEEP_SIBLINGS=1 leaves the sibling alive", async () => {
+    process.env.LAQRUMCODE_KEEP_SIBLINGS = "1";
     child = await spawnSleeper();
     const siblingPid = child.pid!;
-    touch(`.kongcode-${siblingPid}.sock`);
+    touch(`.laqrumcode-${siblingPid}.sock`);
 
     sweepStaleSockets(dir, process.pid);
 
     // Sibling should still be alive (not SIGTERMed)
     expect(child.exitCode).toBeNull();
     expect(child.signalCode).toBeNull();
-    expect(existsSync(join(dir, `.kongcode-${siblingPid}.sock`))).toBe(true);
-    delete process.env.KONGCODE_KEEP_SIBLINGS;
+    expect(existsSync(join(dir, `.laqrumcode-${siblingPid}.sock`))).toBe(true);
+    delete process.env.LAQRUMCODE_KEEP_SIBLINGS;
   });
 
   it("never reaps the own-pid socket even when default-on", () => {
-    touch(`.kongcode-${process.pid}.sock`);
+    touch(`.laqrumcode-${process.pid}.sock`);
     sweepStaleSockets(dir, process.pid);
-    expect(existsSync(join(dir, `.kongcode-${process.pid}.sock`))).toBe(true);
+    expect(existsSync(join(dir, `.laqrumcode-${process.pid}.sock`))).toBe(true);
   });
 
   it("still removes truly-dead PID socket files (ESRCH path unchanged)", () => {
-    touch(".kongcode-99999999.sock");
+    touch(".laqrumcode-99999999.sock");
     sweepStaleSockets(dir, process.pid);
-    expect(existsSync(join(dir, ".kongcode-99999999.sock"))).toBe(false);
+    expect(existsSync(join(dir, ".laqrumcode-99999999.sock"))).toBe(false);
   });
 
   // Negative-cmdline branch: spawn a NON-node child (`bash -c 'sleep 30'`) so
-  // /proc/PID/cmdline does NOT contain "node" and the kongcode-MCP markers
-  // are absent. cmdlineLooksLikeKongcodeMcp must return false, and the reaper
+  // /proc/PID/cmdline does NOT contain "node" and the laqrumcode-MCP markers
+  // are absent. cmdlineLooksLikeLaqrumcodeMcp must return false, and the reaper
   // must skip SIGTERM (PID-recycle protection) — while still unlinking the
   // orphan socket file. This is the "recycled PID, innocent process"
   // scenario that the round-2 cmdline guard was added to defend against.
@@ -206,7 +206,7 @@ describe.runIf(process.platform === "linux")("sweepStaleSockets — reaper (defa
     });
     child = c;
     const innocentPid = c.pid!;
-    touch(`.kongcode-${innocentPid}.sock`);
+    touch(`.laqrumcode-${innocentPid}.sock`);
 
     sweepStaleSockets(dir, process.pid);
 
@@ -224,27 +224,27 @@ describe.runIf(process.platform === "linux")("sweepStaleSockets — reaper (defa
     // 2. The orphan socket file must have been unlinked. The reaper still
     //    cleans up the stale socket entry — it just doesn't signal the
     //    stranger process whose PID was recycled into that filename.
-    expect(existsSync(join(dir, `.kongcode-${innocentPid}.sock`))).toBe(false);
+    expect(existsSync(join(dir, `.laqrumcode-${innocentPid}.sock`))).toBe(false);
   });
 });
 
-// ── cmdlineLooksLikeKongcodeMcp: contract tests (direct unit) ────────────────
+// ── cmdlineLooksLikeLaqrumcodeMcp: contract tests (direct unit) ────────────────
 //
-// The sweep reaper above exercises cmdlineLooksLikeKongcodeMcp via real
+// The sweep reaper above exercises cmdlineLooksLikeLaqrumcodeMcp via real
 // processes. These tests pin the function's three return values directly
 // through the __testing export so future refactors keep the contract:
 //
-//   true  → kongcode MCP confirmed (safe to SIGTERM)
+//   true  → laqrumcode MCP confirmed (safe to SIGTERM)
 //   false → different process / PID recycled / cmdline unreadable
 //   null  → non-Linux platform (cannot determine — skip SIGTERM by default)
 //
-describe("cmdlineLooksLikeKongcodeMcp — contract", () => {
+describe("cmdlineLooksLikeLaqrumcodeMcp — contract", () => {
   it("returns false for a missing /proc entry (PID not running)", () => {
     if (process.platform !== "linux") return;
     // 99999999 is well above the typical pid_max — /proc/<pid>/cmdline is
     // guaranteed missing, the readFileSync throws ENOENT, the catch returns
     // false. (Caller treats this as 'stale, safe to unlink'.)
-    const result = httpApiTesting.cmdlineLooksLikeKongcodeMcp(99999999);
+    const result = httpApiTesting.cmdlineLooksLikeLaqrumcodeMcp(99999999);
     expect(result).toBe(false);
   });
 
@@ -256,7 +256,7 @@ describe("cmdlineLooksLikeKongcodeMcp — contract", () => {
       c.on("spawn", () => resolve(c));
     });
     try {
-      const result = httpApiTesting.cmdlineLooksLikeKongcodeMcp(proc.pid!);
+      const result = httpApiTesting.cmdlineLooksLikeLaqrumcodeMcp(proc.pid!);
       expect(result).toBe(false);
     } finally {
       try { proc.kill("SIGKILL"); } catch { /* ignore */ }
@@ -276,7 +276,7 @@ describe("cmdlineLooksLikeKongcodeMcp — contract", () => {
     });
     try {
       const mod = await import("../src/http-api.js");
-      const result = mod.__testing.cmdlineLooksLikeKongcodeMcp(process.pid);
+      const result = mod.__testing.cmdlineLooksLikeLaqrumcodeMcp(process.pid);
       expect(result).toBeNull();
     } finally {
       vi.doUnmock("node:os");
@@ -291,13 +291,13 @@ describe("cmdlineLooksLikeKongcodeMcp — contract", () => {
 // up `auth-token.<pid>.tmp` orphans from previously-crashed daemons. The
 // logic is inline in startHttpApi (not separately exported), so this suite
 // reproduces it bit-for-bit against a tmp directory, exercising the same
-// `cmdlineLooksLikeKongcodeMcp` helper that the real path calls. Any change
+// `cmdlineLooksLikeLaqrumcodeMcp` helper that the real path calls. Any change
 // to the production sweep rules must be mirrored here, and the source-side
-// `cmdlineLooksLikeKongcodeMcp` is the contract surface that decides.
+// `cmdlineLooksLikeLaqrumcodeMcp` is the contract surface that decides.
 //
 // Sweep rules (must stay in lockstep with src/http-api.ts:517-541):
 //   - file name matches /^auth-token\.(\d+)\.tmp$/ → consider for sweep
-//   - PID alive (process.kill(pid,0) succeeds) AND cmdline matches kongcode
+//   - PID alive (process.kill(pid,0) succeeds) AND cmdline matches laqrumcode
 //     MCP → leave alone
 //   - any other case (dead PID, recycled PID, non-Linux cmdline null) →
 //     unlink the orphan
@@ -316,7 +316,7 @@ function runAuthTokenSweep(cacheDir: string): void {
       const code = (e as NodeJS.ErrnoException)?.code;
       alive = code !== "ESRCH";
     }
-    if (alive && httpApiTesting.cmdlineLooksLikeKongcodeMcp(orphanPid) === true) continue;
+    if (alive && httpApiTesting.cmdlineLooksLikeLaqrumcodeMcp(orphanPid) === true) continue;
     try { unlinkSync(join(cacheDir, name)); } catch { /* ignore */ }
   }
 }
@@ -325,7 +325,7 @@ describe("auth-token tmpfile sweep — startHttpApi inline sweep contract", () =
   let dir: string;
 
   beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), "kongcode-authtoken-sweep-"));
+    dir = mkdtempSync(join(tmpdir(), "laqrumcode-authtoken-sweep-"));
   });
 
   afterEach(() => {
@@ -346,14 +346,14 @@ describe("auth-token tmpfile sweep — startHttpApi inline sweep contract", () =
     expect(existsSync(join(dir, "auth-token.99999999.tmp"))).toBe(false);
   });
 
-  it("does NOT unlink a tmpfile whose PID is alive AND cmdline matches kongcode MCP", async () => {
+  it("does NOT unlink a tmpfile whose PID is alive AND cmdline matches laqrumcode MCP", async () => {
     if (process.platform !== "linux") return; // cmdline check is Linux-only
-    // Spawn a node process with a kongcode-mcp argv marker so
-    // cmdlineLooksLikeKongcodeMcp returns true.
+    // Spawn a node process with a laqrumcode-mcp argv marker so
+    // cmdlineLooksLikeLaqrumcodeMcp returns true.
     const proc = await new Promise<ChildProcess>((resolve, reject) => {
       const c = spawn(
         process.execPath,
-        ["-e", "setTimeout(()=>{}, 30000)", "kongcode-mcp"],
+        ["-e", "setTimeout(()=>{}, 30000)", "laqrumcode-mcp"],
         { stdio: "ignore", detached: false },
       );
       c.on("error", reject);
@@ -372,9 +372,9 @@ describe("auth-token tmpfile sweep — startHttpApi inline sweep contract", () =
     }
   });
 
-  it("unlinks a live PID's tmpfile when cmdline does NOT match kongcode (recycled-PID guard)", async () => {
+  it("unlinks a live PID's tmpfile when cmdline does NOT match laqrumcode (recycled-PID guard)", async () => {
     if (process.platform !== "linux") return;
-    // bash sleep — alive PID, cmdline does NOT contain node + kongcode markers.
+    // bash sleep — alive PID, cmdline does NOT contain node + laqrumcode markers.
     const proc = await new Promise<ChildProcess>((resolve, reject) => {
       const c = spawn("bash", ["-c", "sleep 30"], { stdio: "ignore", detached: false });
       c.on("error", reject);
@@ -410,7 +410,7 @@ describe("auth-token tmpfile sweep — startHttpApi inline sweep contract", () =
 
   it("sweeps cautiously on non-Linux: NEVER SIGTERMs and treats cmdline=null as 'not us'", async () => {
     // The sweep code path never sends SIGTERM — it only unlinks. The
-    // non-Linux behavior is governed by cmdlineLooksLikeKongcodeMcp returning
+    // non-Linux behavior is governed by cmdlineLooksLikeLaqrumcodeMcp returning
     // null, which the inline sweep code treats as "not us" → unlink the
     // orphan. Mock platform() to "darwin" via doMock + re-import, then run
     // an equivalent sweep using the re-imported testing surface.
@@ -427,7 +427,7 @@ describe("auth-token tmpfile sweep — startHttpApi inline sweep contract", () =
       touch(`auth-token.${pidToTest}.tmp`);
 
       // Behavior-equivalent sweep using the mocked module's helper.
-      const cmdlineCheck = mod.__testing.cmdlineLooksLikeKongcodeMcp(pidToTest);
+      const cmdlineCheck = mod.__testing.cmdlineLooksLikeLaqrumcodeMcp(pidToTest);
       expect(cmdlineCheck).toBeNull();
 
       // Confirm: the inline sweep guards via `=== true`. null !== true,
@@ -441,7 +441,7 @@ describe("auth-token tmpfile sweep — startHttpApi inline sweep contract", () =
         try { process.kill(pid, 0); } catch (e: unknown) {
           alive = (e as NodeJS.ErrnoException)?.code !== "ESRCH";
         }
-        if (alive && mod.__testing.cmdlineLooksLikeKongcodeMcp(pid) === true) continue;
+        if (alive && mod.__testing.cmdlineLooksLikeLaqrumcodeMcp(pid) === true) continue;
         try { unlinkSync(join(dir, name)); } catch { /* ignore */ }
       }
 

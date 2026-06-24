@@ -3,7 +3,7 @@
  * Post-deploy verifier.
  *
  * Run AFTER `node scripts/predeploy-dedup.mjs --apply` succeeded and the
- * kongcode daemon has been restarted. Confirms the deploy actually landed:
+ * laqrumcode daemon has been restarted. Confirms the deploy actually landed:
  *
  *   - DB ping succeeds (config + ns/db match the live daemon).
  *   - All 9 UNIQUE indexes Agent 1 added (+ artifact_path_unique from Agent 11)
@@ -144,7 +144,7 @@ function checkDaemonPid(cacheDir) {
   // Pre-0.7.65: bare PID string like "3174755". JSON.parse() will happily
   // parse "3174755" as the number 3174755 — so we have to check structure,
   // not just JSON-ness.
-  // 0.7.65+:    JSON { marker: "kongcode-daemon", pid, startedAt, daemonVersion }
+  // 0.7.65+:    JSON { marker: "laqrumcode-daemon", pid, startedAt, daemonVersion }
   let parsed;
   try {
     parsed = JSON.parse(raw);
@@ -153,7 +153,7 @@ function checkDaemonPid(cacheDir) {
   }
   // Object-with-marker = new format. Anything else (number, malformed) = old.
   if (parsed && typeof parsed === "object" && !Array.isArray(parsed)
-      && parsed.marker === "kongcode-daemon" && Number.isFinite(parsed.pid)) {
+      && parsed.marker === "laqrumcode-daemon" && Number.isFinite(parsed.pid)) {
     let ageMs = null;
     if (Number.isFinite(parsed.startedAt) && parsed.startedAt > 0) {
       ageMs = Date.now() - Number(parsed.startedAt);
@@ -277,7 +277,7 @@ async function main() {
     process.exit(2);
   }
   const { url, ns, db: dbName, user, pass } = config.surreal;
-  const cacheDir = config?.paths?.cacheDir ?? join(homedir(), ".kongcode", "cache");
+  const cacheDir = config?.paths?.cacheDir ?? join(homedir(), ".laqrumcode", "cache");
 
   console.log(`[postdeploy] surreal ${url}  ns=${ns}  db=${dbName}`);
   console.log(`[postdeploy] cacheDir=${cacheDir}`);

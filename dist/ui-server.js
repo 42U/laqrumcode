@@ -26,7 +26,7 @@ import { log } from "./engine/log.js";
 let uiServer = null;
 /** dist/ui/ at runtime (this module compiles to dist/ui-server.js). */
 const UI_ASSET_DIR = fileURLToPath(new URL("./ui/", import.meta.url));
-const COOKIE = "kongcode_ui";
+const COOKIE = "laqrumcode_ui";
 const MIME = {
     ".html": "text/html; charset=utf-8",
     ".js": "text/javascript; charset=utf-8",
@@ -54,7 +54,7 @@ export const UI_PORT_BASE = 33000;
  *  cross-user collision (mirrors the managed-surreal port scheme), disjoint from
  *  both the managed-SurrealDB window [18765,28764] AND the daemon IPC window. */
 export function uiPort() {
-    const env = Number(process.env.KONGCODE_UI_PORT);
+    const env = Number(process.env.LAQRUMCODE_UI_PORT);
     if (Number.isFinite(env) && env > 0 && env < 65536)
         return Math.floor(env);
     const uid = typeof process.getuid === "function" ? process.getuid() : 0;
@@ -324,7 +324,7 @@ async function querySandbox(state, query, limit) {
     return { query, available: true, primary: primary.map(shape), neighbors: neighbors.map(shape) };
 }
 // Exported for tests — test/ui-server.test.ts exercises the SQL against a live
-// kong_test DB (the layer where the type::record + queryBatch bugs lived).
+// laqrum_test DB (the layer where the type::record + queryBatch bugs lived).
 export { dashboard, listMemories, listConcepts, graphNeighborhood, nodeDetail, listDirectives, soulView, listSessions, listRetrievalOutcomes, querySandbox, };
 async function handleApi(state, url, res) {
     const p = url.pathname;
@@ -404,7 +404,7 @@ export function uiRequestHandler(state, authToken) {
                 return;
             }
             res.writeHead(401, { "content-type": "text/plain" });
-            res.end("Unauthorized — open kongcode via `node scripts/open-ui.mjs`.");
+            res.end("Unauthorized — open laqrumcode via `node scripts/open-ui.mjs`.");
             return;
         }
         if (req.method !== "GET") {
@@ -431,10 +431,10 @@ export function uiRequestHandler(state, authToken) {
 }
 /**
  * Start the loopback UI server. No-ops (logs once) when the frontend bundle is
- * absent, when KONGCODE_UI=0, or when the port is already bound by a sibling.
+ * absent, when LAQRUMCODE_UI=0, or when the port is already bound by a sibling.
  */
 export async function startUiServer(state, authToken) {
-    if (process.env.KONGCODE_UI === "0")
+    if (process.env.LAQRUMCODE_UI === "0")
         return;
     if (uiServer)
         return;

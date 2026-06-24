@@ -2,7 +2,7 @@
 /**
  * migrate-to-append-only.mjs
  *
- * v0.7.93 migration: kongcode is moving from a destructive-consolidate
+ * v0.7.93 migration: laqrumcode is moving from a destructive-consolidate
  * memory model (DELETE on stale/duplicate rows in garbageCollectMemories,
  * consolidateMemories, soul reset, identity-chunk replacement, etc.) to a
  * strictly append-only model where every row persists and is soft-deactivated

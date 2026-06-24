@@ -2,7 +2,7 @@
  * Soul — the emergent identity document system.
  *
  * Unlike hardcoded identity chunks, the Soul document is written BY the agent
- * based on its own graph data. It lives in SurrealDB as `soul:kongbrain` and
+ * based on its own graph data. It lives in SurrealDB as `soul:laqrumbrain` and
  * evolves over time through experience-grounded revisions.
  *
  * Graduation is a staged process, not a binary gate. There are 8 gates total:
@@ -19,7 +19,7 @@
  * An agent that meets all 7 volume thresholds but has terrible quality scores
  * will NOT graduate — it needs to improve before self-authoring makes sense.
  *
- * Ported from kongbrain — takes SurrealStore/EmbeddingService as params.
+ * Ported from laqrumbrain — takes SurrealStore/EmbeddingService as params.
  */
 
 import type { SurrealStore } from "./surreal.js";
@@ -487,7 +487,7 @@ export interface SoulDocument {
 export async function hasSoul(store: SurrealStore): Promise<boolean> {
   if (!store.isAvailable()) return false;
   try {
-    const rows = await store.queryFirst<{ id: string }>(`SELECT id FROM soul:kongbrain`);
+    const rows = await store.queryFirst<{ id: string }>(`SELECT id FROM soul:laqrumbrain`);
     return rows.length > 0;
   } catch {
     return false;
@@ -497,7 +497,7 @@ export async function hasSoul(store: SurrealStore): Promise<boolean> {
 export async function getSoul(store: SurrealStore): Promise<SoulDocument | null> {
   if (!store.isAvailable()) return null;
   try {
-    const rows = await store.queryFirst<SoulDocument>(`SELECT * FROM soul:kongbrain`);
+    const rows = await store.queryFirst<SoulDocument>(`SELECT * FROM soul:laqrumbrain`);
     return rows[0] ?? null;
   } catch {
     return null;
@@ -516,17 +516,17 @@ export async function createSoul(
   // inner-object timestamp stays as a string because revisions is
   // `array<object>` (unconstrained inner types), not a datetime field.
   const now = new Date().toISOString();
-  // K42: the hasSoul()→CREATE gap is a TOCTOU window. soul:kongbrain is a
+  // K42: the hasSoul()→CREATE gap is a TOCTOU window. soul:laqrumbrain is a
   // FIXED record id, so a concurrent caller (two session-end pipelines, or a
   // retry) that slips between the check and the CREATE causes the second
-  // CREATE to throw "Database record `soul:kongbrain` already exists". Treat
+  // CREATE to throw "Database record `soul:laqrumbrain` already exists". Treat
   // that as idempotent success — the soul exists, which is what the caller
   // wanted. Mirrors the markTerminal/CAS idempotency philosophy. Re-check
   // hasSoul after catch so a genuine write failure still returns false.
   try {
-    await store.queryExec(`CREATE soul:kongbrain CONTENT $data`, {
+    await store.queryExec(`CREATE soul:laqrumbrain CONTENT $data`, {
       data: {
-        agent_id: "kongbrain",
+        agent_id: "laqrumbrain",
         ...doc,
         revisions: [{
           timestamp: now,
@@ -563,7 +563,7 @@ export async function reviseSoul(
     // inner fields).
     const now = new Date().toISOString();
     await store.queryExec(
-      `UPDATE soul:kongbrain SET
+      `UPDATE soul:laqrumbrain SET
         ${section} = $newValue,
         updated_at = time::now(),
         revisions += $revision`,

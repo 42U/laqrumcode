@@ -1,5 +1,5 @@
 {
-  "$comment": "Node Single Executable Application config. Used by 'npm run sea' to produce a self-contained kongcode binary that doesn't require Node on the user's machine. The schema asset is embedded so the binary is fully portable.",
+  "$comment": "Node Single Executable Application config. Used by 'npm run sea' to produce a self-contained laqrumcode binary that doesn't require Node on the user's machine. The schema asset is embedded so the binary is fully portable.",
   "main": "dist/mcp-server.bundle.cjs",
   "output": "dist/sea-prep.blob",
   "useSnapshot": false,

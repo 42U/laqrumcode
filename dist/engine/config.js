@@ -10,11 +10,11 @@ export function parsePluginConfig(raw) {
     const thresholds = (raw?.thresholds ?? {});
     const paths = (raw?.paths ?? {});
     const cacheDir = (typeof paths.cacheDir === "string" && paths.cacheDir ? paths.cacheDir : null) ??
-        (process.env.KONGCODE_CACHE_DIR || null) ??
-        join(homedir(), ".kongcode", "cache");
+        (process.env.LAQRUMCODE_CACHE_DIR || null) ??
+        join(homedir(), ".laqrumcode", "cache");
     const dataDir = (typeof paths.dataDir === "string" && paths.dataDir ? paths.dataDir : null) ??
-        (process.env.KONGCODE_DATA_DIR || null) ??
-        join(homedir(), ".kongcode", "data");
+        (process.env.LAQRUMCODE_DATA_DIR || null) ??
+        join(homedir(), ".laqrumcode", "data");
     const surrealBinPath = (typeof paths.surrealBinPath === "string" && paths.surrealBinPath ? paths.surrealBinPath : null) ??
         (process.env.SURREAL_BIN_PATH || null);
     // Priority: plugin config > env vars > defaults
@@ -37,7 +37,7 @@ export function parsePluginConfig(raw) {
             },
             user: (typeof surreal.user === "string" && surreal.user ? surreal.user : null) ?? (process.env.SURREAL_USER || null) ?? "root",
             pass: (typeof surreal.pass === "string" && surreal.pass ? surreal.pass : null) ?? (process.env.SURREAL_PASS || null) ?? "root",
-            ns: (typeof surreal.ns === "string" && surreal.ns ? surreal.ns : null) ?? (process.env.SURREAL_NS || null) ?? "kong",
+            ns: (typeof surreal.ns === "string" && surreal.ns ? surreal.ns : null) ?? (process.env.SURREAL_NS || null) ?? "laqrum",
             db: (typeof surreal.db === "string" && surreal.db ? surreal.db : null) ?? (process.env.SURREAL_DB || null) ?? "memory",
         },
         embedding: {
@@ -49,7 +49,7 @@ export function parsePluginConfig(raw) {
         },
         reranker: (() => {
             const reranker = (raw?.reranker ?? {});
-            const enabled = process.env.KONGCODE_RERANKER_DISABLED !== "1";
+            const enabled = process.env.LAQRUMCODE_RERANKER_DISABLED !== "1";
             const modelPath = process.env.RERANKER_MODEL_PATH ??
                 (typeof reranker.modelPath === "string"
                     ? reranker.modelPath

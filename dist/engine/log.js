@@ -54,9 +54,9 @@ export function rotateLogIfOversized(path, capBytes = LOG_ROTATE_CAP_BYTES) {
         return false;
     }
 }
-const currentLevel = process.env.KONGCODE_LOG_LEVEL ?? "warn";
+const currentLevel = process.env.LAQRUMCODE_LOG_LEVEL ?? "warn";
 if (currentLevel === "debug") {
-    console.warn("[agent-memory] KONGCODE_LOG_LEVEL=debug — logs may contain user prompts and query data. Do not use in shared environments.");
+    console.warn("[agent-memory] LAQRUMCODE_LOG_LEVEL=debug — logs may contain user prompts and query data. Do not use in shared environments.");
 }
 /**
  * Default console depth is 2, which collapses nested `.cause.cause` chains to

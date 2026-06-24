@@ -7,7 +7,7 @@
  * the response is compact enough to inject into a hook turn if things go
  * sideways.
  *
- * This is the programmatic counterpart to the skills/kongcode-health
+ * This is the programmatic counterpart to the skills/laqrumcode-health
  * text-based skill — same data, structured output.
  */
 import { statSync } from "node:fs";
@@ -113,7 +113,7 @@ export async function handleMemoryHealth(state, _session, _args) {
     // forensics found a 65.7GB store wrapping ~0.3GB of live data (~200x) —
     // invisible from SQL, so it must be watched from the filesystem.
     //
-    // M3 fix: the check used to be gated SOLELY on process.env.KONGCODE_STORE_PATH,
+    // M3 fix: the check used to be gated SOLELY on process.env.LAQRUMCODE_STORE_PATH,
     // which is NEVER set for a managed single-host install (the daemon bootstraps
     // its own SurrealDB child at config.paths.dataDir and doesn't export that env
     // var) — so the amplification check silently never ran for the exact 1M-install
@@ -121,7 +121,7 @@ export async function handleMemoryHealth(state, _session, _args) {
     // directly, with the env var kept as an explicit operator override (wins if set,
     // e.g. an external container pointing at a non-default location).
     try {
-        const storePath = process.env.KONGCODE_STORE_PATH ??
+        const storePath = process.env.LAQRUMCODE_STORE_PATH ??
             (state.config?.paths?.dataDir || undefined);
         if (storePath) {
             const { statSync, readdirSync } = await import("node:fs");
@@ -370,7 +370,7 @@ export async function handleMemoryHealth(state, _session, _args) {
                     message: `daemon dist drift detected: ${DAEMON_ENTRYPOINT_PATH} mtime advanced ` +
                         `since daemon startup (${ageHours}h ago). The running daemon is on ` +
                         `stale code; restart it to pick up changes. Pattern: ` +
-                        `\`ps aux | grep kongcode/dist/daemon\` then \`kill <PID>\` ` +
+                        `\`ps aux | grep laqrumcode/dist/daemon\` then \`kill <PID>\` ` +
                         `(auto-respawns on next IPC connect). See memory:p5s9vfihd65pnffomztp.`,
                 });
             }

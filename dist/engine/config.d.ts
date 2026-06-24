@@ -12,7 +12,7 @@ export interface EmbeddingConfig {
 }
 export interface RerankerConfig {
     /** When false, recall skips the cross-encoder rerank stage entirely.
-     *  Disabled via KONGCODE_RERANKER_DISABLED=1 — the model file (~606MB) is
+     *  Disabled via LAQRUMCODE_RERANKER_DISABLED=1 — the model file (~606MB) is
      *  not downloaded, recall falls back to WMR/ACAN scoring. */
     enabled: boolean;
     /** Path to the bge-reranker-v2-m3 GGUF file. Default
@@ -33,9 +33,9 @@ export interface ThresholdConfig {
     acanTrainingThreshold: number;
 }
 export interface PathsConfig {
-    /** Where downloaded artifacts (SurrealDB binary, model) live. Default ~/.kongcode/cache. Survives plugin updates. */
+    /** Where downloaded artifacts (SurrealDB binary, model) live. Default ~/.laqrumcode/cache. Survives plugin updates. */
     cacheDir: string;
-    /** Where the bootstrapped SurrealDB child process stores its surrealkv data. Default ~/.kongcode/data. */
+    /** Where the bootstrapped SurrealDB child process stores its surrealkv data. Default ~/.laqrumcode/data. */
     dataDir: string;
     /** Path to the SurrealDB binary. Default <cacheDir>/surreal-<version>/<binaryName>. */
     surrealBinPath: string | null;

@@ -130,7 +130,7 @@ export async function ensureEdgeIndexes(store, cacheDir) {
             `timeout-flagged tables re-arm after deleting their flag entry.`);
     }
     else if (defined.length > 0) {
-        // NOTE (T5): the default KONGCODE_LOG_LEVEL is "warn", so log.info lines
+        // NOTE (T5): the default LAQRUMCODE_LOG_LEVEL is "warn", so log.info lines
         // never reach daemon.log — exactly why post-migration boots looked
         // "silent" (2026-06-10 diagnosis). The flagged→armed RECOVERY transition
         // is the receipt the dedup-edges runbook points operators at, so it must

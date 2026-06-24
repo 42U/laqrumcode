@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Pre-commit guard: version sync check.
 #
-# kongcode has THREE version locations that must match:
+# laqrumcode has THREE version locations that must match:
 #   1. package.json              — npm version
 #   2. .claude-plugin/plugin.json — what /plugin command reports
 #   3. src/daemon/index.ts DAEMON_VERSION + src/mcp-client/index.ts CLIENT_VERSION

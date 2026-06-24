@@ -2,7 +2,7 @@
  * E11 / E13 / E17 — maintenance efficiency at a large per-install graph.
  *
  * Regression coverage for the enterprise-readiness "maintenance-perf" lane.
- * kongcode is ONE daemon + local SurrealDB per host, so a real install can grow
+ * laqrumcode is ONE daemon + local SurrealDB per host, so a real install can grow
  * a single large graph that runs these maintenance passes every cycle — the
  * cost has to stay bounded.
  *
@@ -149,7 +149,7 @@ describe("E13 gcSweepOrphanedEdges — weekly throttle of the scheduled sweep", 
 // predicate parses + works on a real DB.
 // ---------------------------------------------------------------------------
 const SKIP = process.env.SKIP_INTEGRATION === "1";
-const TEST_NS = "kong_test";
+const TEST_NS = "laqrum_test";
 const TEST_DB = `e11e13e17_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 let store: SurrealStore;
 

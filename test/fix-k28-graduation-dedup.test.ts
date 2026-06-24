@@ -5,7 +5,7 @@
  * recomputing it (the old code ran it ~2x on every UserPromptSubmit).
  *
  * Strategy: count the marker queries that hasSoul() and checkGraduation()
- * issue (`FROM soul:kongbrain`, `FROM session GROUP ALL`). With the fix each
+ * issue (`FROM soul:laqrumbrain`, `FROM session GROUP ALL`). With the fix each
  * fires exactly once per detectAnomalies() call. Before the fix they fired
  * twice (once per graduation detector). This is a pure mock test — it would
  * FAIL against the pre-fix code where the two detectors each imported soul.js
@@ -24,7 +24,7 @@ function countingStore() {
     queryMulti: vi.fn(async () => undefined),
     queryFirst: vi.fn(async (sql: string) => {
       // hasSoul()
-      if (sql.includes("FROM soul:kongbrain")) { bump("hasSoul"); return []; }
+      if (sql.includes("FROM soul:laqrumbrain")) { bump("hasSoul"); return []; }
       // checkGraduation() volume signal — one representative marker query.
       if (sql.includes("FROM session GROUP ALL")) { bump("checkGraduation"); return [{ count: 0 }]; }
       // Everything else (other signal queries, anomaly detectors) returns empty.

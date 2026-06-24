@@ -2,13 +2,13 @@
  * Hook strictness profiles.
  *
  * Three profiles control which gates fire:
- *   - minimal:  no gates, kongcode pre-0.7.47 behavior.
+ *   - minimal:  no gates, laqrumcode pre-0.7.47 behavior.
  *   - standard: edit-gate on first Edit/Write/MultiEdit + config-protection
  *               on linter/formatter configs. Default.
  *   - strict:   standard + bash-gate on destructive shell commands.
  *
- * Profile is read once from KONGCODE_HOOK_PROFILE at module load. Per-hook
- * disable is read from KONGCODE_DISABLED_HOOKS (comma-separated ids).
+ * Profile is read once from LAQRUMCODE_HOOK_PROFILE at module load. Per-hook
+ * disable is read from LAQRUMCODE_DISABLED_HOOKS (comma-separated ids).
  * Both are env-only — daemon restart required to change them, same as every
  * other env-driven setting.
  */
@@ -21,13 +21,13 @@ let cachedProfile: HookProfile | null = null;
 let cachedDisabled: ReadonlySet<string> | null = null;
 
 function readProfile(): HookProfile {
-  const raw = (process.env.KONGCODE_HOOK_PROFILE ?? "").trim().toLowerCase();
+  const raw = (process.env.LAQRUMCODE_HOOK_PROFILE ?? "").trim().toLowerCase();
   if (raw && VALID_PROFILES.has(raw as HookProfile)) return raw as HookProfile;
   return "standard";
 }
 
 function readDisabled(): ReadonlySet<string> {
-  const raw = (process.env.KONGCODE_DISABLED_HOOKS ?? "").trim();
+  const raw = (process.env.LAQRUMCODE_DISABLED_HOOKS ?? "").trim();
   if (!raw) return new Set();
   return new Set(raw.split(",").map((s) => s.trim()).filter(Boolean));
 }
@@ -101,10 +101,10 @@ export async function seedHookProfileDirective(
     `Under standard/strict, the FIRST Edit/Write/MultiEdit to a file in this session ` +
     `is BLOCKED until the path appears in turn text — recall it, Read it, or wait for ` +
     `the user to name it. Edits to lint/format configs (.eslintrc, biome.json, ` +
-    `prettier.*, ruff.toml, etc.) are blocked unless KONGCODE_ALLOW_CONFIG_EDIT=1. ` +
+    `prettier.*, ruff.toml, etc.) are blocked unless LAQRUMCODE_ALLOW_CONFIG_EDIT=1. ` +
     `In strict, destructive Bash patterns (rm -rf, git reset --hard, git push --force, ` +
     `DROP TABLE, DELETE FROM without WHERE, TRUNCATE) require user authorization or ` +
-    `prior session mention. Override profile with KONGCODE_HOOK_PROFILE=minimal|standard|strict; ` +
+    `prior session mention. Override profile with LAQRUMCODE_HOOK_PROFILE=minimal|standard|strict; ` +
     `daemon restart required.`;
 
   // Stable marker so we can dedupe across daemon restarts.

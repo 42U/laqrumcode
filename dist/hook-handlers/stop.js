@@ -138,7 +138,7 @@ export async function handleStop(state, payload) {
         session._pushDetected = false;
         return {
             decision: "block",
-            reason: "[KongCode] Remember your tier0 directives are important to the user and make you more helpful. " +
+            reason: "[LaqrumCode] Remember your tier0 directives are important to the user and make you more helpful. " +
                 "You just ran git push. Before declaring done: " +
                 "(1) Check CI status with `gh run list` or `gh run watch`. " +
                 "(2) If CI hasn't triggered (e.g. only fires on tags), state that explicitly. " +

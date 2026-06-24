@@ -14,7 +14,7 @@ export declare function privacyConfigPath(): string;
  *  pattern is logged and skipped. Extracted from loadPrivacyConfig so it is
  *  unit-testable without filesystem IO. */
 export declare function parsePrivacyConfig(raw: unknown): PrivacyConfig;
-/** Load + cache ~/.kongcode/privacy.json. NEVER throws: a missing or malformed
+/** Load + cache ~/.laqrumcode/privacy.json. NEVER throws: a missing or malformed
  *  file yields safe built-in defaults (secret patterns only). */
 export declare function loadPrivacyConfig(force?: boolean): PrivacyConfig;
 /** Strip secret-looking substrings. Pure (does not mutate input). Safe to call

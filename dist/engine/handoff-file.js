@@ -8,7 +8,7 @@
  */
 import { readFileSync, writeFileSync, unlinkSync, existsSync, renameSync } from "node:fs";
 import { join } from "node:path";
-const HANDOFF_FILENAME = ".kongcode-handoff.json";
+const HANDOFF_FILENAME = ".laqrumcode-handoff.json";
 /**
  * Synchronously write a handoff file. Safe to call from process.on("exit").
  */

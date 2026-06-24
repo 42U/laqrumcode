@@ -38,7 +38,7 @@ export function App() {
   return (
     <div class="app">
       <nav class="sidebar">
-        <div class="brand">kong<span>code</span></div>
+        <div class="brand">laqrum<span>code</span></div>
         {ROUTES.map(([h, label]) => (
           <a class={route === h ? "nav active" : "nav"} href={h}>{label}</a>
         ))}

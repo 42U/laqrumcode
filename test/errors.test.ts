@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { swallow } from "../src/engine/errors.js";
 
 describe("swallow", () => {
-  const originalEnv = process.env.KONGBRAIN_DEBUG;
+  const originalEnv = process.env.LAQRUMBRAIN_DEBUG;
 
   beforeEach(() => {
     vi.spyOn(console, "debug").mockImplementation(() => {});
@@ -11,12 +11,12 @@ describe("swallow", () => {
   });
 
   afterEach(() => {
-    process.env.KONGBRAIN_DEBUG = originalEnv;
+    process.env.LAQRUMBRAIN_DEBUG = originalEnv;
     vi.restoreAllMocks();
   });
 
   it("swallow() is silent by default", () => {
-    delete process.env.KONGBRAIN_DEBUG;
+    delete process.env.LAQRUMBRAIN_DEBUG;
     swallow("test:ctx", new Error("boom"));
     // Can't easily test silence since module-level const is already captured,
     // but we verify it doesn't throw

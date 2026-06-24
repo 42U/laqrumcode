@@ -19,7 +19,7 @@
  *
  * Idle timeout: a session that hasn't gated anything in 30 minutes
  * resets its in-memory cache (the agent's intent has likely shifted).
- * Configurable via KONGCODE_GATE_TIMEOUT_MS.
+ * Configurable via LAQRUMCODE_GATE_TIMEOUT_MS.
  *
  * Override: a user message containing the file path verbatim acts as
  * authorization (the user just told the agent what to do).
@@ -28,7 +28,7 @@ import { swallow } from "../errors.js";
 import { log } from "../log.js";
 const DEFAULT_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
 function readIdleTimeout() {
-    const raw = process.env.KONGCODE_GATE_TIMEOUT_MS;
+    const raw = process.env.LAQRUMCODE_GATE_TIMEOUT_MS;
     if (!raw)
         return DEFAULT_IDLE_TIMEOUT_MS;
     const parsed = Number.parseInt(raw, 10);
@@ -171,7 +171,7 @@ export async function checkFileEditGate(state, session, filePath) {
     const investigated = await hasInvestigatedFile(state, session, filePath);
     if (investigated)
         return null;
-    return denyResponse(`kongcode/edit-gate: first edit to ${filePath} this session. ` +
+    return denyResponse(`laqrumcode/edit-gate: first edit to ${filePath} this session. ` +
         `Use the Read tool on this exact path before editing — that registers the ` +
         `path with the gate immediately. (Recall and Grep do NOT clear the gate; ` +
         `only a Read/Edit/Write of this path or the path appearing in the user's ` +
@@ -192,7 +192,7 @@ export async function checkBashGate(state, session, command) {
     const investigated = await hasInvestigatedBashCommand(state, session, command, match.name);
     if (investigated)
         return null;
-    return denyResponse(`kongcode/bash-gate: destructive pattern detected: ${match.name}. ` +
+    return denyResponse(`laqrumcode/bash-gate: destructive pattern detected: ${match.name}. ` +
         `Either the user must authorize this command, or you must surface context ` +
         `establishing why the destructive operation is correct (recall the target path or ` +
         `the relevant decision). Once acknowledged, retry — the gate fires once per pattern ` +

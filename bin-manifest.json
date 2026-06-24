@@ -1,5 +1,5 @@
 {
-  "$comment": "Pinned SurrealDB binary release. Bumped manually when kongcode is tested against a newer SurrealDB version. Per-platform sha256 verified against the GitHub release artifact.",
+  "$comment": "Pinned SurrealDB binary release. Bumped manually when laqrumcode is tested against a newer SurrealDB version. Per-platform sha256 verified against the GitHub release artifact.",
   "surrealdb": {
     "version": "3.0.5",
     "releaseUrl": "https://github.com/surrealdb/surrealdb/releases/download/v{version}/surreal-v{version}.{platform}.{ext}",
@@ -43,7 +43,7 @@
     "sha256": "6d39681b26c61279ac1f82db35a04a05009e94c415b51c858ff571489a82fc06"
   },
   "rerankerModel": {
-    "$comment": "bge-reranker-v2-m3 GGUF Q8_0. Cross-encoder reranker for two-stage retrieve-then-rerank. ~606MB. Optional — when absent, recall falls back to WMR/ACAN scoring. Same configuration that hit 98.2% R@5 on LongMemEval in kongclaw.",
+    "$comment": "bge-reranker-v2-m3 GGUF Q8_0. Cross-encoder reranker for two-stage retrieve-then-rerank. ~606MB. Optional — when absent, recall falls back to WMR/ACAN scoring. Same configuration that hit 98.2% R@5 on LongMemEval in laqrumclaw.",
     "name": "bge-reranker-v2-m3-Q8_0.gguf",
     "url": "https://huggingface.co/gpustack/bge-reranker-v2-m3-GGUF/resolve/main/bge-reranker-v2-m3-Q8_0.gguf?download=true",
     "sha256": "a43c7c9b11a4c1517e5bf95151960e1621d1b72f7a493364b01e386cf1aaa1d3"

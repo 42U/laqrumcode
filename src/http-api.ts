@@ -2,7 +2,7 @@
  * Internal HTTP API on Unix socket for hook communication.
  *
  * The MCP server is the long-lived daemon; hook scripts are ephemeral.
- * Hooks discover this server via the .kongcode.sock file and POST
+ * Hooks discover this server via the .laqrumcode.sock file and POST
  * Claude Code hook payloads. The server processes them using the
  * shared GlobalPluginState and returns hook response JSON.
  */
@@ -61,7 +61,7 @@ const HTTP_API_STARTED_AT = Date.now();
  *  (SEA bundle) or package.json (dev). Falls back to "0.0.0" if neither found. */
 const DAEMON_VERSION: string = (() => {
   // @ts-expect-error — replaced by esbuild --define at bundle time
-  try { if (typeof __KONGCODE_VERSION__ === "string") return __KONGCODE_VERSION__; } catch {}
+  try { if (typeof __LAQRUMCODE_VERSION__ === "string") return __LAQRUMCODE_VERSION__; } catch {}
   // Try walking up from this module's location for package.json. The compiled
   // dist/ layout places this file two dirs deep relative to package.json.
   for (const candidate of [
@@ -107,7 +107,7 @@ const HEALTH_REFRESH_INTERVAL_MS = 30_000;
  *  (QUERY_DEADLINE_MS) settles it in the background without blocking the loop
  *  on a bare un-raced await. Env-overridable; clamped to [1s, 10min]. */
 const HOOK_HANDLER_DEADLINE_MS = (() => {
-  const n = Number(process.env.KONGCODE_HOOK_HANDLER_TIMEOUT_MS);
+  const n = Number(process.env.LAQRUMCODE_HOOK_HANDLER_TIMEOUT_MS);
   return Number.isFinite(n) && n > 0 ? Math.min(Math.max(Math.round(n), 1_000), 600_000) : 50_000;
 })();
 
@@ -128,18 +128,18 @@ const HOOK_HANDLER_DEADLINE_MS = (() => {
  *  than the daemon's 512 leaves more of the shared fd budget for the daemon's
  *  own DB/embedder/log fds and the JSON-RPC listener. Past this, Node stops
  *  accepting and queues at the kernel backlog until sockets free.
- *  Override via KONGCODE_HOOK_MAX_CONNECTIONS. */
+ *  Override via LAQRUMCODE_HOOK_MAX_CONNECTIONS. */
 const HOOK_MAX_CONNECTIONS = (() => {
-  const n = Number(process.env.KONGCODE_HOOK_MAX_CONNECTIONS);
+  const n = Number(process.env.LAQRUMCODE_HOOK_MAX_CONNECTIONS);
   return Number.isFinite(n) && n > 0 ? Math.round(n) : 256;
 })();
 
 /** H5(http): how long to pause accepting after an EMFILE/ENFILE accept error
  *  before re-listening, instead of crash-looping on the same starved state.
  *  Mirrors the daemon's acceptPauseMs default. Override via
- *  KONGCODE_HOOK_ACCEPT_PAUSE_MS. */
+ *  LAQRUMCODE_HOOK_ACCEPT_PAUSE_MS. */
 const HOOK_ACCEPT_PAUSE_MS = (() => {
-  const n = Number(process.env.KONGCODE_HOOK_ACCEPT_PAUSE_MS);
+  const n = Number(process.env.LAQRUMCODE_HOOK_ACCEPT_PAUSE_MS);
   return Number.isFinite(n) && n > 0 ? Math.round(n) : 1_000;
 })();
 
@@ -485,7 +485,7 @@ async function dispatchHookWithDeadline(
     } else {
       log.error(`Hook handler error [${event}]: ${msg || "unknown"}`);
     }
-    return {}; // Fail open — never block the user's turn on a kongcode problem.
+    return {}; // Fail open — never block the user's turn on a laqrumcode problem.
   }
 }
 
@@ -579,16 +579,16 @@ async function handleRequest(
   res.end("Not found");
 }
 
-/** Read /proc/<pid>/cmdline on Linux and check it looks like a kongcode
- *  MCP-client process. Mirrors `cmdlineLooksLikeKongcodeDaemon` in
+/** Read /proc/<pid>/cmdline on Linux and check it looks like a laqrumcode
+ *  MCP-client process. Mirrors `cmdlineLooksLikeLaqrumcodeDaemon` in
  *  src/daemon/index.ts (~L371) but matches the per-session MCP relay rather
  *  than the long-lived daemon: substrings like 'mcp-client/index.js',
- *  'kongcode-mcp', or 'kongcode' alongside an mcp-ish path component.
+ *  'laqrumcode-mcp', or 'laqrumcode' alongside an mcp-ish path component.
  *
- *  Returns true  → confirmed to be a kongcode MCP (safe to SIGTERM)
+ *  Returns true  → confirmed to be a laqrumcode MCP (safe to SIGTERM)
  *  Returns false → confirmed to be a different process (do NOT SIGTERM — PID was recycled)
  *  Returns null  → cannot determine (non-Linux, or /proc unreadable) */
-function cmdlineLooksLikeKongcodeMcp(pid: number): boolean | null {
+function cmdlineLooksLikeLaqrumcodeMcp(pid: number): boolean | null {
   if (platform() !== "linux") return null;
   try {
     const raw = readFileSync(`/proc/${pid}/cmdline`, "utf8");
@@ -597,8 +597,8 @@ function cmdlineLooksLikeKongcodeMcp(pid: number): boolean | null {
     const joined = raw.replace(/\0/g, " ").toLowerCase();
     if (!joined.includes("node")) return false;
     if (joined.includes("mcp-client/index.js") || joined.includes("mcp-client/index.cjs")) return true;
-    if (joined.includes("kongcode-mcp")) return true;
-    if (joined.includes("kongcode") && joined.includes("mcp")) return true;
+    if (joined.includes("laqrumcode-mcp")) return true;
+    if (joined.includes("laqrumcode") && joined.includes("mcp")) return true;
     return false;
   } catch {
     // /proc/<pid>/cmdline missing → PID isn't running. Caller treats this
@@ -608,7 +608,7 @@ function cmdlineLooksLikeKongcodeMcp(pid: number): boolean | null {
 }
 
 /**
- * Remove `.kongcode-<pid>.sock` files in `dir` whose PID is no longer alive.
+ * Remove `.laqrumcode-<pid>.sock` files in `dir` whose PID is no longer alive.
  * Skips ownPid and any PID that exists but we can't signal (EPERM).
  *
  * Also reaps live sibling MCPs by sending SIGTERM to their PIDs (default on).
@@ -617,17 +617,17 @@ function cmdlineLooksLikeKongcodeMcp(pid: number): boolean | null {
  * holding memory until killed manually. Reaping closes that loop.
  *
  * SAFETY (round-2): before SIGTERMing a PID derived from the socket filename
- * we verify via /proc/<pid>/cmdline that it actually IS a kongcode MCP
+ * we verify via /proc/<pid>/cmdline that it actually IS a laqrumcode MCP
  * process. PIDs can recycle quickly under load — a daemon restart could find
  * the socket file's PID number now belongs to an unrelated user process, and
  * the original behavior would SIGTERM that innocent process. Verification
- * mirrors the cmdlineLooksLikeKongcodeDaemon pattern used in
+ * mirrors the cmdlineLooksLikeLaqrumcodeDaemon pattern used in
  * src/daemon/index.ts for daemon.pid lock validation.
  *
  * Non-Linux platforms (no /proc): cmdline check returns null and we
  * CONSERVATIVELY skip the SIGTERM — only unlink if the PID is already dead.
  *
- * Set `KONGCODE_KEEP_SIBLINGS=1` to opt out — required when running multiple
+ * Set `LAQRUMCODE_KEEP_SIBLINGS=1` to opt out — required when running multiple
  * Claude Code windows simultaneously, since each window has its own MCP and
  * killing siblings would orphan the others. Single-window users (the common
  * case) want default-on behavior so no zombies linger.
@@ -639,12 +639,12 @@ export function sweepStaleSockets(dir: string, ownPid: number): void {
   } catch {
     return;
   }
-  const keepSiblings = process.env.KONGCODE_KEEP_SIBLINGS === "1";
+  const keepSiblings = process.env.LAQRUMCODE_KEEP_SIBLINGS === "1";
   let removedFiles = 0;
   let reapedLive = 0;
   let skippedForeign = 0;
   for (const name of entries) {
-    const m = /^\.kongcode-(\d+)\.sock$/.exec(name);
+    const m = /^\.laqrumcode-(\d+)\.sock$/.exec(name);
     if (!m) continue;
     const pid = Number(m[1]);
     if (!Number.isFinite(pid) || pid === ownPid) continue;
@@ -658,13 +658,13 @@ export function sweepStaleSockets(dir: string, ownPid: number): void {
       foreign = code === "EPERM";
     }
     if (alive && !foreign && !keepSiblings) {
-      // Verify PID actually points at a kongcode MCP before signalling. PIDs
+      // Verify PID actually points at a laqrumcode MCP before signalling. PIDs
       // recycle; a stale socket file might name a number that's now an
       // innocent user process. cmdline check returns:
-      //   true  → kongcode MCP confirmed, SIGTERM safe
+      //   true  → laqrumcode MCP confirmed, SIGTERM safe
       //   false → different process (recycled PID) → skip SIGTERM, just unlink the orphan
       //   null  → non-Linux (no /proc), can't verify → skip SIGTERM to be safe
-      const looksLike = cmdlineLooksLikeKongcodeMcp(pid);
+      const looksLike = cmdlineLooksLikeLaqrumcodeMcp(pid);
       if (looksLike === true) {
         try {
           process.kill(pid, "SIGTERM");
@@ -687,9 +687,9 @@ export function sweepStaleSockets(dir: string, ownPid: number): void {
       removedFiles++;
     } catch { /* ignore */ }
   }
-  if (removedFiles > 0) log.info(`Swept ${removedFiles} stale kongcode socket file(s)`);
-  if (reapedLive > 0) log.info(`Reaped ${reapedLive} sibling MCP process(es) (set KONGCODE_KEEP_SIBLINGS=1 to opt out)`);
-  if (skippedForeign > 0) log.info(`Skipped SIGTERM on ${skippedForeign} recycled PID(s) — cmdline did not match kongcode MCP`);
+  if (removedFiles > 0) log.info(`Swept ${removedFiles} stale laqrumcode socket file(s)`);
+  if (reapedLive > 0) log.info(`Reaped ${reapedLive} sibling MCP process(es) (set LAQRUMCODE_KEEP_SIBLINGS=1 to opt out)`);
+  if (skippedForeign > 0) log.info(`Skipped SIGTERM on ${skippedForeign} recycled PID(s) — cmdline did not match laqrumcode MCP`);
 }
 
 /**
@@ -701,7 +701,7 @@ export async function startHttpApi(
   sock?: string,
   projectDir?: string,
 ): Promise<void> {
-  const cacheDir = join(process.env.HOME || process.env.USERPROFILE || "/tmp", ".kongcode", "cache");
+  const cacheDir = join(process.env.HOME || process.env.USERPROFILE || "/tmp", ".laqrumcode", "cache");
   try {
     authToken = randomBytes(24).toString("hex");
     authTokenPath = join(cacheDir, "auth-token");
@@ -713,7 +713,7 @@ export async function startHttpApi(
     // PIDs don't collide, those tmpfiles accumulate forever.
     //
     // Sweep rules: for each `auth-token.<digits>.tmp`, parse the PID.
-    //   - If the PID is alive AND its cmdline looks like a kongcode MCP,
+    //   - If the PID is alive AND its cmdline looks like a laqrumcode MCP,
     //     leave it alone — another live daemon owns that tmpfile.
     //   - Otherwise unlink it (orphan from a crashed daemon, or recycled
     //     PID now owned by an unrelated process).
@@ -731,14 +731,14 @@ export async function startHttpApi(
           const code = (e as NodeJS.ErrnoException)?.code;
           alive = code !== "ESRCH";
         }
-        // Live PID + cmdline matches kongcode MCP → leave it alone.
+        // Live PID + cmdline matches laqrumcode MCP → leave it alone.
         // Anything else (dead PID, recycled PID owned by stranger, or a
         // non-Linux box where we can't verify cmdline) → unlink the orphan.
-        // On non-Linux, cmdlineLooksLikeKongcodeMcp returns null; treat null
+        // On non-Linux, cmdlineLooksLikeLaqrumcodeMcp returns null; treat null
         // as "not us" so the orphan gets cleaned (the only daemon that could
         // legitimately own it would be ourselves, and our PID hasn't written
         // the tmpfile yet at this point in startHttpApi).
-        if (alive && cmdlineLooksLikeKongcodeMcp(orphanPid) === true) continue;
+        if (alive && cmdlineLooksLikeLaqrumcodeMcp(orphanPid) === true) continue;
         try { unlinkSync(join(cacheDir, name)); } catch { /* ignore */ }
       }
     } catch { /* cacheDir missing — openSync below will surface the real error */ }
@@ -860,7 +860,7 @@ export async function startHttpApi(
       if (addr && typeof addr === "object") {
         log.info(`HTTP API listening on port ${addr.port}`);
         const dir = resolvePath(projectDir || process.cwd());
-        portFilePath = join(dir, ".kongcode-port");
+        portFilePath = join(dir, ".laqrumcode-port");
         try {
           writeFileSync(portFilePath, String(addr.port), { mode: 0o600 });
           log.info(`Port file written: ${portFilePath}`);
@@ -917,7 +917,7 @@ export const __testing = {
   buildHealthDetailedResponse,
   healthCache,
   recordLastError,
-  cmdlineLooksLikeKongcodeMcp,
+  cmdlineLooksLikeLaqrumcodeMcp,
   // H4: the deadline-wrapped hook dispatcher + its configured budget, so the
   // regression test can prove a slow handler fails open fast (loop freed)
   // without standing up the full HTTP listener.

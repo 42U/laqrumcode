@@ -4,7 +4,7 @@
  * daemon path + v0.7.39 placeholder synthesis) into a reusable module.
  *
  * Use these when:
- *   - Importing data from another kongcode/kongbrain instance whose session
+ *   - Importing data from another laqrumcode/laqrumbrain instance whose session
  *     metadata didn't fully migrate (X-close pattern, gateway purges).
  *   - After a schema change that renders previously-written rows orphan
  *     (the v0.7.23 derived_from schema mismatch was the canonical case).

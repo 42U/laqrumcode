@@ -1,5 +1,5 @@
 /**
- * Graph-based context transformation for KongCode.
+ * Graph-based context transformation for LaqrumCode.
  *
  * Core retrieval pipeline: vector search → graph expand → WMR/ACAN scoring
  * → dedup → budget trim → format.
@@ -43,13 +43,13 @@ const RERANK_BLEND_CROSS = 0.4;
 // full 30-doc batch is ~22s (≤~27s at the 8192-token ceiling), scaling down with
 // cores. Truncation is by REAL tokens (not chars) so CJK/code can't overflow the
 // model window. All env-tunable.
-const RERANK_MAX_DOC_TOKENS = Number(process.env.KONGCODE_RERANK_MAX_DOC_TOKENS) || 512;
-const RERANK_QUERY_MAX_TOKENS = Number(process.env.KONGCODE_RERANK_QUERY_MAX_TOKENS) || 512;
-const RERANK_TOTAL_TOKEN_BUDGET = Number(process.env.KONGCODE_RERANK_TOTAL_TOKEN_BUDGET) || 8192;
-const RERANK_CHUNK_SIZE = Number(process.env.KONGCODE_RERANK_CHUNK_SIZE) || 6;
+const RERANK_MAX_DOC_TOKENS = Number(process.env.LAQRUMCODE_RERANK_MAX_DOC_TOKENS) || 512;
+const RERANK_QUERY_MAX_TOKENS = Number(process.env.LAQRUMCODE_RERANK_QUERY_MAX_TOKENS) || 512;
+const RERANK_TOTAL_TOKEN_BUDGET = Number(process.env.LAQRUMCODE_RERANK_TOTAL_TOKEN_BUDGET) || 8192;
+const RERANK_CHUNK_SIZE = Number(process.env.LAQRUMCODE_RERANK_CHUNK_SIZE) || 6;
 // K40: when the cross-encoder disagrees with WMR on EVERY candidate, keep at
 // most this many top-by-blended-score rather than returning an empty set.
-const RERANK_ALL_DROPPED_KEEP = Number(process.env.KONGCODE_RERANK_ALL_DROPPED_KEEP) || 5;
+const RERANK_ALL_DROPPED_KEEP = Number(process.env.LAQRUMCODE_RERANK_ALL_DROPPED_KEEP) || 5;
 
 // ── Cross-encoder timeout + circuit breaker (K13) ────────────────────────────
 // The bge-reranker rankAll() is a synchronous-ish CPU kernel that can wedge on
@@ -61,11 +61,11 @@ const RERANK_ALL_DROPPED_KEEP = Number(process.env.KONGCODE_RERANK_ALL_DROPPED_K
 // consecutive-timeout breaker (mirrors EmbeddingService.consecutiveTimeouts):
 // after N consecutive deadline hits the cross-encoder is disabled for a cooldown
 // and callers fall back to lexical / distribution-band scoring. All env-tunable.
-const RERANK_TIMEOUT_MS = Number(process.env.KONGCODE_RERANK_TIMEOUT_MS) || 10_000;
+const RERANK_TIMEOUT_MS = Number(process.env.LAQRUMCODE_RERANK_TIMEOUT_MS) || 10_000;
 const RERANK_MAX_CONSECUTIVE_TIMEOUTS =
-  Number(process.env.KONGCODE_RERANK_MAX_TIMEOUTS) || 3;
+  Number(process.env.LAQRUMCODE_RERANK_MAX_TIMEOUTS) || 3;
 const RERANK_BREAKER_COOLDOWN_MS =
-  Number(process.env.KONGCODE_RERANK_BREAKER_COOLDOWN_MS) || 60_000;
+  Number(process.env.LAQRUMCODE_RERANK_BREAKER_COOLDOWN_MS) || 60_000;
 // K12-style backpressure ceiling for the rerank FIFO. node-llama-cpp serializes
 // rankAll internally, so concurrent callers (rerankResults + the fanned-out
 // crossEncoderScorePairs on the Stop path + the skills reranker callback) all
@@ -73,8 +73,8 @@ const RERANK_BREAKER_COOLDOWN_MS =
 // push is the leak surface on a long-lived per-host daemon. Past this depth we
 // fast-fail with a retryable error instead of growing the queue. Env-tunable.
 const RERANK_QUEUE_MAX =
-  Number(process.env.KONGCODE_RERANK_QUEUE_MAX) > 0
-    ? Number(process.env.KONGCODE_RERANK_QUEUE_MAX)
+  Number(process.env.LAQRUMCODE_RERANK_QUEUE_MAX) > 0
+    ? Number(process.env.LAQRUMCODE_RERANK_QUEUE_MAX)
     : 512;
 
 let _rerankConsecutiveTimeouts = 0;
@@ -1136,14 +1136,14 @@ async function formatContextMessage(
 
   // Pillar context — structural IDs only (architecture description is unnecessary token spend)
   // Skip if model already has it in the conversation window (claw-code static section dedup)
-  if (!session.injectedSections.has("ikong")) {
+  if (!session.injectedSections.has("ilaqrum")) {
     const pillarLines: string[] = [];
     if (session.agentId) pillarLines.push(`Agent: ${session.agentId}`);
     if (session.projectId) pillarLines.push(`Project: ${session.projectId}`);
     if (session.taskId) pillarLines.push(`Task: ${session.taskId}`);
     if (pillarLines.length > 0) {
       sections.push(`GRAPH PILLARS: ${pillarLines.join(" | ")}`);
-      session.injectedSections.add("ikong");
+      session.injectedSections.add("ilaqrum");
     }
   }
 
@@ -1607,13 +1607,13 @@ export function getTransformErrorRate(): { total: number; failures: number; rate
  *  fixed 15s was tuned for GPU-era embed+rerank latency; the 2026-06-04
  *  switch of the daemon to CPU-only mode tripped it constantly (daemon.log:
  *  "graphTransformContext timed out" spam → raw-message fallback on every
- *  affected prompt). KONGCODE_NO_GPU=1 is set by gpu-pin.ts at daemon startup
+ *  affected prompt). LAQRUMCODE_NO_GPU=1 is set by gpu-pin.ts at daemon startup
  *  when CPU mode is configured, so the default self-adjusts. Exported for
  *  tests. Resolved per call (not at import) so it sees the post-pin env. */
 export function resolveTransformTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
-  const override = Number(env.KONGCODE_TRANSFORM_TIMEOUT_MS);
+  const override = Number(env.LAQRUMCODE_TRANSFORM_TIMEOUT_MS);
   if (Number.isFinite(override) && override > 0) return Math.floor(override);
-  return env.KONGCODE_NO_GPU === "1" ? 45_000 : 15_000;
+  return env.LAQRUMCODE_NO_GPU === "1" ? 45_000 : 15_000;
 }
 
 /**
@@ -1660,7 +1660,7 @@ export async function graphTransformContext(
     systemPromptSection = buildSystemPromptSection(session, tier0ForSys);
     // Mark sections as injected so formatContextMessage() skips them (prevents duplication)
     if (systemPromptSection) {
-      if (systemPromptSection.includes("GRAPH PILLARS")) session.injectedSections.add("ikong");
+      if (systemPromptSection.includes("GRAPH PILLARS")) session.injectedSections.add("ilaqrum");
       if (systemPromptSection.includes("CORE DIRECTIVES")) session.injectedSections.add("tier0");
     }
   } catch { /* non-critical — tier0 will still appear in user message */ }

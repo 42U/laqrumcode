@@ -242,7 +242,7 @@ let _lastEmbeddingError = null;
 const EMBEDDING_ERROR_FRESH_MS = 5 * 60_000;
 let _lastHeapUsed = 0;
 /**
- * Record the outcome of a write attempt under `~/.kongcode/cache/`. Call
+ * Record the outcome of a write attempt under `~/.laqrumcode/cache/`. Call
  * sites: bootstrap.ts (auth token, daemon.pid), auto-drain.ts (spending
  * ledger), any other code path that persists state into the cache dir.
  * Each call appends an outcome to a 10-minute sliding window.
@@ -564,7 +564,7 @@ async function detectPendingWorkAging(store) {
 }
 function detectGraduationReady(ctx) {
     // One-shot announcement when both volume AND quality are green.
-    // Soul graduation is a ONE-TIME event tied to the existence of soul:kongbrain.
+    // Soul graduation is a ONE-TIME event tied to the existence of soul:laqrumbrain.
     // After the soul exists graduation has already happened, so this detector
     // must suppress — otherwise it keeps celebrating an event from months ago.
     if (ctx.soulExists)
@@ -635,7 +635,7 @@ async function detectContextTransformFailures(_store) {
 }
 // ── New substrate-health detectors (Agent E recommendations) ──
 /**
- * Fires when disk writes to ~/.kongcode/cache/ are failing. Reads from
+ * Fires when disk writes to ~/.laqrumcode/cache/ are failing. Reads from
  * the rolling 10-minute counter populated by recordCacheWriteOutcome().
  * Threshold: 5+ failures in window. Severity escalates to critical when
  * the failure rate exceeds 50%, since at that point essential state
@@ -648,9 +648,9 @@ function detectCacheWriteFailures() {
     return {
         code: "substrate.cache_write_failures",
         severity: rate >= 0.5 ? "critical" : "warn",
-        message: `~/.kongcode/cache/ writes failing: ${failures}/${total} in the last 10 minutes (${(rate * 100).toFixed(0)}%)`,
+        message: `~/.laqrumcode/cache/ writes failing: ${failures}/${total} in the last 10 minutes (${(rate * 100).toFixed(0)}%)`,
         evidence: `failures=${failures}, total=${total}, rate=${rate.toFixed(2)}`,
-        suggestion: "Check disk space (`df -h ~/.kongcode/cache`), inode count, and directory permissions. Auth token, daemon.pid, and spending ledger live here — daemon may be running degraded.",
+        suggestion: "Check disk space (`df -h ~/.laqrumcode/cache`), inode count, and directory permissions. Auth token, daemon.pid, and spending ledger live here — daemon may be running degraded.",
     };
 }
 /**
@@ -698,14 +698,14 @@ function detectEmbeddingServiceDown() {
         severity: "warn",
         message: `Embedding service reported an error ${Math.round(ageMs / 1000)}s ago — embeddings are unavailable`,
         evidence: `last_error="${msg}"`,
-        suggestion: "Check daemon.log for the stack. Common causes: model file missing (~/.kongcode/cache/models/bge-m3-Q4_K_M.gguf), node-llama-cpp init failure, repeated embed timeouts tripping the circuit breaker.",
+        suggestion: "Check daemon.log for the stack. Common causes: model file missing (~/.laqrumcode/cache/models/bge-m3-Q4_K_M.gguf), node-llama-cpp init failure, repeated embed timeouts tripping the circuit breaker.",
     };
 }
 // ── Format anomalies as injection block ──
 export function formatAnomalyBlock(flags) {
     if (flags.length === 0)
         return "";
-    const lines = ["<kongcode-alert>"];
+    const lines = ["<laqrumcode-alert>"];
     for (const f of flags) {
         const sev = f.severity === "critical" ? "[!!]" : f.severity === "warn" ? "[!]" : "[info]";
         lines.push(`${sev} ${f.code}: ${f.message}`);
@@ -713,7 +713,7 @@ export function formatAnomalyBlock(flags) {
         if (f.suggestion)
             lines.push(`     suggestion: ${f.suggestion}`);
     }
-    lines.push("</kongcode-alert>");
+    lines.push("</laqrumcode-alert>");
     return lines.join("\n") + "\n\n";
 }
 // ── Helpers ──

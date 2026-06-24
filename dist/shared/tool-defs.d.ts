@@ -336,13 +336,13 @@ export declare const MCP_TOOLS: readonly [{
     };
 }, {
     readonly name: "create_skill";
-    readonly description: "Create a new skill row in the kongcode DB. Skills are DB-resident vector-indexed procedural knowledge invokable via slash command. The full body is stored in the `skill` table and recallable via recall(scope=\"skills\"). Use this instead of authoring a SKILL.md file on disk.";
+    readonly description: "Create a new skill row in the laqrumcode DB. Skills are DB-resident vector-indexed procedural knowledge invokable via slash command. The full body is stored in the `skill` table and recallable via recall(scope=\"skills\"). Use this instead of authoring a SKILL.md file on disk.";
     readonly inputSchema: {
         readonly type: "object";
         readonly properties: {
             readonly name: {
                 readonly type: "string";
-                readonly description: "Kebab-case skill name (matches the slash command, e.g. 'kongcode-release')";
+                readonly description: "Kebab-case skill name (matches the slash command, e.g. 'laqrumcode-release')";
             };
             readonly description: {
                 readonly type: "string";
@@ -382,7 +382,7 @@ export declare const MCP_TOOLS: readonly [{
     };
 }, {
     readonly name: "update_skill";
-    readonly description: "Revise an EXISTING skill in the kongcode DB (counterpart to create_skill, which rejects name collisions). Patches the provided fields on the skill matched by `name` and RE-EMBEDS so recall(scope=\"skills\") reflects the new content — a raw SurrealQL UPDATE would leave the old embedding stale. `name` identifies the skill and is not changed; provide at least one mutable field.";
+    readonly description: "Revise an EXISTING skill in the laqrumcode DB (counterpart to create_skill, which rejects name collisions). Patches the provided fields on the skill matched by `name` and RE-EMBEDS so recall(scope=\"skills\") reflects the new content — a raw SurrealQL UPDATE would leave the old embedding stale. `name` identifies the skill and is not changed; provide at least one mutable field.";
     readonly inputSchema: {
         readonly type: "object";
         readonly properties: {

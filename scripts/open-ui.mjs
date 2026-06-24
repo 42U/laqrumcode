@@ -1,14 +1,14 @@
 #!/usr/bin/env node
 /**
- * Open the kongcode read-only web UI (GH #15) in the default browser.
+ * Open the laqrumcode read-only web UI (GH #15) in the default browser.
  *
- * Reads the daemon's auth token (~/.kongcode/cache/auth-token, written by
+ * Reads the daemon's auth token (~/.laqrumcode/cache/auth-token, written by
  * src/http-api.ts) and opens http://127.0.0.1:<port>/ui/auth?token=… which sets
  * an HttpOnly cookie and redirects to the app — so the token is presented once
  * and never lingers in the URL bar afterwards.
  *
  * Port: imported directly from uiPort() in dist/ui-server.js — the single
- * source of truth the daemon binds with (KONGCODE_UI_PORT override, else the
+ * source of truth the daemon binds with (LAQRUMCODE_UI_PORT override, else the
  * UID-offset default). Loopback only. Never recompute the port here.
  */
 import { readFileSync } from "node:fs";
@@ -23,13 +23,13 @@ import { platform, homedir } from "node:os";
 // one). Importing the function eliminates the duplication for good.
 import { uiPort } from "../dist/ui-server.js";
 
-const tokenPath = join(homedir(), ".kongcode", "cache", "auth-token");
+const tokenPath = join(homedir(), ".laqrumcode", "cache", "auth-token");
 let token;
 try {
   token = readFileSync(tokenPath, "utf8").trim();
 } catch {
   console.error(`No auth token at ${tokenPath}.`);
-  console.error("The kongcode daemon writes it on start — trigger the daemon with any kongcode MCP call (e.g. memory_health), then retry.");
+  console.error("The laqrumcode daemon writes it on start — trigger the daemon with any laqrumcode MCP call (e.g. memory_health), then retry.");
   process.exit(1);
 }
 if (!token) {
@@ -40,7 +40,7 @@ if (!token) {
 const port = uiPort();
 const url = `http://127.0.0.1:${port}/ui/auth?token=${token}`;
 
-console.log(`kongcode web UI → http://127.0.0.1:${port}/ui`);
+console.log(`laqrumcode web UI → http://127.0.0.1:${port}/ui`);
 console.log("Opening your browser…  (if it doesn't open, paste this URL):");
 console.log(`  ${url}`);
 

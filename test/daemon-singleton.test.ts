@@ -7,13 +7,13 @@
  * tests destructive. The tests here exercise the marker-file CONTRACT that
  * function reads and writes:
  *
- *   - Marker JSON shape: marker:"kongcode-daemon", pid, startedAt, daemonVersion.
+ *   - Marker JSON shape: marker:"laqrumcode-daemon", pid, startedAt, daemonVersion.
  *   - Stale-recovery rules: dead PID, unparseable + old, recycled PID (cmdline
  *     mismatch) all permit stealing; live + matching cmdline + fresh refuses.
- *   - Cross-contamination guard: the daemon's "kongcode-daemon" marker must not
- *     be confused with the auto-drain "kongcode-auto-drain" marker. Two parallel
+ *   - Cross-contamination guard: the daemon's "laqrumcode-daemon" marker must not
+ *     be confused with the auto-drain "laqrumcode-auto-drain" marker. Two parallel
  *     locks exist; their readers must each reject the other's format.
- *   - Path: pid file lives at $HOME/.kongcode/cache/daemon.pid.
+ *   - Path: pid file lives at $HOME/.laqrumcode/cache/daemon.pid.
  *
  * Tests that would require actually spawning a second daemon process (true
  * end-to-end race testing) are intentionally OUT of scope per agent
@@ -51,7 +51,7 @@ const { cmdlineLooksLikeDrainer } = drainTesting;
 // ─────────────────────────────────────────────────────────────────────────────
 
 interface DaemonPidMarker {
-  marker: "kongcode-daemon";
+  marker: "laqrumcode-daemon";
   pid: number;
   startedAt: number;
   daemonVersion: string;
@@ -63,7 +63,7 @@ const DAEMON_LOCK_EMPTY_STALE_AGE_MS = 5_000;
 
 function writeDaemonMarkerJson(path: string, pid: number, version = "0.7.69", startedAt = Date.now()): void {
   const marker: DaemonPidMarker = {
-    marker: "kongcode-daemon",
+    marker: "laqrumcode-daemon",
     pid,
     startedAt,
     daemonVersion: version,
@@ -77,7 +77,7 @@ function parseDaemonMarker(path: string): DaemonPidMarker | { legacyPid: number 
   try { raw = readFileSync(path, "utf8"); } catch { return null; }
   try {
     const parsed = JSON.parse(raw) as DaemonPidMarker;
-    if (parsed && parsed.marker === "kongcode-daemon" && Number.isFinite(parsed.pid)) {
+    if (parsed && parsed.marker === "laqrumcode-daemon" && Number.isFinite(parsed.pid)) {
       return parsed;
     }
   } catch { /* fall through to legacy */ }
@@ -92,17 +92,17 @@ function isPidAlive(pid: number): boolean {
   catch (e) { return (e as NodeJS.ErrnoException).code === "EPERM"; }
 }
 
-/** Mirrors cmdlineLooksLikeKongcodeDaemon in src/daemon/index.ts. */
-function cmdlineLooksLikeKongcodeDaemon(pid: number): boolean | null {
+/** Mirrors cmdlineLooksLikeLaqrumcodeDaemon in src/daemon/index.ts. */
+function cmdlineLooksLikeLaqrumcodeDaemon(pid: number): boolean | null {
   if (platform() !== "linux") return null;
   try {
     const raw = readFileSync(`/proc/${pid}/cmdline`, "utf8");
     if (!raw) return false;
     const joined = raw.replace(/\0/g, " ").toLowerCase();
     if (!joined.includes("node")) return false;
-    if (joined.includes("kongcode-daemon")) return true;
+    if (joined.includes("laqrumcode-daemon")) return true;
     if (joined.includes("daemon/index.js") || joined.includes("daemon/index.cjs")) return true;
-    if (joined.includes("kongcode") && joined.includes("daemon")) return true;
+    if (joined.includes("laqrumcode") && joined.includes("daemon")) return true;
     return false;
   } catch {
     return false;
@@ -140,7 +140,7 @@ function evaluateDaemonLock(path: string): { stale: boolean; reason?: string; un
   const pid = "marker" in parsed ? parsed.pid : parsed.legacyPid;
   if (!isPidAlive(pid)) return { stale: true, reason: `pid ${pid} dead` };
 
-  const looksLike = cmdlineLooksLikeKongcodeDaemon(pid);
+  const looksLike = cmdlineLooksLikeLaqrumcodeDaemon(pid);
   if (looksLike === false) return { stale: true, reason: `pid ${pid} alive but not daemon (recycled)` };
   // looksLike === true OR null → assume valid daemon, refuse.
   return { stale: false };
@@ -167,11 +167,11 @@ describe("daemon singleton: marker shape", () => {
     rmSync(tmp, { recursive: true, force: true });
   });
 
-  it("daemon marker JSON has marker:'kongcode-daemon' field", () => {
+  it("daemon marker JSON has marker:'laqrumcode-daemon' field", () => {
     writeDaemonMarkerJson(lockPath, process.pid, "0.7.69");
     const raw = readFileSync(lockPath, "utf8");
     const obj = JSON.parse(raw);
-    expect(obj.marker).toBe("kongcode-daemon");
+    expect(obj.marker).toBe("laqrumcode-daemon");
     expect(obj.pid).toBe(process.pid);
     expect(typeof obj.daemonVersion).toBe("string");
     expect(typeof obj.startedAt).toBe("number");
@@ -189,7 +189,7 @@ describe("daemon singleton: marker shape", () => {
     // Symmetric guard: daemon-style reader treats drain marker as unparseable
     // (falls through to legacy bare-PID check, which also fails).
     writeFileSync(lockPath, JSON.stringify({
-      marker: "kongcode-auto-drain",
+      marker: "laqrumcode-auto-drain",
       pid: process.pid,
       daemonPid: process.pid,
       startedAt: Date.now(),
@@ -224,7 +224,7 @@ describe("daemon singleton: marker shape", () => {
 
   it("daemon parser ignores marker JSON with non-numeric pid", () => {
     writeFileSync(lockPath, JSON.stringify({
-      marker: "kongcode-daemon",
+      marker: "laqrumcode-daemon",
       pid: "not-a-number",
       startedAt: Date.now(),
       daemonVersion: "0.7.69",
@@ -259,7 +259,7 @@ describe("daemon singleton: stale-recovery decision", () => {
 
   it("live PID + matching daemon cmdline → not stale (refuse)", () => {
     // process.pid is alive AND cmdline contains 'node'. On Linux,
-    // cmdlineLooksLikeKongcodeDaemon also requires daemon-path tokens — vitest
+    // cmdlineLooksLikeLaqrumcodeDaemon also requires daemon-path tokens — vitest
     // does NOT contain those, so on Linux this returns false (steal-able).
     // On non-Linux it returns null and is treated as "alive, refuse".
     writeDaemonMarkerJson(lockPath, process.pid);
@@ -312,7 +312,7 @@ describe("daemon singleton: stale-recovery decision", () => {
     if (platform() !== "linux") return;
     writeFileSync(lockPath, String(process.pid));
     const decision = evaluateDaemonLock(lockPath);
-    // Our cmdline (vitest) doesn't match a kongcode daemon, so legacy live PID
+    // Our cmdline (vitest) doesn't match a laqrumcode daemon, so legacy live PID
     // is still correctly classified as recycled.
     expect(decision.stale).toBe(true);
   });
@@ -372,31 +372,31 @@ describe("daemon singleton: stale-recovery decision", () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// cmdlineLooksLikeKongcodeDaemon — directly tests the /proc detection rules
+// cmdlineLooksLikeLaqrumcodeDaemon — directly tests the /proc detection rules
 // for the daemon variant. (Unlike the drainer variant, this one requires
 // 'node' AND a daemon-path hint, so it's stricter.)
 // ─────────────────────────────────────────────────────────────────────────────
 describe("daemon singleton: cmdline detection", () => {
   it("PID 1 (init/systemd, no 'node') → false", () => {
     if (platform() !== "linux") return;
-    expect(cmdlineLooksLikeKongcodeDaemon(1)).toBe(false);
+    expect(cmdlineLooksLikeLaqrumcodeDaemon(1)).toBe(false);
   });
 
   it("our own pid (node but no 'daemon/index') → false", () => {
     if (platform() !== "linux") return;
     // We're running under vitest/node — cmdline contains 'node' but no
-    // 'kongcode-daemon' or 'daemon/index' tokens, so it must return false.
-    expect(cmdlineLooksLikeKongcodeDaemon(process.pid)).toBe(false);
+    // 'laqrumcode-daemon' or 'daemon/index' tokens, so it must return false.
+    expect(cmdlineLooksLikeLaqrumcodeDaemon(process.pid)).toBe(false);
   });
 
   it("dead pid → false (read fails, catch returns false)", () => {
     if (platform() !== "linux") return;
-    expect(cmdlineLooksLikeKongcodeDaemon(99999999)).toBe(false);
+    expect(cmdlineLooksLikeLaqrumcodeDaemon(99999999)).toBe(false);
   });
 
   it("returns null on non-linux platforms (cannot verify)", () => {
     if (platform() === "linux") return;
-    expect(cmdlineLooksLikeKongcodeDaemon(process.pid)).toBeNull();
+    expect(cmdlineLooksLikeLaqrumcodeDaemon(process.pid)).toBeNull();
   });
 
   // Compare with the drain variant's looser rules to document the asymmetry.
@@ -404,7 +404,7 @@ describe("daemon singleton: cmdline detection", () => {
     if (platform() !== "linux") return;
     // Same pid: drain says yes (just 'node'), daemon says no (needs daemon-path token too).
     expect(cmdlineLooksLikeDrainer(process.pid)).toBe(true);
-    expect(cmdlineLooksLikeKongcodeDaemon(process.pid)).toBe(false);
+    expect(cmdlineLooksLikeLaqrumcodeDaemon(process.pid)).toBe(false);
   });
 });
 
@@ -428,7 +428,7 @@ describe("daemon singleton: O_EXCL acquire semantic", () => {
     const fd = openSync(lockPath, fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_WRONLY, 0o600);
     expect(fd).toBeGreaterThanOrEqual(0);
     writeSync(fd, JSON.stringify({
-      marker: "kongcode-daemon",
+      marker: "laqrumcode-daemon",
       pid: process.pid,
       startedAt: Date.now(),
       daemonVersion: "0.7.69",
@@ -436,7 +436,7 @@ describe("daemon singleton: O_EXCL acquire semantic", () => {
     closeSync(fd);
     expect(existsSync(lockPath)).toBe(true);
     const obj = JSON.parse(readFileSync(lockPath, "utf8"));
-    expect(obj.marker).toBe("kongcode-daemon");
+    expect(obj.marker).toBe("laqrumcode-daemon");
   });
 
   it("O_CREAT|O_EXCL fails with EEXIST when file already exists", () => {
@@ -469,8 +469,8 @@ describe("daemon singleton: O_EXCL acquire semantic", () => {
 // that accidentally moves the file shows up here.
 // ─────────────────────────────────────────────────────────────────────────────
 describe("daemon singleton: pid file path constant", () => {
-  it("DAEMON_PID_FILE is under .kongcode/cache/", () => {
-    expect(DAEMON_PID_FILE).toBe(".kongcode/cache/daemon.pid");
+  it("DAEMON_PID_FILE is under .laqrumcode/cache/", () => {
+    expect(DAEMON_PID_FILE).toBe(".laqrumcode/cache/daemon.pid");
   });
 
   it("DAEMON_PID_FILE is a relative path (joined to $HOME by daemon)", () => {

@@ -1,4 +1,4 @@
-export type GpuPinSource = "env:CUDA_VISIBLE_DEVICES" | "env:KONGCODE_NO_GPU" | "env:KONGCODE_CUDA_VISIBLE_DEVICES" | "file";
+export type GpuPinSource = "env:CUDA_VISIBLE_DEVICES" | "env:LAQRUMCODE_NO_GPU" | "env:LAQRUMCODE_CUDA_VISIBLE_DEVICES" | "file";
 export type GpuPinMode = "gpu" | "cpu";
 export interface GpuPinResult {
     /** True only when this call mutated the environment. */
@@ -7,7 +7,7 @@ export interface GpuPinResult {
     value?: string;
     source?: GpuPinSource;
 }
-/** Path to the optional file knob (default: ~/.kongcode/cuda-visible-devices). */
+/** Path to the optional file knob (default: ~/.laqrumcode/cuda-visible-devices). */
 export declare function gpuPinFilePath(home?: string): string;
 /**
  * Resolve the configured selection WITHOUT mutating anything (pure → testable).
@@ -17,6 +17,6 @@ export declare function resolveGpuPin(env?: NodeJS.ProcessEnv, home?: string): G
 /**
  * Apply the resolved selection to `env` (default process.env). No-op when
  * nothing is configured, or when the operator already set CUDA_VISIBLE_DEVICES /
- * KONGCODE_NO_GPU. Returns what it did, for logging.
+ * LAQRUMCODE_NO_GPU. Returns what it did, for logging.
  */
 export declare function applyGpuPin(env?: NodeJS.ProcessEnv, home?: string): GpuPinResult;

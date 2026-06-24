@@ -83,8 +83,8 @@ export declare function raceWithDeadline<T>(p: Promise<T>, ms: number, label: st
 export declare function isRetryableSurrealError(e: unknown): boolean;
 export declare function patchOrderByFields(sql: string): string;
 /**
- * SurrealDB store — wraps all database operations for the KongCode plugin.
- * Replaces the module-level singleton pattern from standalone KongCode.
+ * SurrealDB store — wraps all database operations for the LaqrumCode plugin.
+ * Replaces the module-level singleton pattern from standalone LaqrumCode.
  */
 export declare class SurrealStore {
     private db;

@@ -1,6 +1,6 @@
 /**
  * Core memory management tool — CRUD on always-loaded directives.
- * Ported from kongbrain with SurrealStore injection.
+ * Ported from laqrumbrain with SurrealStore injection.
  */
 import type { GlobalPluginState, SessionState } from "../state.js";
 export declare function createCoreMemoryToolDef(state: GlobalPluginState, session: SessionState): {

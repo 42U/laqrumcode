@@ -1,6 +1,6 @@
 /**
  * Recall tool — search the persistent memory graph.
- * Ported from kongbrain with SurrealStore/EmbeddingService injection.
+ * Ported from laqrumbrain with SurrealStore/EmbeddingService injection.
  */
 import type { GlobalPluginState, SessionState } from "../state.js";
 export declare function createRecallToolDef(state: GlobalPluginState, session: SessionState): {

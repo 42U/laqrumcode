@@ -2,7 +2,7 @@
  * Lightweight error swallowing with severity levels.
  *
  * - swallow(ctx, e)       — SILENT: expected degradation (embeddings offline, non-critical telemetry).
- *                           Only visible with KONGCODE_DEBUG=1.
+ *                           Only visible with LAQRUMCODE_DEBUG=1.
  * - swallow.warn(ctx, e)  — WARN: unexpected but recoverable (DB query failure, compaction failure).
  *                           Always logged to stderr.
  * - swallow.error(ctx, e) — ERROR: something is genuinely broken (cleanup failure, schema failure).
@@ -15,7 +15,7 @@
  * regex) cannot drift between callers.
  */
 import { log } from "./log.js";
-const DEBUG = process.env.KONGCODE_DEBUG === "1";
+const DEBUG = process.env.LAQRUMCODE_DEBUG === "1";
 /**
  * Canonical SurrealDB record-id validator. Matches `table:id` where the table
  * is a JS-style identifier and the id is `[a-zA-Z0-9_-]+`. Re-exported from
@@ -59,7 +59,7 @@ export function isUniqueViolation(err) {
     return false;
 }
 /**
- * Swallow an error silently. Only visible with KONGCODE_DEBUG=1.
+ * Swallow an error silently. Only visible with LAQRUMCODE_DEBUG=1.
  * Use for expected degradation (embeddings down, non-critical graph edges).
  */
 function swallow(context, err) {

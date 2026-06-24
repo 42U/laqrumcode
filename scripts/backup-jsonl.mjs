@@ -1,17 +1,17 @@
 #!/usr/bin/env node
 /**
- * KongCode JSON Lines backup — exports every table in the kongcode graph
+ * LaqrumCode JSON Lines backup — exports every table in the laqrumcode graph
  * to one `.jsonl` file per table under a timestamped output directory.
  *
- * Activated by skills/kongcode-backup-jsonl/SKILL.md.
+ * Activated by skills/laqrumcode-backup-jsonl/SKILL.md.
  *
  * Env-var overrides (all optional, sensible defaults from src/engine/config.ts):
  *   SURREAL_URL   — default ws://127.0.0.1:8000/rpc
  *   SURREAL_USER  — default root
  *   SURREAL_PASS  — default root
- *   SURREAL_NS    — default kong
+ *   SURREAL_NS    — default laqrum
  *   SURREAL_DB    — default memory
- *   KONGCODE_BACKUP_DIR — default ./kongcode-backup-YYYYMMDD-HHMM/
+ *   LAQRUMCODE_BACKUP_DIR — default ./laqrumcode-backup-YYYYMMDD-HHMM/
  */
 
 import { Surreal } from "surrealdb";
@@ -20,7 +20,7 @@ import { createWriteStream } from "node:fs";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
-/** Read the kongcode version from package.json so the backup records the
+/** Read the laqrumcode version from package.json so the backup records the
  *  schema version that produced it. restore-jsonl.mjs reads this back and
  *  warns (does not hard-fail) on a major/minor mismatch. */
 async function readSchemaVersion() {
@@ -36,11 +36,11 @@ async function readSchemaVersion() {
 const URL = process.env.SURREAL_URL || "ws://127.0.0.1:8000/rpc";
 const USER = process.env.SURREAL_USER || "root";
 const PASS = process.env.SURREAL_PASS || "root";
-const NS = process.env.SURREAL_NS || "kong";
+const NS = process.env.SURREAL_NS || "laqrum";
 const DB = process.env.SURREAL_DB || "memory";
 
 const STAMP = new Date().toISOString().replace(/[:.]/g, "-").replace(/T/, "_").slice(0, 17);
-const OUTDIR = resolve(process.env.KONGCODE_BACKUP_DIR || `./kongcode-backup-${STAMP}`);
+const OUTDIR = resolve(process.env.LAQRUMCODE_BACKUP_DIR || `./laqrumcode-backup-${STAMP}`);
 
 /** Node tables — keep in sync with src/engine/tools/introspect.ts ALLOWED_TABLES. */
 const NODE_TABLES = [
@@ -122,7 +122,7 @@ async function dumpTable(db, table) {
 }
 
 async function main() {
-  console.log(`KongCode JSON-Lines backup`);
+  console.log(`LaqrumCode JSON-Lines backup`);
   console.log(`  Source:  ${URL} ns=${NS} db=${DB}`);
   console.log(`  Output:  ${OUTDIR}`);
 
@@ -160,7 +160,7 @@ async function main() {
     db: DB,
     source: { endpoint: URL, namespace: NS, database: DB },
     exported_at: new Date().toISOString(),
-    kongcode_export_format: "jsonl-v1",
+    laqrumcode_export_format: "jsonl-v1",
     table_counts: tableCounts,
     row_counts: {
       nodes: Object.fromEntries(results.nodes.map(r => [r.table, r.count])),

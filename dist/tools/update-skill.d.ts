@@ -1,5 +1,5 @@
 /**
- * update_skill MCP tool. Revises an EXISTING skill row in the kongcode DB.
+ * update_skill MCP tool. Revises an EXISTING skill row in the laqrumcode DB.
  *
  * Counterpart to create_skill, which deliberately rejects name collisions.
  * Before this tool, the only way to change a shipped skill body was raw

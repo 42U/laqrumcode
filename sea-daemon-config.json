@@ -1,5 +1,5 @@
 {
-  "$comment": "SEA config for kongcode-daemon — the long-lived background process that owns SurrealDB connection, BGE-M3 embedding, and all 22 tool/hook handlers. Schema embedded as asset so daemon is fully portable.",
+  "$comment": "SEA config for laqrumcode-daemon — the long-lived background process that owns SurrealDB connection, BGE-M3 embedding, and all 22 tool/hook handlers. Schema embedded as asset so daemon is fully portable.",
   "main": "dist/daemon/bundle.cjs",
   "output": "dist/daemon-sea-prep.blob",
   "useSnapshot": false,

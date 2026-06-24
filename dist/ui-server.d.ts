@@ -64,7 +64,7 @@ export { dashboard, listMemories, listConcepts, graphNeighborhood, nodeDetail, l
 export declare function uiRequestHandler(state: GlobalPluginState, authToken: string): (req: IncomingMessage, res: ServerResponse) => void;
 /**
  * Start the loopback UI server. No-ops (logs once) when the frontend bundle is
- * absent, when KONGCODE_UI=0, or when the port is already bound by a sibling.
+ * absent, when LAQRUMCODE_UI=0, or when the port is already bound by a sibling.
  */
 export declare function startUiServer(state: GlobalPluginState, authToken: string): Promise<void>;
 export declare function stopUiServer(): Promise<void>;
