@@ -2,6 +2,14 @@
 
 All notable changes to LaqrumCode are documented here. The 0.7.x series introduced the daemon-split architecture; 0.8.0 will be the first marketplace-ready stable.
 
+## [0.8.2] - 2026-06-27
+
+### Fixed
+- **daemon:** `archiveOldTurns` now caps its scan with a server-side `TIMEOUT 8s`. On an overloaded SurrealDB instance the maintenance query could otherwise blow the 60s client deadline → flag the shared connection "zombie" → tear down the socket that *also* serves hook memory-injection, the cause of intermittent "daemon unreachable". A SurrealDB `TIMEOUT` error isn't `"deadline exceeded"`, so it also avoids the retry-doubling.
+
+### Performance
+- **HNSW indexes:** all 9 `*_vec_idx` vector indexes now pin `TYPE F32` instead of SurrealDB's F64 default — lossless (embeddings are F32-precision) and ~halves in-RAM index size. New installs get it automatically; existing installs rebuild via `scripts/migrate-hnsw-f32.mjs`.
+
 ## [0.8.1] - 2026-06-26
 
 ### Fixed
