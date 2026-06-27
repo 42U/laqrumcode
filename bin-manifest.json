@@ -1,38 +1,38 @@
 {
   "$comment": "Pinned SurrealDB binary release. Bumped manually when laqrumcode is tested against a newer SurrealDB version. Per-platform sha256 verified against the GitHub release artifact.",
   "surrealdb": {
-    "version": "3.0.5",
+    "version": "3.1.4",
     "releaseUrl": "https://github.com/surrealdb/surrealdb/releases/download/v{version}/surreal-v{version}.{platform}.{ext}",
     "platforms": {
       "linux-x64": {
         "platform": "linux-amd64",
         "ext": "tgz",
         "binaryName": "surreal",
-        "sha256": "48dbeba4896765f33e07acc25224073f0850c190872052b917ebda1f7b4375cb"
+        "sha256": "ff27994d8024dd35b8e862ca754eb2b478e3929cfcfbe17637f98a5efa5cbdb8"
       },
       "linux-arm64": {
         "platform": "linux-arm64",
         "ext": "tgz",
         "binaryName": "surreal",
-        "sha256": "86837a439a549ba35f78f463857ae74f0aa08b49bb473ca0fa09a122eaa6374e"
+        "sha256": "4c2f634b1a5e276b6d24e4f19bf8e5068a0760572ffec0536c3970165c2444d3"
       },
       "darwin-x64": {
         "platform": "darwin-amd64",
         "ext": "tgz",
         "binaryName": "surreal",
-        "sha256": "1377f8b97b9aefe70109f6f6af5f7c8f371b59878aaba9e5cff81c02afc6c685"
+        "sha256": "bed4ac044ae09e9768db8320bd80d8762e64640f27ce91ed05300117b3b5be47"
       },
       "darwin-arm64": {
         "platform": "darwin-arm64",
         "ext": "tgz",
         "binaryName": "surreal",
-        "sha256": "76655a2b42097f66133a0d1affda6c67dbc1454923da14d71f78c73fa0f69d17"
+        "sha256": "a5cd2def542cad710581c5ca6f03f0c67fc640e96c790b10ae850ed781d5b39c"
       },
       "win32-x64": {
         "platform": "windows-amd64",
         "ext": "exe",
         "binaryName": "surreal.exe",
-        "sha256": "fa96694e3ebc3c21da08493518c2199354b3a34f5022187b4cbdd4a6f4d325ec"
+        "sha256": "13781bc97db9348498bd6b5e0090cf2770e9d296640be8adacf73956e8a568a1"
       }
     }
   },
