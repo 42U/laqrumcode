@@ -162,7 +162,7 @@ function loadWeights(path: string): ACANWeights | null {
   try {
     if (!existsSync(path)) return null;
     const raw = JSON.parse(readFileSync(path, "utf-8"));
-    if (raw.version !== 2) return null;
+    if (raw.version !== 3) return null;
     if (!Array.isArray(raw.W_q) || raw.W_q.length !== EMBED_DIM) return null;
     if (!Array.isArray(raw.W_k) || raw.W_k.length !== EMBED_DIM) return null;
     if (!Array.isArray(raw.W_final) || raw.W_final.length !== FEATURE_COUNT) return null;
@@ -422,6 +422,12 @@ export function trainInBackground(
     function shuffle(arr) { for (let i = arr.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [arr[i], arr[j]] = [arr[j], arr[i]]; } return arr; }
     const n = samples.length;
     const auxFeatures = samples.map(s => s.aux_features);
+    // Hard-negative weighting (v3): upweight "looks-relevant-but-unused" samples
+    // (high retrieval cosine, low utilization) so the scorer is penalized harder
+    // for scoring them high — the discrimination signal that separates a good
+    // ranker. Stays within the proven pointwise objective; full listwise RankNet
+    // is a benchmark-gated follow-up (needs offline NDCG/MRR validation).
+    const hnWeight = (s) => (s.retrieval_score >= 0.5 && s.utilization <= 0.1) ? 2.5 : 1.0;
     const indices = shuffle(Array.from({ length: n }, (_, i) => i));
     const valSize = Math.max(1, Math.floor(n * cfg.valSplit));
     const valIdx = indices.slice(0, valSize);
@@ -431,17 +437,17 @@ export function trainInBackground(
     if (warmStart) { W_q = JSON.parse(JSON.stringify(warmStart.W_q)); W_k = JSON.parse(JSON.stringify(warmStart.W_k)); W_final = [...warmStart.W_final]; bias = warmStart.bias; }
     else { const xQK = Math.sqrt(2/(EMBED_DIM+ATTN_DIM)), xF = Math.sqrt(2/(FEATURE_COUNT+1)); W_q = []; W_k = []; for (let i = 0; i < EMBED_DIM; i++) { W_q.push(Array.from({length:ATTN_DIM}, () => (Math.random()*2-1)*xQK)); W_k.push(Array.from({length:ATTN_DIM}, () => (Math.random()*2-1)*xQK)); } W_final = Array.from({length:FEATURE_COUNT}, () => (Math.random()*2-1)*xF); W_final[0] = 0.3; bias = 0.0; }
     const scale = Math.sqrt(ATTN_DIM);
-    function evalLoss(idxList) { let total = 0; for (const si of idxList) { const s = samples[si]; const q = projectVec(s.query_embedding, W_q); const k = projectVec(s.memory_embedding, W_k); const attn = dot(q,k)/scale; const features = [attn,...auxFeatures[si]]; const score = dot(features, W_final)+bias; const err = score - s.utilization; total += err*err; } return total/idxList.length; }
+    function evalLoss(idxList) { let total = 0; for (const si of idxList) { const s = samples[si]; const q = projectVec(s.query_embedding, W_q); const k = projectVec(s.memory_embedding, W_k); const attn = dot(q,k)/scale; const features = [attn,...auxFeatures[si]]; const score = dot(features, W_final)+bias; const err = score - s.utilization; total += err*err*hnWeight(s); } return total/idxList.length; }
     let lr = cfg.lr, bestValLoss = Infinity, epochsSinceImprovement = 0, epochsSinceLrDecay = 0, lastTrainLoss = Infinity, actualEpochs = 0;
     for (let epoch = 0; epoch < cfg.epochs; epoch++) {
       actualEpochs = epoch+1; shuffle(trainIdx); let totalLoss = 0;
-      for (const si of trainIdx) { const s = samples[si]; const q = projectVec(s.query_embedding, W_q); const k = projectVec(s.memory_embedding, W_k); const attn = dot(q,k)/scale; const features = [attn,...auxFeatures[si]]; const score = dot(features, W_final)+bias; const err = score - s.utilization; totalLoss += err*err; const dScore = (2/nTrain)*err; for (let j = 0; j < FEATURE_COUNT; j++) W_final[j] -= lr*dScore*features[j]; bias -= lr*dScore; const dAttn = dScore*W_final[0]; const dQ = new Array(ATTN_DIM), dK = new Array(ATTN_DIM); for (let j = 0; j < ATTN_DIM; j++) { dQ[j] = dAttn*k[j]/scale; dK[j] = dAttn*q[j]/scale; } for (let i = 0; i < EMBED_DIM; i++) { if (s.query_embedding[i]!==0) { const qi=s.query_embedding[i], row=W_q[i]; for (let j=0;j<ATTN_DIM;j++) row[j]-=lr*dQ[j]*qi; } if (s.memory_embedding[i]!==0) { const mi=s.memory_embedding[i], row=W_k[i]; for (let j=0;j<ATTN_DIM;j++) row[j]-=lr*dK[j]*mi; } } }
+      for (const si of trainIdx) { const s = samples[si]; const q = projectVec(s.query_embedding, W_q); const k = projectVec(s.memory_embedding, W_k); const attn = dot(q,k)/scale; const features = [attn,...auxFeatures[si]]; const score = dot(features, W_final)+bias; const err = score - s.utilization; const w = hnWeight(s); totalLoss += err*err*w; const dScore = (2/nTrain)*err*w; for (let j = 0; j < FEATURE_COUNT; j++) W_final[j] -= lr*dScore*features[j]; bias -= lr*dScore; const dAttn = dScore*W_final[0]; const dQ = new Array(ATTN_DIM), dK = new Array(ATTN_DIM); for (let j = 0; j < ATTN_DIM; j++) { dQ[j] = dAttn*k[j]/scale; dK[j] = dAttn*q[j]/scale; } for (let i = 0; i < EMBED_DIM; i++) { if (s.query_embedding[i]!==0) { const qi=s.query_embedding[i], row=W_q[i]; for (let j=0;j<ATTN_DIM;j++) row[j]-=lr*dQ[j]*qi; } if (s.memory_embedding[i]!==0) { const mi=s.memory_embedding[i], row=W_k[i]; for (let j=0;j<ATTN_DIM;j++) row[j]-=lr*dK[j]*mi; } } }
       lastTrainLoss = totalLoss/nTrain; const valLoss = evalLoss(valIdx);
       if (valLoss < bestValLoss) { bestValLoss = valLoss; epochsSinceImprovement = 0; epochsSinceLrDecay = 0; } else { epochsSinceImprovement++; epochsSinceLrDecay++; }
       if (epochsSinceLrDecay >= cfg.lrDecayPatience && lr > cfg.lrFloor) { lr = Math.max(lr*0.5, cfg.lrFloor); epochsSinceLrDecay = 0; }
       if (epochsSinceImprovement >= cfg.earlyStopPatience) break;
     }
-    parentPort.postMessage({ weights: { W_q, W_k, W_final, bias, version: 2, trainedAt: Date.now(), trainedOnSamples: n }, trainLoss: lastTrainLoss, valLoss: bestValLoss, actualEpochs, finalLr: lr, config: cfg });
+    parentPort.postMessage({ weights: { W_q, W_k, W_final, bias, version: 3, trainedAt: Date.now(), trainedOnSamples: n }, trainLoss: lastTrainLoss, valLoss: bestValLoss, actualEpochs, finalLr: lr, config: cfg });
   `;
 
   // K34: the embedding floats dominate the payload — MAX_TRAINING_SAMPLES

@@ -43,7 +43,7 @@ function makeValidWeights(): ACANWeights {
     ),
     W_final: Array.from({ length: FEATURE_COUNT }, () => Math.random() * 0.5),
     bias: 0.1,
-    version: 2,
+    version: 3,
     trainedAt: Date.now(),
     trainedOnSamples: 6000,
   };
