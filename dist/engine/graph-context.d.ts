@@ -5,7 +5,7 @@
  * → dedup → budget trim → format.
  */
 import type { AgentMessage } from "./types.js";
-import type { SurrealStore } from "./surreal.js";
+import type { SurrealStore, VectorSearchResult } from "./surreal.js";
 import type { EmbeddingService } from "./embeddings.js";
 import type { SessionState } from "./state.js";
 import type { LlamaRankingContext } from "node-llama-cpp";
@@ -49,6 +49,30 @@ export declare function applyDistributionBands<T extends {
     finalScore?: number;
     band?: SalienceBand;
 }>(items: T[]): void;
+/** Cross-encoder rerank stage. Takes the top-N candidates by WMR/ACAN score,
+ *  rescores each (query, doc) pair via a single batched call to the bge-reranker
+ *  model, blends the two signals 60/40 (WMR/cross), re-sorts the top-N, and
+ *  decides what to do with the tail.
+ *
+ *  0.7.28: also stamps `crossScore` and `band` on each reranked candidate so
+ *  the formatter can render salience tags ([load-bearing]/[supporting]/etc.)
+ *  instead of the noisy relevance percentage. Drops candidates below
+ *  BAND_DROP_BELOW (0.15) — the cross-encoder strongly disagreeing with WMR
+ *  is a hard noise filter.
+ *
+ *  0.7.43: by default, tail items (positions past RERANK_TOP_N) are now
+ *  DROPPED rather than stamped 'background' and shipped. The old behavior
+ *  was leaking irrelevant graph-neighbor concepts into context (e.g., a
+ *  4-week-old heartbeat-system concept from a different project surfacing
+ *  in unrelated turns) because tail items never saw the cross-encoder yet
+ *  arrived in the injection anyway. */
+export declare function rerankResults<T extends {
+    id: string;
+    text?: string;
+    finalScore: number;
+    crossScore?: number;
+    band?: SalienceBand;
+}>(deduped: T[], queryText: string): Promise<T[]>;
 /** @internal Exported for testing. */
 export interface Budgets {
     conversation: number;
@@ -70,10 +94,16 @@ export interface ContextStats {
     mode: "graph" | "recency-only" | "passthrough";
     prefetchHit: boolean;
 }
+export interface ScoredResult extends VectorSearchResult {
+    finalScore: number;
+    fromNeighbor?: boolean;
+    acanFeatures?: number[];
+}
 export declare function formatRelativeTime(ts: string): string;
 /** Dot-product cosine similarity between two equal-length vectors. Returns 0 if either has zero magnitude. */
 export declare function cosineSimilarity(a: number[], b: number[]): number;
 export declare function expandVagueQuery(query: string, session?: SessionState): string;
+export declare function deduplicateResults(ranked: ScoredResult[]): ScoredResult[];
 export interface GraphTransformParams {
     messages: AgentMessage[];
     session: SessionState;

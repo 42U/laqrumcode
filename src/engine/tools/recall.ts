@@ -9,6 +9,7 @@ import { findRelevantSkills, formatSkillContext } from "../skills.js";
 import { swallow } from "../errors.js";
 import { stripStructuralTags } from "../sanitize.js";
 import type { VectorSearchResult } from "../surreal.js";
+import { deduplicateResults, rerankResults, type ScoredResult } from "../graph-context.js";
 
 const recallSchema = Type.Object({
   query: Type.String({ description: "What to search for in memory. Can be a concept, topic, decision, file path, or natural language description." }),
@@ -35,7 +36,7 @@ export function createRecallToolDef(state: GlobalPluginState, session: SessionSt
         return { content: [{ type: "text" as const, text: "Memory system unavailable." }], details: null };
       }
 
-      const maxResults = Math.min(params.limit ?? 3, 15);
+      const maxResults = Math.min(params.limit ?? 5, 15);
 
       try {
         const queryVec = await embeddings.embed(params.query);
@@ -79,9 +80,15 @@ export function createRecallToolDef(state: GlobalPluginState, session: SessionSt
         // Phase 2: keep neighbors separate so output surfaces graph-walk neighborhood
         // distinctly from primary vector hits. Gives grounding skills a clearer
         // signal about which items are direct matches vs. cross-linked context.
-        const primary = [...results]
-          .sort((a, b) => (b.score ?? 0) - (a.score ?? 0))
-          .slice(0, maxResults);
+        // Rank primary results through the real stack — semantic dedup + the
+        // bge-reranker-v2-m3 cross-encoder — instead of raw cosine. Deliberate
+        // recalls were previously ranked WORSE than passive auto-injection.
+        // (ACAN/WMR are intentionally skipped here: their recency/utility signals
+        //  suit auto-injection; a deliberate recall wants pure semantic relevance.)
+        const scored: ScoredResult[] = results.map((r) => ({ ...r, finalScore: r.score ?? 0 }));
+        const deduped = deduplicateResults(scored.sort((a, b) => b.finalScore - a.finalScore));
+        const reranked = await rerankResults(deduped, params.query);
+        const primary = reranked.sort((a, b) => b.finalScore - a.finalScore).slice(0, maxResults);
         const primaryIds = new Set(primary.map(r => r.id));
         const neighborList = neighbors.filter(n => !primaryIds.has(n.id)).slice(0, 5);
         const all = primary;
@@ -93,7 +100,7 @@ export function createRecallToolDef(state: GlobalPluginState, session: SessionSt
         const formatted = all.map((r, i) => {
           const tag = r.table === "turn" ? `[${r.role ?? "turn"}]` : `[${r.table}]`;
           const time = r.timestamp ? ` (${new Date(r.timestamp).toLocaleDateString()})` : "";
-          const score = r.score ? ` score:${r.score.toFixed(2)}` : "";
+          const score = ` score:${r.finalScore.toFixed(2)}`;
           return `${i + 1}. ${tag}${time}${score}\n   ${stripStructuralTags((r.text ?? "").slice(0, 300))}`;
         }).join("\n\n");
 

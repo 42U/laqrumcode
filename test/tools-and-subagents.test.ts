@@ -123,7 +123,7 @@ describe("recall tool", () => {
     expect(state.store.vectorSearch).toHaveBeenCalledWith(
       expect.any(Array),
       "test-session",
-      expect.objectContaining({ turn: 0, concept: 3, memory: 0, artifact: 0 }),
+      expect.objectContaining({ turn: 0, concept: 5, memory: 0, artifact: 0 }),
     );
   });
 

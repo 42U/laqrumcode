@@ -384,7 +384,7 @@ export function applyDistributionBands<T extends { finalScore?: number; band?: S
  *  4-week-old heartbeat-system concept from a different project surfacing
  *  in unrelated turns) because tail items never saw the cross-encoder yet
  *  arrived in the injection anyway. */
-async function rerankResults<T extends { id: string; text?: string; finalScore: number; crossScore?: number; band?: SalienceBand }>(
+export async function rerankResults<T extends { id: string; text?: string; finalScore: number; crossScore?: number; band?: SalienceBand }>(
   deduped: T[],
   queryText: string,
 ): Promise<T[]> {
@@ -590,7 +590,7 @@ export interface ContextStats {
 
 // ── Scoring types ──────────────────────────────────────────────────────────────
 
-interface ScoredResult extends VectorSearchResult {
+export interface ScoredResult extends VectorSearchResult {
   finalScore: number;
   fromNeighbor?: boolean;
   // The exact ACAN aux-feature vector used to score this item (acanAuxVector),
@@ -987,7 +987,7 @@ async function scoreResults(
 
 // ── Deduplication ──────────────────────────────────────────────────────────────
 
-function deduplicateResults(ranked: ScoredResult[]): ScoredResult[] {
+export function deduplicateResults(ranked: ScoredResult[]): ScoredResult[] {
   // Pre-compute word sets to avoid re-splitting in O(n^2) inner loop
   const wordSets = ranked.map(r =>
     new Set((r.text ?? "").toLowerCase().split(/\s+/).filter((w) => w.length > 2)),

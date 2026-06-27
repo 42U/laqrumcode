@@ -339,7 +339,7 @@ export function applyDistributionBands(items) {
  *  4-week-old heartbeat-system concept from a different project surfacing
  *  in unrelated turns) because tail items never saw the cross-encoder yet
  *  arrived in the injection anyway. */
-async function rerankResults(deduped, queryText) {
+export async function rerankResults(deduped, queryText) {
     if (deduped.length <= 5)
         return deduped;
     const loaded = await ensureRerankerLoaded();
@@ -856,7 +856,7 @@ async function scoreResults(results, neighborIds, queryEmbedding, store, current
         .sort((a, b) => b.finalScore - a.finalScore);
 }
 // ── Deduplication ──────────────────────────────────────────────────────────────
-function deduplicateResults(ranked) {
+export function deduplicateResults(ranked) {
     // Pre-compute word sets to avoid re-splitting in O(n^2) inner loop
     const wordSets = ranked.map(r => new Set((r.text ?? "").toLowerCase().split(/\s+/).filter((w) => w.length > 2)));
     const kept = [];
