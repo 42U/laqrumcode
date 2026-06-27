@@ -525,7 +525,7 @@ async function shutdown() {
 }
 // ── Main ──────────────────────────────────────────────────────────────────────
 async function main() {
-    const server = new Server({ name: "laqrumcode", version: "0.8.2" }, { capabilities: { tools: {} } });
+    const server = new Server({ name: "laqrumcode", version: "0.8.3" }, { capabilities: { tools: {} } });
     // Register tool list handler
     server.setRequestHandler(ListToolsRequestSchema, async () => ({
         tools: TOOLS,

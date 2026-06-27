@@ -2,6 +2,26 @@
 
 All notable changes to LaqrumCode are documented here. The 0.7.x series introduced the daemon-split architecture; 0.8.0 will be the first marketplace-ready stable.
 
+## [0.8.3] - 2026-06-27
+
+A SOTA-retrieval optimization pass: deliberate `recall()` and passive injection now share the full ranking stack, the injected set is diversity- and hybrid-fusion-aware, the learned scorer trains on the right signal with hard-negative emphasis, and heavy maintenance can no longer stall hook serving.
+
+### Performance
+- **`recall()` routed through the real ranking stack.** The deliberate `recall()` tool ranked by raw cosine only — bypassing the semantic dedup + bge-reranker-v2-m3 cross-encoder that passive auto-injection uses, so explicit recalls were ranked *worse* than what an agent passively receives. It now runs dedup → cross-encoder rerank (0.6·cosine + 0.4·cross). Also fixes a default-limit mismatch (was 3; schema documents 5).
+- **MMR diversification of the injected set.** A Maximal Marginal Relevance pass (λ=0.7) between the cross-encoder rerank and token-budget selection — greedy argmax(λ·score − (1−λ)·maxCosineToPicked) over the selection-eligible items — so a redundant concept-family can't crowd out coverage.
+- **Hybrid dense+keyword fusion (RRF).** The dense (vector) and keyword (tag) candidate rankings were merged by plain id-concat. They're now fused with Reciprocal Rank Fusion (k=60) for graph-walk seed selection, so a keyword-strong concept with mediocre cosine can still seed expansion.
+- **Hard-negative weighting in the ACAN training loss.** The learned scorer's pointwise objective now upweights hard negatives (high retrieval cosine, low utilization) 2.5×. Weights version bumped 2→3 → clean cold-start retrain (ACAN falls back to WMR during the transition).
+- **HNSW M=16 / EFC=200.** Bumped the vector indexes from SurrealDB's M=12/EFC=150 defaults to the SOTA-minimum (recall is monotonic in M; extra RAM offset by F32). New installs get it automatically; existing installs pick it up in the `scripts/migrate-hnsw-f32.mjs` rebuild (now F32 + M/EFC together).
+
+### Fixed
+- **daemon:** Heavy maintenance jobs now run on a **dedicated SurrealDB connection**, so a maintenance deadline → zombie → reconnect can no longer reject in-flight hook queries (the architectural complement to 0.8.2's per-query `TIMEOUT`). Best-effort with a safe fallback to the shared store — cannot regress maintenance.
+- **acan:** The learned scorer trained on a *recomputed* aux-feature vector that didn't match the one used at scoring time (train/inference skew). It now persists and trains on the exact stage-time `aux_features`.
+
+### Known follow-ups (benchmark-/ops-gated)
+- True dense+**sparse** hybrid (BGE-M3 sparse/ColBERT heads) is blocked: `node-llama-cpp` exposes only dense embeddings, and SurrealDB BM25 full-text parse-errored on this build. A BM25 sparse arm + RRF-into-final-scoring needs a recall benchmark.
+- Full **listwise RankNet** ACAN loss needs offline NDCG/MRR validation before activation.
+- Aggressive HNSW (M 24–48 / EFC 300) and a **Qwen3-Embedding** swap (model path + dims are already config-swappable via `EMBED_MODEL_PATH`) are a benchmark + re-embed decision.
+
 ## [0.8.2] - 2026-06-27
 
 ### Fixed
