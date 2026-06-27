@@ -2,6 +2,14 @@
 
 All notable changes to LaqrumCode are documented here. The 0.7.x series introduced the daemon-split architecture; 0.8.0 will be the first marketplace-ready stable.
 
+## [0.8.1] - 2026-06-26
+
+### Fixed
+- **auto-drain:** terminate the headless-extractor spawn args with `--` so `DRAIN_PROMPT` is no longer swallowed by the variadic `--disallowed-tools` (claude 2.1.x). The bug made every drain exit 1 in ~6s with no queue progress — flipping the `autoDrain` maintenance job RED and leaving `pending_work` permanently undrained. Verified against claude 2.1.195 (live drain 6→4).
+
+### Changed
+- **`scripts/migrate-legacy-graph.mjs`:** scaled the legacy-graph migrator to 300k+ rows — keyset-paginated streaming reads (flat memory), bulk `INSERT RELATION INTO` for edge tables (~100x faster than per-record `RELATE`), and a resilient per-record skip+log fallback for rows the destination schema rejects. Preserves the content-safe verbatim-copy contract.
+
 ## [0.8.0] - 2026-06-24
 
 ### Changed
