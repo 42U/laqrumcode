@@ -2867,8 +2867,19 @@ export class SurrealStore {
       // after week 1 regardless of volume.
       if (!(await this.shouldRunMaintenance("archiveOldTurns", 500, 7, count))) return 0;
 
+      // A server-side `TIMEOUT` caps this scan at 8s ON THE SERVER. Without it,
+      // an overloaded instance lets this (anti-join) scan run to the 60s CLIENT
+      // deadline in deadlineQuery, which flags the shared WS connection "zombie"
+      // and tears it down (close() + reconnect) — rejecting in-flight HOOK
+      // queries and making the daemon intermittently "unreachable" (observed
+      // 2026-06-27). A SurrealDB TIMEOUT error is "...exceeded the timeout: 8s",
+      // which does NOT contain "deadline exceeded", so it does NOT match
+      // isRetryableSurrealError → no zombie flag, no shared-socket reconnect, no
+      // retry-doubling. Worst case the archival skips a cycle (caught → returns
+      // 0) while the daemon stays responsive; the client 60s deadline remains
+      // the true-zombie backstop for genuinely hung sockets.
       const staleRows = await this.queryFirst<{ id: string }>(
-        `SELECT id FROM turn WHERE timestamp < time::now() - 7d AND pruned_at IS NONE AND <string>id NOT IN (SELECT VALUE memory_id FROM retrieval_outcome WHERE memory_table = 'turn') LIMIT 500`,
+        `SELECT id FROM turn WHERE timestamp < time::now() - 7d AND pruned_at IS NONE AND <string>id NOT IN (SELECT VALUE memory_id FROM retrieval_outcome WHERE memory_table = 'turn') LIMIT 500 TIMEOUT 8s`,
       );
       if (!staleRows.length) return 0;
       for (const row of staleRows as { id: string }[]) {
