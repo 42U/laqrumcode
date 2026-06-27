@@ -1981,9 +1981,13 @@ async function graphTransformInner(
     // Vector search + tag-boosted retrieval (cache miss path, run in parallel)
     recordPrefetchMiss();
     mark("vector-search");
-    let [vectorResultsRaw, tagResults] = await Promise.all([
+    let [vectorResultsRaw, tagResults, ftsResults] = await Promise.all([
       store.vectorSearch(queryVec, session.sessionId, vectorSearchLimits, isACANActive(), session.projectId || undefined),
       store.tagBoostedConcepts(queryText, queryVec, 10).catch(e => { swallow.warn("graph-context:tagBoost", e); return [] as VectorSearchResult[]; }),
+      (typeof store.fulltextSearch === "function"
+        ? store.fulltextSearch(queryText, { concept: 10, turn: 8, memory: 8, artifact: 5, skill: 5 })
+        : Promise.resolve([] as VectorSearchResult[])
+      ).catch(e => { swallow.warn("graph-context:fulltext", e); return [] as VectorSearchResult[]; }),
     ]);
     // 0.7.46: cross-project fallback. The scoped pass above hard-filters
     // by (project_id IS NONE OR project_id = $pid OR scope = 'global'). A
@@ -2004,23 +2008,27 @@ async function graphTransformInner(
       const ts = parseDatetimeMs(r.timestamp) ?? 0;
       return ts > 0 && ts < recentCutoffMs;
     });
-    // Merge: dedupe tag results against vector results, then combine
-    const vectorIds = new Set(vectorResults.map(r => r.id));
-    const uniqueTagResults = tagResults.filter(r => !vectorIds.has(r.id));
-    const results = [...vectorResults, ...uniqueTagResults];
+    // Merge the three retrieval arms (dense vector + keyword tag + lexical BM25),
+    // de-duplicated by id. The BM25 (fulltext) arm adds RECALL: exact-term /
+    // rare-token / code-identifier rows the dense embedding missed entirely.
+    // String(id) keys so RecordId-vs-string can't silently break dedup/fusion.
+    const seenIds = new Set(vectorResults.map(r => String(r.id)));
+    const uniqueTagResults = tagResults.filter(r => !seenIds.has(String(r.id)));
+    for (const r of uniqueTagResults) seenIds.add(String(r.id));
+    const uniqueFtsResults = ftsResults.filter(r => !seenIds.has(String(r.id)));
+    const results = [...vectorResults, ...uniqueTagResults, ...uniqueFtsResults];
 
-    // Graph neighbor expansion
-    // RRF-fuse the dense (vector) and keyword (tag) rankings to pick graph-walk
-    // seeds, so a keyword-strong concept with mediocre cosine can still seed
-    // expansion (hybrid retrieval). BGE-M3's sparse/ColBERT heads aren't exposed
-    // by node-llama-cpp, so the tag/keyword arm is the sparse signal here; a true
-    // sparse arm (BM25) + RRF-into-scoring is a benchmark-gated follow-up.
+    // Graph neighbor expansion — RRF-fuse all THREE arms (dense vector + keyword
+    // tag + lexical BM25) to pick graph-walk seeds, so a row strong in any one arm
+    // (e.g. an exact code-identifier match the dense embedding missed) can still
+    // seed expansion. String(id) keys keep fusion correct across RecordId/string.
     const rrf = reciprocalRankFusion([
-      [...vectorResults].sort((a, b) => (b.score ?? 0) - (a.score ?? 0)).map((r) => r.id),
-      [...tagResults].sort((a, b) => (b.score ?? 0) - (a.score ?? 0)).map((r) => r.id),
+      [...vectorResults].sort((a, b) => (b.score ?? 0) - (a.score ?? 0)).map((r) => String(r.id)),
+      [...tagResults].sort((a, b) => (b.score ?? 0) - (a.score ?? 0)).map((r) => String(r.id)),
+      [...ftsResults].sort((a, b) => (b.score ?? 0) - (a.score ?? 0)).map((r) => String(r.id)),
     ]);
-    const topIds = [...new Set(results.map((r) => r.id))]
-      .sort((a, b) => (rrf.get(b) ?? 0) - (rrf.get(a) ?? 0))
+    const topIds = [...new Map(results.map((r) => [String(r.id), r.id])).values()]
+      .sort((a, b) => (rrf.get(String(b)) ?? 0) - (rrf.get(String(a)) ?? 0))
       .slice(0, 20);
 
     const DEEP_INTENTS = new Set(["code-debug", "deep-explore", "multi-step", "reference-prior"]);

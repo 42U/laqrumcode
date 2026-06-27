@@ -24,6 +24,31 @@ function isTransactionConflict(e: unknown): boolean {
 }
 
 /** Record with a vector similarity score from SurrealDB search */
+// ── Lexical (BM25) query-keyword extraction ───────────────────────────────────
+// Basic English stopword removal so the per-term OR full-text query isn't built
+// from function words. BM25's IDF already down-weights common terms, so this is a
+// lighter list than the tag arm's aggressive noise filter (tagBoostedConcepts).
+const FTS_STOPWORDS = new Set([
+  "the","a","an","is","are","was","were","be","been","being","have","has","had","do","does","did",
+  "will","would","could","should","can","may","might","to","of","in","for","on","with","at","by",
+  "from","as","into","about","and","or","but","if","so","not","no","this","that","these","those",
+  "it","its","you","we","they","my","your","our","their","what","which","who","how","when","where",
+  "why","all","any","some","more","just","than","then","over","under","such","also","there","here",
+]);
+const FTS_MAX_TERMS = 6;
+/** Distinctive query keywords for the lexical (BM25) arm — lowercase, depunct, destopword, capped. */
+export function extractFtsTerms(queryText: string): string[] {
+  return queryText.toLowerCase().replace(/[^a-z0-9\s-]/g, "").split(/\s+/)
+    .filter((w) => w.length > 2 && !FTS_STOPWORDS.has(w))
+    .slice(0, FTS_MAX_TERMS);
+}
+/** Summed term-frequency of `terms` in `text` — BM25 fallback for the SurrealDB
+ *  #7290 fresh/near-empty-index edge case where search::score returns all-zero. */
+function ftsTermFrequency(text: string, terms: string[]): number {
+  const t = text.toLowerCase();
+  return terms.reduce((acc, term) => acc + (t.split(term).length - 1), 0);
+}
+
 export interface VectorSearchResult {
   id: string;
   text: string;
@@ -1403,6 +1428,52 @@ export class SurrealStore {
       swallow.warn("surreal:tagBoostedConcepts", e);
       return [];
     }
+  }
+
+  /**
+   * Lexical / sparse retrieval arm — the BM25 companion to vectorSearch() in the
+   * hybrid pipeline. Runs a FULLTEXT (BM25) query over the *_fts_idx indexes
+   * (schema.surql) and returns matches ranked by summed BM25 across query terms.
+   * Terms are OR'd (one @n@ match-ref each) for RECALL: exact-term / rare-token /
+   * code-identifier queries that the dense embedding ranks poorly still surface.
+   * Re-ranks by term-frequency when the server returns all-zero BM25 (SurrealDB
+   * #7290 — the fresh/near-empty-index corpus-stats edge case). Per-table failures
+   * (e.g. index not yet built on a fresh install) are swallowed, not fatal.
+   */
+  async fulltextSearch(
+    queryText: string,
+    limits: { turn?: number; concept?: number; memory?: number; artifact?: number; skill?: number } = {},
+  ): Promise<VectorSearchResult[]> {
+    const terms = extractFtsTerms(queryText);
+    if (terms.length === 0) return [];
+    const scoreSum = terms.map((_, i) => `search::score(${i + 1})`).join(" + ");
+    const params: Record<string, unknown> = {};
+    terms.forEach((t, i) => { params[`t${i}`] = t; });
+    const TABLES: Array<{ table: string; field: string; limit: number; extra: string }> = [
+      { table: "concept", field: "content", limit: limits.concept ?? 0, extra: "AND superseded_at IS NONE" },
+      { table: "turn", field: "text", limit: limits.turn ?? 0, extra: "AND pruned_at IS NONE" },
+      { table: "memory", field: "text", limit: limits.memory ?? 0, extra: "" },
+      { table: "artifact", field: "description", limit: limits.artifact ?? 0, extra: "" },
+      { table: "skill", field: "description", limit: limits.skill ?? 0, extra: "" },
+    ];
+    const out: VectorSearchResult[] = [];
+    for (const { table, field, limit, extra } of TABLES) {
+      if (limit <= 0) continue;
+      const where = terms.map((_, i) => `${field} @${i + 1}@ $t${i}`).join(" OR ");
+      const sql =
+        `SELECT id, ${field} AS text, '${table}' AS table, (${scoreSum}) AS score ` +
+        `FROM ${table} WHERE (${where}) ${extra} ORDER BY score DESC LIMIT ${Math.max(1, Math.floor(limit))}`;
+      try {
+        const rows = await this.queryFirst<VectorSearchResult>(sql, params);
+        if (rows.length > 0 && rows.every((r) => !r.score)) {
+          // #7290 fallback: near-empty index → BM25 all-zero → rank by raw term frequency.
+          for (const r of rows) r.score = ftsTermFrequency(String(r.text ?? ""), terms);
+          rows.sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
+        }
+        out.push(...rows);
+      } catch (e) { swallow.warn(`surreal:fulltextSearch:${table}`, e); }
+    }
+    return out;
   }
 
   async graphExpand(

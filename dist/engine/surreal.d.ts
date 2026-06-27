@@ -1,5 +1,6 @@
 import type { SurrealConfig } from "./config.js";
-/** Record with a vector similarity score from SurrealDB search */
+/** Distinctive query keywords for the lexical (BM25) arm — lowercase, depunct, destopword, capped. */
+export declare function extractFtsTerms(queryText: string): string[];
 export interface VectorSearchResult {
     id: string;
     text: string;
@@ -309,6 +310,23 @@ export declare class SurrealStore {
      * Returns concepts that pure vector search might miss due to embedding mismatch.
      */
     tagBoostedConcepts(queryText: string, queryVec: number[], limit?: number): Promise<VectorSearchResult[]>;
+    /**
+     * Lexical / sparse retrieval arm — the BM25 companion to vectorSearch() in the
+     * hybrid pipeline. Runs a FULLTEXT (BM25) query over the *_fts_idx indexes
+     * (schema.surql) and returns matches ranked by summed BM25 across query terms.
+     * Terms are OR'd (one @n@ match-ref each) for RECALL: exact-term / rare-token /
+     * code-identifier queries that the dense embedding ranks poorly still surface.
+     * Re-ranks by term-frequency when the server returns all-zero BM25 (SurrealDB
+     * #7290 — the fresh/near-empty-index corpus-stats edge case). Per-table failures
+     * (e.g. index not yet built on a fresh install) are swallowed, not fatal.
+     */
+    fulltextSearch(queryText: string, limits?: {
+        turn?: number;
+        concept?: number;
+        memory?: number;
+        artifact?: number;
+        skill?: number;
+    }): Promise<VectorSearchResult[]>;
     graphExpand(nodeIds: string[], queryVec: number[], hops?: number): Promise<VectorSearchResult[]>;
     /** 0.7.121 — counter side-table. The old per-retrieval
      *  `UPDATE <row> SET access_count += 1` rewrote the ENTIRE row (embedding

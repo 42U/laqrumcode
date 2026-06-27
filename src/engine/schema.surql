@@ -63,6 +63,24 @@ DEFINE FIELD IF NOT EXISTS embedding_target_truncated ON artifact TYPE option<bo
 DEFINE INDEX IF NOT EXISTS artifact_vec_idx ON artifact FIELDS embedding HNSW DIMENSION 1024 DIST COSINE TYPE F32 EFC 200 M 16;
 DEFINE INDEX IF NOT EXISTS artifact_type_idx ON artifact FIELDS type;
 
+-- ── Full-text (BM25) sparse arm — hybrid retrieval ─────────────────────────────
+-- Lexical/sparse companion to the dense HNSW vector indexes. The retrieval
+-- pipeline RRF-fuses BM25 matches with vector matches so exact-term / rare-token /
+-- code-identifier queries (where dense embeddings are weakest) still surface and
+-- seed graph expansion. blank/class/camel/punct tokenizers + snowball(english)
+-- stemming handle code-ish identifiers; lowercase+ascii normalize.
+-- NOTE: BM25 search::score returns 0 on a near-empty index (SurrealDB #7290 — a
+-- fresh-DB corpus-stats edge case); fulltextSearch() detects all-zero scores and
+-- falls back to a term-frequency rank, so small/fresh DBs still order sensibly.
+DEFINE ANALYZER IF NOT EXISTS fts_analyzer TOKENIZERS blank,class,camel,punct FILTERS lowercase,ascii,snowball(english);
+DEFINE INDEX IF NOT EXISTS concept_fts_idx ON concept FIELDS content FULLTEXT ANALYZER fts_analyzer BM25;
+DEFINE INDEX IF NOT EXISTS turn_fts_idx ON turn FIELDS text FULLTEXT ANALYZER fts_analyzer BM25;
+DEFINE INDEX IF NOT EXISTS memory_fts_idx ON memory FIELDS text FULLTEXT ANALYZER fts_analyzer BM25;
+DEFINE INDEX IF NOT EXISTS artifact_fts_idx ON artifact FIELDS description FULLTEXT ANALYZER fts_analyzer BM25;
+-- skill indexes `description` (short summary), NOT `body`: full skill bodies are
+-- large markdown and a FULLTEXT build over them is slow enough to stall schema-apply.
+DEFINE INDEX IF NOT EXISTS skill_fts_idx ON skill FIELDS description FULLTEXT ANALYZER fts_analyzer BM25;
+
 -- ============================================================
 -- PILLAR 5: Concept (semantic knowledge nodes)
 -- ============================================================
