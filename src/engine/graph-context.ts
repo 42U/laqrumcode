@@ -989,6 +989,21 @@ async function scoreResults(
     .sort((a, b) => b.finalScore - a.finalScore);
 }
 
+// ── Reciprocal Rank Fusion (hybrid retrieval) ──────────────────────────────────
+// Fuse multiple ranked id-lists into one score map: score(id) = Σ 1/(k + rank).
+// Rank-based, so it combines heterogeneous rankers (dense cosine + keyword/tag)
+// without needing comparable raw scores. k=60 is the standard RRF constant.
+export function reciprocalRankFusion(rankedLists: string[][], k = 60): Map<string, number> {
+  const scores = new Map<string, number>();
+  for (const list of rankedLists) {
+    for (let rank = 0; rank < list.length; rank++) {
+      const id = list[rank];
+      scores.set(id, (scores.get(id) ?? 0) + 1 / (k + rank + 1));
+    }
+  }
+  return scores;
+}
+
 // ── Deduplication ──────────────────────────────────────────────────────────────
 
 export function deduplicateResults(ranked: ScoredResult[]): ScoredResult[] {
@@ -1995,10 +2010,18 @@ async function graphTransformInner(
     const results = [...vectorResults, ...uniqueTagResults];
 
     // Graph neighbor expansion
-    const topIds = results
-      .sort((a, b) => (b.score ?? 0) - (a.score ?? 0))
-      .slice(0, 20)
-      .map((r) => r.id);
+    // RRF-fuse the dense (vector) and keyword (tag) rankings to pick graph-walk
+    // seeds, so a keyword-strong concept with mediocre cosine can still seed
+    // expansion (hybrid retrieval). BGE-M3's sparse/ColBERT heads aren't exposed
+    // by node-llama-cpp, so the tag/keyword arm is the sparse signal here; a true
+    // sparse arm (BM25) + RRF-into-scoring is a benchmark-gated follow-up.
+    const rrf = reciprocalRankFusion([
+      [...vectorResults].sort((a, b) => (b.score ?? 0) - (a.score ?? 0)).map((r) => r.id),
+      [...tagResults].sort((a, b) => (b.score ?? 0) - (a.score ?? 0)).map((r) => r.id),
+    ]);
+    const topIds = [...new Set(results.map((r) => r.id))]
+      .sort((a, b) => (rrf.get(b) ?? 0) - (rrf.get(a) ?? 0))
+      .slice(0, 20);
 
     const DEEP_INTENTS = new Set(["code-debug", "deep-explore", "multi-step", "reference-prior"]);
     const graphHops = DEEP_INTENTS.has(currentIntent) ? 2 : 1;

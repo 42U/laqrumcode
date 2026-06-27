@@ -103,6 +103,7 @@ export declare function formatRelativeTime(ts: string): string;
 /** Dot-product cosine similarity between two equal-length vectors. Returns 0 if either has zero magnitude. */
 export declare function cosineSimilarity(a: number[], b: number[]): number;
 export declare function expandVagueQuery(query: string, session?: SessionState): string;
+export declare function reciprocalRankFusion(rankedLists: string[][], k?: number): Map<string, number>;
 export declare function deduplicateResults(ranked: ScoredResult[]): ScoredResult[];
 export declare function mmrReorder(ranked: ScoredResult[], lambda?: number): ScoredResult[];
 export interface GraphTransformParams {
