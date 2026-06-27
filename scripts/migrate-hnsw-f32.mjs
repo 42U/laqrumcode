@@ -48,7 +48,7 @@ console.error(`[hnsw-f32] ${CFG.url} ns=${CFG.ns} db=${CFG.db}${CFG.dryRun ? " (
 
 const report = [];
 for (const [idx, table] of INDEXES) {
-  const ddl = `DEFINE INDEX OVERWRITE ${idx} ON ${table} FIELDS embedding HNSW DIMENSION 1024 DIST COSINE TYPE F32`;
+  const ddl = `DEFINE INDEX OVERWRITE ${idx} ON ${table} FIELDS embedding HNSW DIMENSION 1024 DIST COSINE TYPE F32 EFC 200 M 16`;
   if (CFG.dryRun) { console.log(`DRY: ${ddl}`); report.push({ idx, table, ms: 0, ok: true, dry: true }); continue; }
   const t0 = Date.now();
   try { await s.query(ddl); const ms = Date.now() - t0; console.log(`rebuilt ${idx} (${table}) in ${ms}ms`); report.push({ idx, table, ms, ok: true }); }

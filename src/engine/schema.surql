@@ -56,7 +56,11 @@ DEFINE FIELD IF NOT EXISTS embedding_target_truncated ON artifact TYPE option<bo
 -- get this for free; EXISTING installs keep their F64 indexes until a one-time
 -- `DEFINE INDEX OVERWRITE` rebuild (these `IF NOT EXISTS` defs no-op once the
 -- index exists). See scripts/migrate-hnsw-f32.mjs.
-DEFINE INDEX IF NOT EXISTS artifact_vec_idx ON artifact FIELDS embedding HNSW DIMENSION 1024 DIST COSINE TYPE F32;
+-- They also pin EFC 200 M 16 (vs SurrealDB defaults EFC 150 / M 12) — the
+-- conservative low end of the SOTA high-recall HNSW range; recall is monotonic
+-- in M and the extra graph RAM is more than offset by the F32 halving. Tune
+-- higher (M 24-48 / EFC 300) only with a recall benchmark.
+DEFINE INDEX IF NOT EXISTS artifact_vec_idx ON artifact FIELDS embedding HNSW DIMENSION 1024 DIST COSINE TYPE F32 EFC 200 M 16;
 DEFINE INDEX IF NOT EXISTS artifact_type_idx ON artifact FIELDS type;
 
 -- ============================================================
@@ -97,7 +101,7 @@ DEFINE FIELD IF NOT EXISTS last_accessed ON concept TYPE option<datetime>;
 -- (option<string>, only written when it differs from content) so the heal path
 -- reproduces it. Plain optional field, no index. IF NOT EXISTS per file convention.
 DEFINE FIELD IF NOT EXISTS embedding_target ON concept TYPE option<string>;
-DEFINE INDEX IF NOT EXISTS concept_vec_idx ON concept FIELDS embedding HNSW DIMENSION 1024 DIST COSINE TYPE F32;
+DEFINE INDEX IF NOT EXISTS concept_vec_idx ON concept FIELDS embedding HNSW DIMENSION 1024 DIST COSINE TYPE F32 EFC 200 M 16;
 -- tags index (K4): tagBoostedConcepts filters `tags CONTAINSANY $tags` then
 -- scores the survivors by cosine. Without this index the CONTAINSANY predicate
 -- is a full concept-table scan AND cosine runs over every row the WHERE admits;
@@ -127,7 +131,7 @@ DEFINE FIELD IF NOT EXISTS token_count ON turn TYPE option<int>;
 DEFINE FIELD IF NOT EXISTS tool_name ON turn TYPE option<string>;
 DEFINE FIELD IF NOT EXISTS model ON turn TYPE option<string>;
 DEFINE FIELD IF NOT EXISTS usage ON turn TYPE option<object>;
-DEFINE INDEX IF NOT EXISTS turn_vec_idx ON turn FIELDS embedding HNSW DIMENSION 1024 DIST COSINE TYPE F32;
+DEFINE INDEX IF NOT EXISTS turn_vec_idx ON turn FIELDS embedding HNSW DIMENSION 1024 DIST COSINE TYPE F32 EFC 200 M 16;
 DEFINE INDEX IF NOT EXISTS turn_session_idx ON turn FIELDS session_id;
 -- turn.timestamp is filtered by archiveOldTurns at src/engine/surreal.ts:~1774
 -- (`SELECT id FROM turn WHERE timestamp < time::now() - 7d AND id NOT IN ...`).
@@ -168,7 +172,7 @@ DEFINE FIELD IF NOT EXISTS embedding_target_truncated ON identity_chunk TYPE opt
 -- shows it and the UNIQUE index sees a typed column rather than inferring
 -- per-row from SCHEMALESS writes.
 DEFINE FIELD IF NOT EXISTS identity_version ON identity_chunk TYPE option<string>;
-DEFINE INDEX IF NOT EXISTS identity_vec_idx ON identity_chunk FIELDS embedding HNSW DIMENSION 1024 DIST COSINE TYPE F32;
+DEFINE INDEX IF NOT EXISTS identity_vec_idx ON identity_chunk FIELDS embedding HNSW DIMENSION 1024 DIST COSINE TYPE F32 EFC 200 M 16;
 
 -- Sessions (lightweight, links to task for 5-pillar integration)
 DEFINE TABLE IF NOT EXISTS session SCHEMALESS;
@@ -221,7 +225,7 @@ DEFINE FIELD IF NOT EXISTS embedding_target_truncated ON memory TYPE option<bool
 -- the create path would have used, preserving short-query match quality through
 -- the heal path. NONE means "embed text" (the common case).
 DEFINE FIELD IF NOT EXISTS embedding_target ON memory TYPE option<string>;
-DEFINE INDEX IF NOT EXISTS memory_vec_idx ON memory FIELDS embedding HNSW DIMENSION 1024 DIST COSINE TYPE F32;
+DEFINE INDEX IF NOT EXISTS memory_vec_idx ON memory FIELDS embedding HNSW DIMENSION 1024 DIST COSINE TYPE F32 EFC 200 M 16;
 DEFINE INDEX IF NOT EXISTS memory_category_idx ON memory FIELDS category;
 -- Status is filtered on every vectorSearch (line 417), getSessionRetrievedMemories
 -- (1786), getDueMemories (1823), getUnresolvedMemories (1257). Without this
@@ -549,7 +553,7 @@ DEFINE TABLE IF NOT EXISTS turn_archive SCHEMALESS;
 -- turn_archive is the largest vector table (grows forever as live turns are
 -- archived) and is searched every turn. Without this HNSW index the archive
 -- search was a full linear cosine scan (~1.2s at ~13K rows). Mirrors turn_vec_idx.
-DEFINE INDEX IF NOT EXISTS turn_archive_vec_idx ON turn_archive FIELDS embedding HNSW DIMENSION 1024 DIST COSINE TYPE F32;
+DEFINE INDEX IF NOT EXISTS turn_archive_vec_idx ON turn_archive FIELDS embedding HNSW DIMENSION 1024 DIST COSINE TYPE F32 EFC 200 M 16;
 -- E7 (retention): archiveOldTurns only RELOCATES rows here (INSERT INTO
 -- turn_archive + tag source) so this table grew FOREVER. purgeOldTurnArchive
 -- (maintenance.ts) keeps the newest ~100k oldest-first via gcHardDelete; the
@@ -608,7 +612,7 @@ DEFINE FIELD OVERWRITE active ON skill TYPE option<bool> DEFAULT true;
 DEFINE FIELD IF NOT EXISTS superseded_by ON skill TYPE option<record<skill>>;
 DEFINE FIELD IF NOT EXISTS last_used ON skill TYPE option<datetime>;
 DEFINE FIELD IF NOT EXISTS created_at ON skill TYPE datetime DEFAULT time::now();
-DEFINE INDEX IF NOT EXISTS skill_vec_idx ON skill FIELDS embedding HNSW DIMENSION 1024 DIST COSINE TYPE F32;
+DEFINE INDEX IF NOT EXISTS skill_vec_idx ON skill FIELDS embedding HNSW DIMENSION 1024 DIST COSINE TYPE F32 EFC 200 M 16;
 DEFINE INDEX IF NOT EXISTS skill_active_idx ON skill FIELDS active;
 
 DEFINE TABLE IF NOT EXISTS skill_from_task TYPE RELATION IN skill OUT task;
@@ -638,7 +642,7 @@ DEFINE FIELD IF NOT EXISTS archived_at ON reflection TYPE option<datetime>;
 DEFINE FIELD IF NOT EXISTS archive_reason ON reflection TYPE option<string>;
 DEFINE FIELD IF NOT EXISTS superseded_by ON reflection TYPE option<record<reflection>>;
 DEFINE FIELD IF NOT EXISTS embedding_target_truncated ON reflection TYPE option<bool>;
-DEFINE INDEX IF NOT EXISTS reflection_vec_idx ON reflection FIELDS embedding HNSW DIMENSION 1024 DIST COSINE TYPE F32;
+DEFINE INDEX IF NOT EXISTS reflection_vec_idx ON reflection FIELDS embedding HNSW DIMENSION 1024 DIST COSINE TYPE F32 EFC 200 M 16;
 -- session_id index: K18 targeted-membership and the soul/evolve "reflections
 -- since soul.updated_at" range scans filter reflection by session_id. Without
 -- it those were full table scans over a forever-growing table. session_id
@@ -747,7 +751,7 @@ DEFINE FIELD IF NOT EXISTS synced_hits ON monologue TYPE option<int>;
 DEFINE FIELD IF NOT EXISTS last_accessed ON monologue TYPE option<datetime>;
 DEFINE INDEX IF NOT EXISTS monologue_session ON monologue FIELDS session_id;
 DEFINE INDEX IF NOT EXISTS monologue_category ON monologue FIELDS category;
-DEFINE INDEX IF NOT EXISTS monologue_vec_idx ON monologue FIELDS embedding HNSW DIMENSION 1024 DIST COSINE TYPE F32;
+DEFINE INDEX IF NOT EXISTS monologue_vec_idx ON monologue FIELDS embedding HNSW DIMENSION 1024 DIST COSINE TYPE F32 EFC 200 M 16;
 -- timestamp index (K33): the soul_generate/soul_evolve fetch paths and the
 -- hasNewSoulExperience probe (pending-work.ts) sort/filter monologue by
 -- `timestamp` (ORDER BY timestamp DESC, WHERE timestamp > $since). Without it
