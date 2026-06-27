@@ -339,6 +339,27 @@ async function initializeStack() {
     // Called AFTER embeddings.initialize() so the deferred Group-3 sweep
     // starts its 30s clock from a ready embedder; self-guarded once-per-
     // process, so the session-start duplicate call no-ops.
+    // Dedicated maintenance connection — isolates heavy maintenance queries from
+    // the hook-serving socket so a maintenance deadline -> zombie -> reconnect can't
+    // reject in-flight hook queries (the architectural complement to the per-query
+    // TIMEOUT). Best-effort + idempotent schema apply; passes skipSupervisorRegister
+    // so it does NOT hijack the single supervisor-store singleton. On any failure,
+    // maintenance falls back to the shared store (no worse than before).
+    if (globalState && store.isAvailable()) {
+        try {
+            const maintenanceStore = new SurrealStore(config.surreal, { skipSupervisorRegister: true });
+            if (await maintenanceStore.initialize()) {
+                globalState.maintenanceStore = maintenanceStore;
+                log.info("[daemon] dedicated maintenance connection ready");
+            }
+            else {
+                await maintenanceStore.dispose().catch(() => { });
+            }
+        }
+        catch (e) {
+            log.warn(`[daemon] maintenance connection init failed (using shared store): ${e.message}`);
+        }
+    }
     runBootstrapMaintenance(globalState);
     // Cross-encoder reranker (bge-reranker-v2-m3). Optional — if the model file
     // doesn't exist OR LAQRUMCODE_RERANKER_DISABLED=1, recall falls back to

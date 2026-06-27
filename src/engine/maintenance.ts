@@ -159,7 +159,11 @@ export function runBootstrapMaintenance(state: GlobalPluginState): void {
   }
   bootstrapMaintenanceRan = true;
 
-  const { store, embeddings, config } = state;
+  const { embeddings, config } = state;
+  // Route heavy maintenance through the dedicated connection when available so a
+  // maintenance deadline/zombie-reconnect can't tear down the hook-serving socket;
+  // fall back to the shared store if it's absent or not ready.
+  const store = (state.maintenanceStore && state.maintenanceStore.isAvailable()) ? state.maintenanceStore : state.store;
   const deferMs = Number(process.env.LAQRUMCODE_MAINTENANCE_DEFER_MS) || 30_000;
 
   // One-time forward-migration of ACAN weights from ~/.laqrumbrain/ to cacheDir.

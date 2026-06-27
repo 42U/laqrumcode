@@ -278,7 +278,7 @@ export class SurrealStore {
      *  store. Set false on any runSchema throw; re-set true when a reconnect heals
      *  the schema apply (ensureConnected). */
     schemaApplied = false;
-    constructor(config) {
+    constructor(config, opts) {
         this.config = config;
         this.db = new Surreal();
         // C2: let the managed-SurrealDB supervisor (bootstrap.ts) surface a DEGRADED
@@ -286,8 +286,10 @@ export class SurrealStore {
         // memory_health RED). Registering from the constructor avoids any cross-module
         // daemon wiring; the supervisor only calls back when the managed child
         // crash-loops, and isAvailable()-gates the write. Last store constructed wins
-        // (the daemon builds exactly one for its lifetime).
-        registerSurrealSupervisorStore(this);
+        // (the PRIMARY store). The dedicated maintenance store passes
+        // skipSupervisorRegister so it does NOT hijack this single-store singleton.
+        if (!opts?.skipSupervisorRegister)
+            registerSurrealSupervisorStore(this);
     }
     /** K32: shared connect timeout for BOTH the first connect (initialize) and
      *  every reconnect (ensureConnected). A non-settling WS handshake at boot used

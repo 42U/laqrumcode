@@ -124,6 +124,11 @@ export type SessionRemovedCallback = (sessionId: string, surrealSessionId: strin
 export declare class GlobalPluginState {
     readonly config: MemoryConfig;
     readonly store: SurrealStore;
+    /** Optional dedicated connection for heavy maintenance jobs, isolating them
+     *  from the hook-serving `store` socket (a maintenance deadline/zombie-reconnect
+     *  cannot reject in-flight hook queries). Set by the daemon after boot; callers
+     *  fall back to `store` when it is absent or not yet available. */
+    maintenanceStore?: SurrealStore;
     readonly embeddings: EmbeddingService;
     workspaceDir?: string;
     schemaApplied: boolean;

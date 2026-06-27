@@ -100,7 +100,9 @@ export declare class SurrealStore {
      *  store. Set false on any runSchema throw; re-set true when a reconnect heals
      *  the schema apply (ensureConnected). */
     private schemaApplied;
-    constructor(config: SurrealConfig);
+    constructor(config: SurrealConfig, opts?: {
+        skipSupervisorRegister?: boolean;
+    });
     /** K32: shared connect timeout for BOTH the first connect (initialize) and
      *  every reconnect (ensureConnected). A non-settling WS handshake at boot used
      *  to hang initialize() forever — the daemon sat in "connecting" and never

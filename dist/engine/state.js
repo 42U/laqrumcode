@@ -146,6 +146,11 @@ export class SessionState {
 export class GlobalPluginState {
     config;
     store;
+    /** Optional dedicated connection for heavy maintenance jobs, isolating them
+     *  from the hook-serving `store` socket (a maintenance deadline/zombie-reconnect
+     *  cannot reject in-flight hook queries). Set by the daemon after boot; callers
+     *  fall back to `store` when it is absent or not yet available. */
+    maintenanceStore;
     embeddings;
     workspaceDir;
     schemaApplied = false;
@@ -420,6 +425,12 @@ export class GlobalPluginState {
     async shutdown() {
         this.sessions.clear();
         await this.embeddings.dispose();
+        if (this.maintenanceStore) {
+            try {
+                await this.maintenanceStore.dispose();
+            }
+            catch { /* best-effort */ }
+        }
         await this.store.dispose();
     }
 }
