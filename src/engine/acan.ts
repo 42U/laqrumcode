@@ -51,6 +51,10 @@ interface TrainingSample {
   importance: number;
   access_count: number;
   recency: number;
+  // The exact 6-element ACAN aux-feature vector captured at scoring time
+  // (recency, importance, access, neighborBonus, provenUtility, reflectionBoost),
+  // persisted on retrieval_outcome.aux_features for train/inference parity.
+  aux_features: number[];
 }
 
 interface TrainingConfig {
@@ -158,7 +162,7 @@ function loadWeights(path: string): ACANWeights | null {
   try {
     if (!existsSync(path)) return null;
     const raw = JSON.parse(readFileSync(path, "utf-8"));
-    if (raw.version !== 1) return null;
+    if (raw.version !== 2) return null;
     if (!Array.isArray(raw.W_q) || raw.W_q.length !== EMBED_DIM) return null;
     if (!Array.isArray(raw.W_k) || raw.W_k.length !== EMBED_DIM) return null;
     if (!Array.isArray(raw.W_final) || raw.W_final.length !== FEATURE_COUNT) return null;
@@ -316,7 +320,7 @@ async function getTrainingDataCount(store: SurrealStore): Promise<number> {
   if (!store.isAvailable()) return 0;
   try {
     const flat = await store.queryFirst<{ count: number }>(
-      `SELECT count() AS count FROM retrieval_outcome WHERE query_embedding != NONE GROUP ALL`,
+      `SELECT count() AS count FROM retrieval_outcome WHERE query_embedding != NONE AND aux_features != NONE GROUP ALL`,
     );
     return flat[0]?.count ?? 0;
   } catch (e) {
@@ -332,9 +336,9 @@ async function fetchTrainingData(store: SurrealStore): Promise<TrainingSample[]>
     `SELECT query_embedding, memory_id, memory_table,
             IF llm_relevance != NONE THEN llm_relevance ELSE utilization END AS utilization,
             retrieval_score, was_neighbor,
-            importance, access_count, recency, created_at
+            importance, access_count, recency, aux_features, created_at
      FROM retrieval_outcome
-     WHERE query_embedding != NONE
+     WHERE query_embedding != NONE AND aux_features != NONE
      ORDER BY created_at DESC
      LIMIT $maxSamples`,
     { maxSamples: MAX_TRAINING_SAMPLES },
@@ -372,6 +376,12 @@ async function fetchTrainingData(store: SurrealStore): Promise<TrainingSample[]>
   for (const row of outcomes) {
     const memEmb = embeddingMap.get(String(row.memory_id));
     if (!memEmb || !row.query_embedding) continue;
+    // Train/inference parity: require the exact 6-element aux-vector captured at
+    // scoring time (graph-context.ts). Rows from before this field existed are
+    // skipped — they carry the pre-parity feature semantics (hardcoded-zero
+    // provenUtility/reflectionBoost, mis-scaled access) and would re-teach the
+    // old skew. getTrainingDataCount mirrors the `aux_features != NONE` gate.
+    if (!Array.isArray(row.aux_features) || row.aux_features.length !== 6) continue;
     samples.push({
       query_embedding: row.query_embedding,
       memory_embedding: memEmb,
@@ -381,6 +391,7 @@ async function fetchTrainingData(store: SurrealStore): Promise<TrainingSample[]>
       importance: row.importance ?? 0.5,
       access_count: row.access_count ?? 0,
       recency: row.recency ?? 0.5,
+      aux_features: row.aux_features as number[],
     });
   }
   return samples;
@@ -410,7 +421,7 @@ export function trainInBackground(
     }
     function shuffle(arr) { for (let i = arr.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [arr[i], arr[j]] = [arr[j], arr[i]]; } return arr; }
     const n = samples.length;
-    const auxFeatures = samples.map(s => [s.recency, s.importance, s.access_count, s.was_neighbor ? 1.0 : 0.0, 0.0, 0.0]);
+    const auxFeatures = samples.map(s => s.aux_features);
     const indices = shuffle(Array.from({ length: n }, (_, i) => i));
     const valSize = Math.max(1, Math.floor(n * cfg.valSplit));
     const valIdx = indices.slice(0, valSize);
@@ -430,7 +441,7 @@ export function trainInBackground(
       if (epochsSinceLrDecay >= cfg.lrDecayPatience && lr > cfg.lrFloor) { lr = Math.max(lr*0.5, cfg.lrFloor); epochsSinceLrDecay = 0; }
       if (epochsSinceImprovement >= cfg.earlyStopPatience) break;
     }
-    parentPort.postMessage({ weights: { W_q, W_k, W_final, bias, version: 1, trainedAt: Date.now(), trainedOnSamples: n }, trainLoss: lastTrainLoss, valLoss: bestValLoss, actualEpochs, finalLr: lr, config: cfg });
+    parentPort.postMessage({ weights: { W_q, W_k, W_final, bias, version: 2, trainedAt: Date.now(), trainedOnSamples: n }, trainLoss: lastTrainLoss, valLoss: bestValLoss, actualEpochs, finalLr: lr, config: cfg });
   `;
 
   // K34: the embedding floats dominate the payload — MAX_TRAINING_SAMPLES
@@ -466,6 +477,7 @@ export function trainInBackground(
       importance: s.importance,
       access_count: s.access_count,
       recency: s.recency,
+      aux_features: s.aux_features,
     };
   });
 

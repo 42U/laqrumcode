@@ -17,6 +17,7 @@ import type { GlobalPluginState } from "./state.js";
 export type RetrievedItem = VectorSearchResult & {
     finalScore?: number;
     fromNeighbor?: boolean;
+    acanFeatures?: number[];
 };
 export type ItemPurpose = "knowledge" | "behavioral" | "context";
 export declare function classifyItem(item: RetrievedItem): ItemPurpose;

@@ -233,6 +233,12 @@ async function evaluateRetrievalInner(sessionId, responseTurnId, responseText, s
             access_count: Math.min((item.accessCount ?? 0) / 50, 1),
             recency: signals.recency,
         };
+        // ACAN train/inference parity: persist the exact aux-feature vector the
+        // scorer used for this item (graph-context.ts acanAuxVector). Only present
+        // when the item went through ACAN/WMR scoring with a valid 6-vector.
+        if (Array.isArray(item.acanFeatures) && item.acanFeatures.length === 6) {
+            record.aux_features = item.acanFeatures;
+        }
         if (signals.toolSuccess != null) {
             record.tool_success = signals.toolSuccess;
         }

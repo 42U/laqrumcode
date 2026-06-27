@@ -593,6 +593,10 @@ export interface ContextStats {
 interface ScoredResult extends VectorSearchResult {
   finalScore: number;
   fromNeighbor?: boolean;
+  // The exact ACAN aux-feature vector used to score this item (acanAuxVector),
+  // carried to stageRetrieval -> retrieval_outcome.aux_features for ACAN
+  // train/inference parity. Set in both the ACAN and WMR scoring paths.
+  acanFeatures?: number[];
 }
 
 // ── Helper functions ───────────────────────────────────────────────────────────
@@ -716,6 +720,30 @@ export function formatRelativeTime(ts: string): string {
 
 function accessBoost(accessCount: number | undefined): number {
   return Math.log1p(accessCount ?? 0);
+}
+
+/** The exact 6-element ACAN aux-feature vector — [recency, importance, access,
+ *  neighborBonus, provenUtility, reflectionBoost] — as the ACAN inference path
+ *  computes it. Captured per scored item (in BOTH the ACAN and WMR paths) and
+ *  persisted to retrieval_outcome.aux_features so ACAN trains on the identical
+ *  features it scores with (acan.ts), eliminating the train/inference skew. It
+ *  is emitted on the WMR fallback too, so aux_features rows keep accumulating
+ *  while ACAN is inactive (e.g. across a weights-version retrain) — otherwise
+ *  ACAN could never gather the data to reactivate. */
+function acanAuxVector(
+  r: { timestamp?: string; importance?: number; accessCount?: number; id: string; sessionId?: string },
+  neighborIds: Set<string>,
+  utilityMap: Map<string, number>,
+  reflectedSessions: Set<string>,
+): number[] {
+  return [
+    recencyScore(r.timestamp),
+    (r.importance ?? 0.5) / 10,
+    Math.min(accessBoost(r.accessCount), 1),
+    neighborIds.has(r.id) ? 1.0 : 0,
+    utilityMap.get(r.id) ?? 0,
+    r.sessionId ? (reflectedSessions.has(r.sessionId) ? 1.0 : 0) : 0,
+  ];
 }
 
 /** 0.7.121: fold un-synced access_stats deltas into candidates' accessCount
@@ -908,20 +936,23 @@ async function scoreResults(
 
   // ACAN path
   if (isACANActive() && queryEmbedding && preFiltered.length > 0 && preFiltered.every((r) => r.embedding)) {
-    const candidates: ACANCandidate[] = preFiltered.map((r) => ({
+    // Derive the candidate aux features AND the persisted aux vector from the
+    // same source so ACAN scores and trains on identical values (parity).
+    const auxVecs = preFiltered.map((r) => acanAuxVector(r, neighborIds, utilityMap, reflectedSessions));
+    const candidates: ACANCandidate[] = preFiltered.map((r, i) => ({
       embedding: r.embedding!,
-      recency: recencyScore(r.timestamp),
-      importance: (r.importance ?? 0.5) / 10,
-      access: Math.min(accessBoost(r.accessCount), 1),
-      neighborBonus: neighborIds.has(r.id) ? 1.0 : 0,
-      provenUtility: utilityMap.get(r.id) ?? 0,
-      reflectionBoost: r.sessionId ? (reflectedSessions.has(r.sessionId) ? 1.0 : 0) : 0,
+      recency: auxVecs[i][0],
+      importance: auxVecs[i][1],
+      access: auxVecs[i][2],
+      neighborBonus: auxVecs[i][3],
+      provenUtility: auxVecs[i][4],
+      reflectionBoost: auxVecs[i][5],
     }));
     try {
       const scores = scoreWithACAN(queryEmbedding, candidates);
       if (scores.length === preFiltered.length && scores.every((s) => isFinite(s))) {
         return preFiltered
-          .map((r, i) => ({ ...r, finalScore: scores[i], fromNeighbor: neighborIds.has(r.id) }))
+          .map((r, i) => ({ ...r, finalScore: scores[i], fromNeighbor: neighborIds.has(r.id), acanFeatures: auxVecs[i] }))
           .filter((r) => r.finalScore >= floor)
           .sort((a, b) => b.finalScore - a.finalScore);
       }
@@ -948,7 +979,7 @@ async function scoreResults(
         0.02 * access + 0.10 * neighborBonus + 0.18 * provenUtility +
         0.10 * reflectionBoost - utilityPenalty;
 
-      return { ...r, finalScore, fromNeighbor: neighborIds.has(r.id) };
+      return { ...r, finalScore, fromNeighbor: neighborIds.has(r.id), acanFeatures: acanAuxVector(r, neighborIds, utilityMap, reflectedSessions) };
     })
     .filter((r) => r.finalScore >= floor)
     .sort((a, b) => b.finalScore - a.finalScore);

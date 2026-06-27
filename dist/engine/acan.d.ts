@@ -35,6 +35,7 @@ interface TrainingSample {
     importance: number;
     access_count: number;
     recency: number;
+    aux_features: number[];
 }
 interface TrainingConfig {
     epochs: number;

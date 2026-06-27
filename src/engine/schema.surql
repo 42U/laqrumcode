@@ -369,6 +369,11 @@ DEFINE FIELD IF NOT EXISTS tool_success ON retrieval_outcome TYPE option<bool>;
 DEFINE FIELD IF NOT EXISTS context_tokens ON retrieval_outcome TYPE int DEFAULT 0;
 DEFINE FIELD IF NOT EXISTS was_neighbor ON retrieval_outcome TYPE bool DEFAULT false;
 DEFINE FIELD IF NOT EXISTS query_embedding ON retrieval_outcome TYPE option<array<float>>;
+-- ACAN train/inference parity (acan.ts): the exact 6-element aux-feature vector
+-- the scorer used at injection time (graph-context.ts acanAuxVector). Training
+-- consumes only rows where this is set, so it learns on the identical features
+-- it scores with. Rows predating this field are skipped (pre-parity semantics).
+DEFINE FIELD IF NOT EXISTS aux_features ON retrieval_outcome TYPE option<array<float>>;
 DEFINE FIELD IF NOT EXISTS llm_relevance ON retrieval_outcome TYPE option<float>;
 -- Explicit feedback (GH #16-5): set by record_retrieval_feedback. ACAN training
 -- already prefers llm_relevance over utilization; this records the signal source.
