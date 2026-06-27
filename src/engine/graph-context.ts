@@ -530,6 +530,10 @@ const MIN_COSINE = 0.25; // Minimum cosine similarity to consider a result
 // Deduplication thresholds
 const DEDUP_COSINE_THRESHOLD = 0.88;
 const DEDUP_JACCARD_THRESHOLD = 0.80;
+// MMR (Maximal Marginal Relevance) diversification of the injected set. λ weights
+// relevance vs. diversity in argmax(λ·finalScore − (1−λ)·maxCosineToPicked).
+// 0.7 keeps relevance dominant (mild diversification).
+const MMR_LAMBDA = 0.7;
 
 // Recency decay
 const RECENCY_DECAY_FAST = 0.99;
@@ -1014,6 +1018,43 @@ export function deduplicateResults(ranked: ScoredResult[]): ScoredResult[] {
     if (!isDup) { kept.push(item); keptIndexes.push(i); }
   }
   return kept;
+}
+
+// ── MMR diversification ────────────────────────────────────────────────────────
+// Greedy Maximal Marginal Relevance over the selection-eligible items: at each
+// step pick argmax(λ·finalScore − (1−λ)·maxCosineToAlreadyPicked), so a redundant
+// concept-family can't crowd out coverage in the injected set. Only reorders items
+// at/above MIN_RELEVANCE_SCORE (keeping takeWithConstraints' floor-break correct);
+// below-floor items keep their original order, appended after. Items without an
+// embedding incur no diversity penalty. Input is already small (<= rerank top-N).
+export function mmrReorder(ranked: ScoredResult[], lambda: number = MMR_LAMBDA): ScoredResult[] {
+  const eligible = ranked.filter((r) => (r.finalScore ?? 0) >= MIN_RELEVANCE_SCORE);
+  if (eligible.length <= 2) return ranked;
+  const rest = ranked.filter((r) => (r.finalScore ?? 0) < MIN_RELEVANCE_SCORE);
+  const pool = [...eligible];
+  const picked: ScoredResult[] = [];
+  while (pool.length > 0) {
+    let bestIdx = 0;
+    let bestMmr = -Infinity;
+    for (let i = 0; i < pool.length; i++) {
+      const cand = pool[i];
+      const rel = cand.finalScore ?? 0;
+      let maxSim = 0;
+      if (cand.embedding?.length) {
+        for (const p of picked) {
+          if (p.embedding && p.embedding.length === cand.embedding.length) {
+            const sim = cosineSimilarity(cand.embedding, p.embedding);
+            if (sim > maxSim) maxSim = sim;
+          }
+        }
+      }
+      const mmr = lambda * rel - (1 - lambda) * maxSim;
+      if (mmr > bestMmr) { bestMmr = mmr; bestIdx = i; }
+    }
+    picked.push(pool[bestIdx]);
+    pool.splice(bestIdx, 1);
+  }
+  return [...picked, ...rest];
 }
 
 // ── Token-budget constrained selection ─────────────────────────────────────────
@@ -1884,7 +1925,8 @@ async function graphTransformInner(
       checkAbort(); // K6-gc: don't burn the CPU-bound cross-encoder post-deadline
       const reranked = await rerankResults(deduped, queryText);
       applyDistributionBands(reranked);
-      let contextNodes = takeWithConstraints(reranked, tokenBudget, budgets.maxContextItems);
+      const diversified = mmrReorder(reranked);
+      let contextNodes = takeWithConstraints(diversified, tokenBudget, budgets.maxContextItems);
       contextNodes = await ensureRecentTurns(contextNodes, session, store);
 
       if (contextNodes.length > 0) {

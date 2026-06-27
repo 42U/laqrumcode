@@ -104,6 +104,7 @@ export declare function formatRelativeTime(ts: string): string;
 export declare function cosineSimilarity(a: number[], b: number[]): number;
 export declare function expandVagueQuery(query: string, session?: SessionState): string;
 export declare function deduplicateResults(ranked: ScoredResult[]): ScoredResult[];
+export declare function mmrReorder(ranked: ScoredResult[], lambda?: number): ScoredResult[];
 export interface GraphTransformParams {
     messages: AgentMessage[];
     session: SessionState;
