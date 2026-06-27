@@ -891,6 +891,13 @@ async function spawnHeadlessDrainer(
         // stored untrusted data. A hard --disallowed-tools deny removes the
         // dangerous primitives regardless of how --agent resolves.
         "--disallowed-tools", "Bash,BashOutput,KillShell,Write,Edit,NotebookEdit,WebFetch,WebSearch,Task",
+        // `--` terminates option parsing. Without it the variadic --disallowed-tools
+        // above swallows DRAIN_PROMPT as extra "tool names" (every word becomes a
+        // bogus deny rule), leaving --print with NO prompt → "Input must be provided
+        // … when using --print" → the extractor exits 1 in ~6s with zero queue
+        // progress (the chronic fast-failure that flips autoDrain RED). Verified
+        // against claude 2.1.195. Keep `--` between the last option and the prompt.
+        "--",
         DRAIN_PROMPT,
       ],
       {
