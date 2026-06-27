@@ -2,6 +2,21 @@
 
 All notable changes to LaqrumCode are documented here. The 0.7.x series introduced the daemon-split architecture; 0.8.0 will be the first marketplace-ready stable.
 
+## [0.8.4] - 2026-06-27
+
+The dense+sparse hybrid retrieval arm — and the correction of an earlier wrong "infeasible" call.
+
+### Added
+- **Hybrid dense+sparse retrieval (BM25 full-text + 3-way RRF).** A lexical/sparse arm now joins the dense vector arm and the keyword/tag arm in the injection pipeline. `schema.surql` defines a `fts_analyzer` (blank/class/camel/punct tokenizers + snowball English stemming) and FULLTEXT BM25 indexes on `concept.content`, `turn.text`, `memory.text`, `artifact.description`, `skill.description`. `SurrealStore.fulltextSearch()` runs a per-term `@n@` OR query (recall) ranked by summed `search::score`, unioned into the candidate pool and folded into the graph-seed Reciprocal Rank Fusion. This adds recall of exact-term / rare-token / code-identifier rows the dense embedding misses entirely. (BGE-M3's sparse heads aren't reachable via node-llama-cpp, so the sparse arm is SurrealDB-native BM25 — no model sparse head needed.)
+- **Offline retrieval benchmark** (`scripts/retrieval-benchmark.mjs`) — NDCG/MRR/Recall over the labeled `retrieval_outcome` table, to gate ranker changes with a number instead of a guess.
+- **`scripts/drop-test-namespaces.sh`** — durable cleanup for the vitest temp namespaces (`kctest_*`) that accumulate on the local SurrealDB instance.
+
+### Changed
+- **Managed SurrealDB binary pinned 3.0.5 → 3.1.4** (`bin-manifest.json`) — aligns fresh installs with the version everything is tested against. Deliberately *not* 3.1.5: issue #7383 is a 3.1.5-specific RocksDB OOM under full-text load that would regress the new hybrid. All 5 per-platform sha256 from the GitHub release digests; linux-x64 download-verified.
+
+### Notes
+- SurrealDB 3.x full-text BM25 uses `FULLTEXT ANALYZER` (renamed from 2.x `SEARCH ANALYZER` in 3.0.0-beta). `search::score` returns 0 on a near-empty index (#7290 fresh-DB corpus-stats edge) but is correct at real scale — `fulltextSearch()` falls back to a term-frequency rank for the empty-index case. `skill` indexes `description`, not `body` (full skill bodies are large enough to stall the FULLTEXT build / schema-apply).
+
 ## [0.8.3] - 2026-06-27
 
 A SOTA-retrieval optimization pass: deliberate `recall()` and passive injection now share the full ranking stack, the injected set is diversity- and hybrid-fusion-aware, the learned scorer trains on the right signal with hard-negative emphasis, and heavy maintenance can no longer stall hook serving.
