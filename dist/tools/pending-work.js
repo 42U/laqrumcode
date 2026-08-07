@@ -698,7 +698,7 @@ async function buildWorkPayload(item, state) {
                     new_causal_chains: causalChains.map(c => c.description),
                     new_monologues: monologues.map(m => m.content),
                 },
-                output_format: "Return JSON with ONLY changed fields from the soul schema. Return {} if nothing changed.",
+                output_format: "Return JSON with ONLY changed fields from the soul schema. Return {} if nothing changed. Schema: " + JSON.stringify(soulSchema),
             };
         }
         default: {
@@ -1140,10 +1140,10 @@ async function commitResults(item, results, state) {
                     adopted_at: now,
                 })).filter((d) => d.dimension),
                 self_observations: (changes.self_observations ?? []).filter((s) => typeof s === "string"),
-                earned_values: (changes.earned_values ?? []).map((v) => ({
-                    value: String(v.value ?? v.name ?? ""),
-                    grounded_in: String(v.grounded_in ?? v.evidence ?? v.description ?? ""),
-                })).filter((v) => v.value),
+                // agents sometimes return bare strings despite the schema
+                earned_values: (changes.earned_values ?? []).map((v) => typeof v === "string"
+                    ? { value: v, grounded_in: "" }
+                    : { value: String(v.value ?? v.name ?? ""), grounded_in: String(v.grounded_in ?? v.evidence ?? v.description ?? "") }).filter((v) => v.value),
             };
             let revised = 0;
             for (const section of ["working_style", "emotional_dimensions", "self_observations", "earned_values"]) {
